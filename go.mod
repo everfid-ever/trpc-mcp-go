@@ -1,16 +1,25 @@
 module trpc.group/trpc-go/trpc-mcp-go
 
-go 1.22.5
+go 1.23.0
+
+toolchain go1.24.4
 
 require (
 	github.com/getkin/kin-openapi v0.132.0
+	github.com/go-redis/redis/v8 v8.11.5
+	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/google/uuid v1.6.0
+	github.com/lib/pq v1.10.9
 	github.com/stretchr/testify v1.10.0
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	go.uber.org/zap v1.27.0
+	golang.org/x/sync v0.16.0
 )
 
 require (
+	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/go-openapi/jsonpointer v0.21.1 // indirect
 	github.com/go-openapi/swag v0.23.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
