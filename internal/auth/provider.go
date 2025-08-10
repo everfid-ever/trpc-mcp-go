@@ -3,8 +3,12 @@ package auth
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/json"
+	stdErr "errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -136,7 +140,7 @@ type ServerMetadata struct {
 
 // TokenManager 令牌管理器 - 负责 JWT 生成和验证
 type TokenManager struct {
-	// 使用 RSA 私钥而不是字节数组
+	// RSA 密钥对
 	privateKey      *rsa.PrivateKey
 	publicKey       *rsa.PublicKey
 	signingMethod   jwt.SigningMethod
@@ -153,13 +157,14 @@ type TokenManager struct {
 
 // RefreshTokenInfo 刷新令牌信息
 type RefreshTokenInfo struct {
-	TokenID   string    `json:"token_id"`
-	UserID    string    `json:"user_id"`
-	ClientID  string    `json:"client_id"`
-	Scopes    []string  `json:"scopes"`
-	ExpiresAt time.Time `json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
-	Used      bool      `json:"used"`
+	RefreshToken  string    `json:"refresh_token_id"`
+	AccessTokenID string    `json:"access_token_id"`
+	UserID        string    `json:"user_id"`
+	ClientID      string    `json:"client_id"`
+	Scopes        []string  `json:"scopes"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	CreatedAt     time.Time `json:"created_at"`
+	Used          bool      `json:"used"`
 }
 
 // NewTokenManager 创建令牌管理器
@@ -177,8 +182,8 @@ func NewTokenManager(issuer string, signingKey []byte) *TokenManager {
 		tm.signingKey = signingKey
 		tm.signingMethod = jwt.SigningMethodHS256
 	} else {
-		// 如果没有提供HMAC密钥，默认使用RSA
-		tm.signingMethod = jwt.SigningMethodRS256
+		// 不默认设为 RS256，必须调用 SetRSAKeys 或 SetHMAC 来配置签名方法
+		tm.signingMethod = nil
 	}
 
 	return tm
@@ -195,6 +200,10 @@ func (tm *TokenManager) SetRSAKeys(privateKey *rsa.PrivateKey) {
 
 // GenerateAccessToken 生成访问令牌
 func (tm *TokenManager) GenerateAccessToken(userID, clientID string, scopes []string) (*TokenResponse, error) {
+	if tm.signingMethod == nil {
+		return nil, fmt.Errorf("signing method not configured")
+	}
+
 	now := time.Now()
 	tokenID := uuid.New().String()
 
@@ -218,15 +227,20 @@ func (tm *TokenManager) GenerateAccessToken(userID, clientID string, scopes []st
 	var tokenString string
 	var err error
 
-	// 根据签名方法选择密钥
-	if tm.signingMethod == jwt.SigningMethodRS256 {
+	// 根据签名方法选择密钥并签名
+	switch tm.signingMethod {
+	case jwt.SigningMethodRS256:
 		if tm.privateKey == nil {
-			return nil, fmt.Errorf("RSA private key not set")
+			return nil, fmt.Errorf("RSA key not configured")
 		}
 		tokenString, err = token.SignedString(tm.privateKey)
-	} else {
-		// HMAC 模式 - 不太推荐用于生产环境
-		return nil, fmt.Errorf("HMAC signing not supported in this context")
+	case jwt.SigningMethodHS256:
+		if tm.signingKey == nil {
+			return nil, fmt.Errorf("HMAC signing key not configured")
+		}
+		tokenString, err = token.SignedString(tm.signingKey)
+	default:
+		return nil, fmt.Errorf("unsupported signing method: %s", tm.signingMethod)
 	}
 
 	if err != nil {
@@ -236,13 +250,14 @@ func (tm *TokenManager) GenerateAccessToken(userID, clientID string, scopes []st
 	// 创建刷新令牌
 	refreshTokenID := uuid.New().String()
 	refreshTokenInfo := &RefreshTokenInfo{
-		TokenID:   refreshTokenID,
-		UserID:    userID,
-		ClientID:  clientID,
-		Scopes:    scopes,
-		ExpiresAt: now.Add(tm.RefreshTokenTTL),
-		CreatedAt: now,
-		Used:      false,
+		RefreshToken:  refreshTokenID,
+		AccessTokenID: tokenID,
+		UserID:        userID,
+		ClientID:      clientID,
+		Scopes:        scopes,
+		ExpiresAt:     now.Add(tm.RefreshTokenTTL),
+		CreatedAt:     now,
+		Used:          false,
 	}
 
 	// 存储令牌信息
@@ -277,19 +292,15 @@ func (tm *TokenManager) GenerateAccessToken(userID, clientID string, scopes []st
 
 // ValidateAccessToken 验证访问令牌
 func (tm *TokenManager) ValidateAccessToken(tokenString string) (*TokenInfo, error) {
-	// 解析 JWT
+	if tokenString == "" {
+		return nil, errors.ErrInvalidToken
+	}
+
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// 验证签名方法 - 修复：支持RSA和HMAC
 		switch token.Method.(type) {
 		case *jwt.SigningMethodRSA:
-			if tm.publicKey == nil {
-				return nil, fmt.Errorf("RSA public key not set")
-			}
 			return tm.publicKey, nil
 		case *jwt.SigningMethodHMAC:
-			if tm.signingKey == nil {
-				return nil, fmt.Errorf("HMAC signing key not set")
-			}
 			return tm.signingKey, nil
 		default:
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -297,11 +308,14 @@ func (tm *TokenManager) ValidateAccessToken(tokenString string) (*TokenInfo, err
 	})
 
 	if err != nil {
-		// 检查是否是过期错误 - 这是关键修复
-		if strings.Contains(err.Error(), "token is expired") {
+		if stdErr.Is(err, jwt.ErrTokenExpired) {
 			return nil, errors.ErrExpiredToken
 		}
-		return nil, &errors.AuthError{Code: "invalid_token", Description: err.Error(), HTTPStatus: 401}
+		return nil, &errors.AuthError{
+			Code:        "invalid_token",
+			Description: err.Error(),
+			HTTPStatus:  401,
+		}
 	}
 
 	if !token.Valid {
@@ -313,49 +327,145 @@ func (tm *TokenManager) ValidateAccessToken(tokenString string) (*TokenInfo, err
 		return nil, errors.ErrInvalidToken
 	}
 
-	// 提取 token ID
-	tokenID, ok := claims["jti"].(string)
-	if !ok {
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
 		return nil, errors.ErrInvalidToken
 	}
 
-	// 检查令牌是否在存储中且未被撤销
 	tm.mu.RLock()
-	tokenInfo, exists := tm.accessTokens[tokenID]
+	stored, exists := tm.accessTokens[jti]
 	tm.mu.RUnlock()
-
 	if !exists {
 		return nil, errors.ErrInvalidToken
 	}
 
-	// 检查过期时间 - 双重检查
-	if time.Now().After(tokenInfo.ExpiresAt) {
+	// 双重校验过期时间
+	if expRaw, has := claims["exp"]; has {
+		switch v := expRaw.(type) {
+		case float64:
+			if time.Now().After(time.Unix(int64(v), 0)) {
+				tm.mu.Lock()
+				delete(tm.accessTokens, jti)
+				tm.mu.Unlock()
+				return nil, errors.ErrExpiredToken
+			}
+		case json.Number:
+			if i, e := v.Int64(); e == nil && time.Now().After(time.Unix(i, 0)) {
+				tm.mu.Lock()
+				delete(tm.accessTokens, jti)
+				tm.mu.Unlock()
+				return nil, errors.ErrExpiredToken
+			}
+		case int64:
+			if time.Now().After(time.Unix(v, 0)) {
+				tm.mu.Lock()
+				delete(tm.accessTokens, jti)
+				tm.mu.Unlock()
+				return nil, errors.ErrExpiredToken
+			}
+		case string:
+			if i, e := strconv.ParseInt(v, 10, 64); e == nil {
+				if time.Now().After(time.Unix(i, 0)) {
+					tm.mu.Lock()
+					delete(tm.accessTokens, jti)
+					tm.mu.Unlock()
+					return nil, errors.ErrExpiredToken
+				}
+			}
+		default:
+		}
+	} else if time.Now().After(stored.ExpiresAt) {
 		tm.mu.Lock()
-		delete(tm.accessTokens, tokenID)
+		delete(tm.accessTokens, jti)
 		tm.mu.Unlock()
 		return nil, errors.ErrExpiredToken
 	}
 
-	return tokenInfo, nil
+	return stored, nil
 }
 
-// RevokeToken 撤销令牌
-func (tm *TokenManager) RevokeToken(tokenID string) error {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	// 删除访问令牌
-	delete(tm.accessTokens, tokenID)
-
-	// 删除相关的刷新令牌
-	for refreshID, refreshInfo := range tm.refreshTokens {
-		if refreshInfo.TokenID == tokenID {
-			delete(tm.refreshTokens, refreshID)
-			break
+// ValidateAccessTokenFromRequest OAuth 2.1 兼容的令牌验证
+func (tm *TokenManager) ValidateAccessTokenFromRequest(r *http.Request) (*TokenInfo, error) {
+	// OAuth 2.1: 禁止在查询字符串中使用 Bearer 令牌
+	if r.URL.Query().Get("access_token") != "" {
+		return nil, &errors.AuthError{
+			Code:        "invalid_request",
+			Description: "OAuth 2.1 prohibits access tokens in query parameters",
+			HTTPStatus:  400,
 		}
 	}
 
+	// 从 Authorization header 提取令牌
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			return tm.ValidateAccessToken(parts[1])
+		}
+	}
+
+	// 检查 POST 请求体中的令牌（仅限表单编码）
+	if r.Method == "POST" && strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		if err := r.ParseForm(); err == nil {
+			if token := r.Form.Get("access_token"); token != "" {
+				return tm.ValidateAccessToken(token)
+			}
+		}
+	}
+
+	return nil, &errors.AuthError{
+		Code:        "invalid_request",
+		Description: "Missing or invalid access token",
+		HTTPStatus:  401,
+	}
+}
+
+// RevokeRawToken accepts a raw token string (JWT or refresh token) and revokes it
+func (tm *TokenManager) RevokeRawToken(raw string) error {
+	//RFC7009: If the token is empty or malformed,
+	//its existence should not be disclosed and nil should be returned directly.
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	// Try parse as JWT without requiring validation of claims (we only need jti)
+	parsed, _, err := new(jwt.Parser).ParseUnverified(raw, jwt.MapClaims{})
+	if err == nil && parsed != nil {
+		if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
+			if jti, ok := claims["jti"].(string); ok && jti != "" {
+				tm.mu.Lock()
+				delete(tm.accessTokens, jti)
+				// 同时删除关联的 refresh token
+				for rid, rinfo := range tm.refreshTokens {
+					if rinfo != nil && rinfo.AccessTokenID == jti {
+						delete(tm.refreshTokens, rid)
+					}
+				}
+				tm.mu.Unlock()
+				return nil
+			}
+		}
+	}
+
+	//If it cannot be parsed as a JWT, then the raw is treated as the refresh token id
+	tm.mu.Lock()
+	if rinfo, exists := tm.refreshTokens[raw]; exists {
+		// Delete refresh token
+		delete(tm.refreshTokens, raw)
+		// Delete the associated access token
+		if rinfo.AccessTokenID != "" {
+			delete(tm.accessTokens, rinfo.AccessTokenID)
+		}
+	}
+	tm.mu.Unlock()
+
 	return nil
+}
+
+// 兼容旧名：保持 RevokeToken 方法但内部委托
+func (tm *TokenManager) RevokeToken(tokenID string) error {
+	// 后向兼容：允许传入 jti 或原始 token
+	return tm.RevokeRawToken(tokenID)
 }
 
 // DefaultAuthProvider 完整实现的认证提供者
@@ -633,12 +743,35 @@ func (p *DefaultAuthProvider) RefreshToken(ctx context.Context, refreshToken str
 	refreshInfo.Used = true
 	p.TokenManager.mu.Unlock()
 
+	// 在刷新前撤销旧的 access token
+	if refreshInfo.AccessTokenID != "" {
+		_ = p.TokenManager.refreshTokens[refreshInfo.AccessTokenID]
+	}
+
 	// 生成新的访问令牌
 	return p.TokenManager.GenerateAccessToken(
 		refreshInfo.UserID,
 		refreshInfo.ClientID,
 		refreshInfo.Scopes,
 	)
+}
+
+// RevokeAllTokensForClient 撤销该客户端的所有 access/refresh token
+func (tm *TokenManager) RevokeAllTokensForClient(clientID string) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	for tokenID, tokenInfo := range tm.accessTokens {
+		if tokenInfo.ClientID == clientID {
+			delete(tm.accessTokens, tokenID)
+		}
+	}
+	for tokenID, tokenInfo := range tm.refreshTokens {
+		if tokenInfo.ClientID == clientID {
+			delete(tm.refreshTokens, tokenID)
+		}
+	}
+	return nil
 }
 
 // RevokeToken 实现接口
@@ -689,8 +822,16 @@ func (tm *TokenManager) CleanupExpiredTokens() int {
 	//清理过期的访问令牌
 	for tokenID, tokenInfo := range tm.accessTokens {
 		if now.After(tokenInfo.ExpiresAt) {
+			// 删除 access token
 			delete(tm.accessTokens, tokenID)
 			cleanedCount++
+			// 同时删除与该 access token 关联的 refresh token
+			for rid, rinfo := range tm.refreshTokens {
+				if rinfo != nil && rinfo.AccessTokenID == tokenID {
+					delete(tm.refreshTokens, rid)
+					cleanedCount++
+				}
+			}
 		}
 	}
 
@@ -705,9 +846,18 @@ func (tm *TokenManager) CleanupExpiredTokens() int {
 	return cleanedCount
 }
 
-// GetPKCEManager 获取PKCE管理器（用于外部访问）
-func (p *DefaultAuthProvider) GetPKCEManager() *pkce.Manager {
-	return p.PkceManager
+func (p *DefaultAuthProvider) GetPKCEStats() *pkce.Stats {
+	if p.PkceManager == nil {
+		return nil
+	}
+	return p.PkceManager.GetStats() // 只暴露需要的信息
+}
+
+func (p *DefaultAuthProvider) CleanupExpiredPKCEChallenges() int {
+	if p.PkceManager == nil {
+		return 0
+	}
+	return p.PkceManager.CleanupExpiredChallenges()
 }
 
 // GeneratePKCEChallenge 生成PKCE挑战

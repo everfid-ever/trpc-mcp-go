@@ -35,6 +35,12 @@ type OAuthServerProvider struct {
 
 	// 并发安全
 	mu sync.RWMutex
+
+	// 共享的 AuthProvider（保持授权码/交换的一致性）
+	authProvider *DefaultAuthProvider
+
+	// registration token -> clientID 映射（用于 RFC7591 后续查询/更新）
+	registrationTokens map[string]string
 }
 
 // ServerConfig OAuth 服务器配置
@@ -42,6 +48,9 @@ type ServerConfig struct {
 	// 基础配置
 	Issuer  string `json:"issuer"`
 	BaseURL string `json:"base_url"`
+
+	OAuth21StrictMode     bool `json:"oauth21_strict_mode"`      // 是否启用 OAuth 2.1 严格模式
+	AllowQueryStringToken bool `json:"allow_query_string_token"` // OAuth 2.1 必须为 false
 
 	// 端点路径
 	AuthorizeEndpoint     string `json:"authorize_endpoint"`
@@ -375,6 +384,9 @@ func NewOAuthServerProvider(config *ServerConfig) (*OAuthServerProvider, error) 
 
 	// OAuth 2.1 强制要求
 	config.RequirePKCE = true
+	config.OAuth21StrictMode = true
+	config.AllowQueryStringToken = false // OAuth 2.1 要求
+
 	if len(config.AllowedGrantTypes) == 0 {
 		config.AllowedGrantTypes = []string{"authorization_code", "client_credentials", "refresh_token"}
 	}
@@ -403,7 +415,7 @@ func NewOAuthServerProvider(config *ServerConfig) (*OAuthServerProvider, error) 
 	clientStore := NewSimpleInMemoryClientStore()
 	keyManager := NewKeyManager(config.RSAPrivateKey)
 
-	// 修复：正确创建令牌管理器
+	// // 创建 tokenManager（若使用 RSA，请确保在 config.RSAPrivateKey 非 nil 时设置）
 	tokenManager := NewTokenManager(config.Issuer, nil)
 
 	// 设置 RSA 密钥（如果提供）
@@ -426,19 +438,32 @@ func NewOAuthServerProvider(config *ServerConfig) (*OAuthServerProvider, error) 
 
 	pkceManager := pkce.NewManager(pkceConfig)
 
-	server := &OAuthServerProvider{
-		config:       config,
-		clientStore:  clientStore,
-		tokenManager: tokenManager,
-		keyManager:   keyManager,
-		scopeManager: NewScopeManager(),
-		pkceManager:  pkceManager,
-		mux:          http.NewServeMux(),
-	}
+	authProv := NewDefaultAuthProvider(&AuthConfig{
+		ServerURL:       config.Issuer,
+		CodeTTL:         config.AuthCodeTTL,
+		AccessTokenTTL:  config.AccessTokenTTL,
+		RefreshTokenTTL: config.RefreshTokenTTL,
+		SigningKey:      nil, // tokenManager 已管理签名
+		PKCEConfig:      pkceConfig,
+	})
 
+	// 将 tokenManager 与 pkceManager 注入到 authProv（覆盖 NewDefaultAuthProvider 内部 map）
+	authProv.TokenManager = tokenManager
+	authProv.PkceManager = pkceManager
+
+	server := &OAuthServerProvider{
+		config:             config,
+		clientStore:        clientStore,
+		tokenManager:       tokenManager,
+		keyManager:         keyManager,
+		scopeManager:       NewScopeManager(),
+		pkceManager:        pkceManager,
+		mux:                http.NewServeMux(),
+		authProvider:       authProv,
+		registrationTokens: make(map[string]string),
+	}
 	// 注册路由
 	server.setupRoutes()
-
 	return server, nil
 }
 
@@ -605,47 +630,51 @@ func (s *OAuthServerProvider) handleToken(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// parseClientCredentials 支持 Authorization: Basic 和表单形式
+func (s *OAuthServerProvider) parseClientCredentials(r *http.Request) (clientID, clientSecret string) {
+	// Authorization: Basic base64(client_id:client_secret)
+	auth := r.Header.Get("Authorization")
+	if auth != "" {
+		parts := strings.SplitN(auth, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Basic") {
+			if decoded, err := base64.StdEncoding.DecodeString(parts[1]); err == nil {
+				cs := string(decoded)
+				if idx := strings.IndexByte(cs, ':'); idx >= 0 {
+					return cs[:idx], cs[idx+1:]
+				}
+			}
+		}
+	}
+
+	// fallback 到表单
+	_ = r.ParseForm()
+	return r.Form.Get("client_id"), r.Form.Get("client_secret")
+}
+
 // handleAuthorizationCodeGrant 处理授权码授权
 func (s *OAuthServerProvider) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 提取参数
-	code := r.Form.Get("code")
-	clientID := r.Form.Get("client_id")
-	clientSecret := r.Form.Get("client_secret")
-	redirectURI := r.Form.Get("redirect_uri")
-	codeVerifier := r.Form.Get("code_verifier")
+	// 解析客户端认证（支持 Basic 和 POST 两种）
+	clientID, clientSecret := s.parseClientCredentials(r)
+
+	code := r.FormValue("code")
+	redirectURI := r.FormValue("redirect_uri")
+	codeVerifier := r.FormValue("code_verifier")
 
 	if code == "" || clientID == "" || redirectURI == "" || codeVerifier == "" {
 		s.writeErrorResponse(w, errors.ErrInvalidRequest, "")
 		return
 	}
 
-	// 验证客户端凭证
-	_, err := s.clientStore.GetByCredentials(ctx, clientID, clientSecret)
-	if err != nil {
-		s.writeErrorResponse(w, errors.ErrInvalidClient, "")
-		return
-	}
-
-	// 交换授权码
 	tokenReq := &TokenRequest{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		RedirectURI:  redirectURI,
-		GrantType:    "authorization_code",
 		CodeVerifier: codeVerifier,
 	}
 
-	// 使用之前实现的 AuthProvider
-	authProvider := &DefaultAuthProvider{
-		Config:       &AuthConfig{ServerURL: s.config.Issuer},
-		TokenManager: s.tokenManager,
-		AuthCodes:    make(map[string]*AuthorizationCode),
-		PkceManager:  s.pkceManager,
-	}
-
-	tokenResp, err := authProvider.ExchangeToken(ctx, code, tokenReq)
+	tokenResp, err := s.authProvider.ExchangeToken(ctx, code, tokenReq)
 	if err != nil {
 		if authErr, ok := err.(*errors.AuthError); ok {
 			s.writeErrorResponse(w, authErr, "")
@@ -655,27 +684,37 @@ func (s *OAuthServerProvider) handleAuthorizationCodeGrant(w http.ResponseWriter
 		return
 	}
 
-	s.writeTokenResponse(w, tokenResp)
+	s.writeJSON(w, tokenResp)
 }
 
 // handleClientCredentialsGrant 处理客户端凭证授权
 func (s *OAuthServerProvider) handleClientCredentialsGrant(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 提取客户端凭证
-	clientID := r.Form.Get("client_id")
-	clientSecret := r.Form.Get("client_secret")
 	scopesStr := r.Form.Get("scope")
+
+	// 使用统一的客户端认证解析
+	clientID, clientSecret := s.parseClientCredentials(r)
 
 	if clientID == "" {
 		s.writeErrorResponse(w, errors.ErrInvalidRequest, "")
 		return
 	}
 
-	// 验证客户端凭证
+	// 验证客户端凭证 - 这里应该始终验证密钥
 	client, err := s.clientStore.GetByCredentials(ctx, clientID, clientSecret)
 	if err != nil {
 		s.writeErrorResponse(w, errors.ErrInvalidClient, "")
+		return
+	}
+
+	// 对于客户端凭证流程，必须是机密客户端
+	if client.ClientSecret == "" {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_client",
+			Description: "Client credentials grant requires confidential client",
+			HTTPStatus:  401,
+		}, "")
 		return
 	}
 
@@ -866,6 +905,11 @@ func (s *OAuthServerProvider) handleClientRegistration(w http.ResponseWriter, r 
 		return
 	}
 
+	// 记录 registrationAccessToken 到 server 映射（后续管理需要校验）
+	s.mu.Lock()
+	s.registrationTokens[registrationAccessToken] = clientID
+	s.mu.Unlock()
+
 	expiresAt := int64(0)
 	// 返回注册响应
 	regResp := store.ClientRegistrationResponse{
@@ -1021,13 +1065,14 @@ func (s *OAuthServerProvider) containsString(arr []string, str string) bool {
 	return false
 }
 
-// generateAuthorizationCode 生成授权码
+// generateAuthorizationCode delegates to DefaultAuthProvider.GenerateAuthorizationCode for consistency
 func (s *OAuthServerProvider) generateAuthorizationCode(ctx context.Context, req *AuthCodeRequest) (string, error) {
-	// 这里应该集成之前的 AuthProvider 实现
+	// Use DefaultAuthProvider's generator so storage/format is consistent
 	authProvider := &DefaultAuthProvider{
-		Config:      &AuthConfig{ServerURL: s.config.Issuer},
-		AuthCodes:   make(map[string]*AuthorizationCode),
-		PkceManager: s.pkceManager,
+		Config:       &AuthConfig{ServerURL: s.config.Issuer},
+		TokenManager: s.tokenManager,
+		AuthCodes:    make(map[string]*AuthorizationCode),
+		PkceManager:  s.pkceManager,
 	}
 
 	return authProvider.GenerateAuthorizationCode(ctx, req)
@@ -1166,19 +1211,287 @@ func (s *OAuthServerProvider) validateRegistrationRequest(req *store.ClientRegis
 
 // handleClientInformation 处理客户端信息查询
 func (s *OAuthServerProvider) handleClientInformation(w http.ResponseWriter, r *http.Request) {
-	// 实现客户端信息查询逻辑
-	// 需要验证注册访问令牌
-	w.WriteHeader(http.StatusNotImplemented)
-}
+	ctx := r.Context()
 
-// handleClientUpdate 处理客户端信息更新
+	clientID := r.URL.Query().Get("client_id")
+	if clientID == "" {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_request",
+			Description: "client_id parameter is required",
+			HTTPStatus:  400,
+		}, "")
+		return
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	if !s.validateRegistrationAccessToken(authHeader, clientID) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_token",
+			Description: "Invalid or missing registration access token",
+			HTTPStatus:  401,
+		}, "")
+		return
+	}
+
+	client, err := s.clientStore.GetByID(ctx, clientID)
+	if err != nil {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_client_id",
+			Description: "Client not found",
+			HTTPStatus:  404,
+		}, "")
+		return
+	}
+
+	// 确保有绑定的 token（不存在则生成并存储）
+	var regToken string
+	s.mu.RLock()
+	for t, cid := range s.registrationTokens {
+		if cid == clientID {
+			regToken = t
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if regToken == "" {
+		regToken = s.generateRegistrationAccessToken()
+		s.storeRegistrationToken(regToken, clientID)
+	}
+
+	expiresAt := int64(0)
+	clientInfo := store.ClientRegistrationResponse{
+		ClientID:                client.ClientID,
+		ClientSecret:            client.ClientSecret,
+		ClientName:              client.ClientName,
+		RedirectURIs:            client.RedirectURIs,
+		GrantTypes:              client.GrantTypes,
+		ResponseTypes:           client.ResponseTypes,
+		Scope:                   client.Scope,
+		TokenEndpointAuthMethod: client.TokenEndpointAuthMethod,
+		LogoURI:                 client.LogoURI,
+		ClientURI:               client.ClientURI,
+		PolicyURI:               client.PolicyURI,
+		TosURI:                  client.TosURI,
+		Contacts:                client.Contacts,
+		ClientIDIssuedAt:        client.CreatedAt.Unix(),
+		ClientSecretExpiresAt:   &expiresAt,
+		RegistrationAccessToken: regToken,
+		RegistrationClientURI: fmt.Sprintf("%s%s?client_id=%s",
+			s.config.BaseURL, s.config.RegistrationEndpoint, clientID),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(clientInfo)
+}
 func (s *OAuthServerProvider) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
-	// 实现客户端信息更新逻辑
-	w.WriteHeader(http.StatusNotImplemented)
+	ctx := r.Context()
+
+	clientID := r.URL.Query().Get("client_id")
+	if clientID == "" {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_request",
+			Description: "client_id parameter is required",
+			HTTPStatus:  400,
+		}, "")
+		return
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	if !s.validateRegistrationAccessToken(authHeader, clientID) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_token",
+			Description: "Invalid or missing registration access token",
+			HTTPStatus:  401,
+		}, "")
+		return
+	}
+
+	existingClient, err := s.clientStore.GetByID(ctx, clientID)
+	if err != nil {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_client_id",
+			Description: "Client not found",
+			HTTPStatus:  404,
+		}, "")
+		return
+	}
+
+	var updateReq store.ClientRegistrationRequest
+	if err := json.NewDecoder(r.Body).Decode(&updateReq); err != nil {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_request",
+			Description: "Invalid JSON in request body",
+			HTTPStatus:  400,
+		}, "")
+		return
+	}
+
+	if err := s.validateRegistrationRequest(&updateReq); err != nil {
+		s.writeErrorResponse(w, err, "")
+		return
+	}
+
+	// 更新客户端信息（client_id 与 secret 不变）
+	updatedClient := &store.OAuthClient{
+		ClientID:                existingClient.ClientID,
+		ClientSecret:            existingClient.ClientSecret,
+		ClientName:              updateReq.ClientName,
+		RedirectURIs:            updateReq.RedirectURIs,
+		GrantTypes:              updateReq.GrantTypes,
+		ResponseTypes:           updateReq.ResponseTypes,
+		Scope:                   updateReq.Scope,
+		TokenEndpointAuthMethod: updateReq.TokenEndpointAuthMethod,
+		LogoURI:                 updateReq.LogoURI,
+		ClientURI:               updateReq.ClientURI,
+		PolicyURI:               updateReq.PolicyURI,
+		TosURI:                  updateReq.TosURI,
+		Contacts:                updateReq.Contacts,
+		CreatedAt:               existingClient.CreatedAt,
+		UpdatedAt:               time.Now(),
+	}
+
+	if err := s.clientStore.Update(ctx, updatedClient); err != nil {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "server_error",
+			Description: "Failed to update client",
+			HTTPStatus:  500,
+		}, "")
+		return
+	}
+
+	// 生成新的注册 token（旧的作废）
+	newRegToken := s.generateRegistrationAccessToken()
+	s.removeRegistrationTokensForClient(clientID)
+	s.storeRegistrationToken(newRegToken, clientID)
+
+	expiresAt := int64(0)
+	updateResp := store.ClientRegistrationResponse{
+		ClientID:                updatedClient.ClientID,
+		ClientSecret:            updatedClient.ClientSecret,
+		ClientName:              updatedClient.ClientName,
+		RedirectURIs:            updatedClient.RedirectURIs,
+		GrantTypes:              updatedClient.GrantTypes,
+		ResponseTypes:           updatedClient.ResponseTypes,
+		Scope:                   updatedClient.Scope,
+		TokenEndpointAuthMethod: updatedClient.TokenEndpointAuthMethod,
+		LogoURI:                 updatedClient.LogoURI,
+		ClientURI:               updatedClient.ClientURI,
+		PolicyURI:               updatedClient.PolicyURI,
+		TosURI:                  updatedClient.TosURI,
+		Contacts:                updatedClient.Contacts,
+		RegistrationAccessToken: newRegToken,
+		RegistrationClientURI: fmt.Sprintf("%s%s?client_id=%s",
+			s.config.BaseURL, s.config.RegistrationEndpoint, clientID),
+		ClientIDIssuedAt:      updatedClient.CreatedAt.Unix(),
+		ClientSecretExpiresAt: &expiresAt,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updateResp)
 }
 
-// handleClientDeletion 处理客户端删除
 func (s *OAuthServerProvider) handleClientDeletion(w http.ResponseWriter, r *http.Request) {
-	// 实现客户端删除逻辑
-	w.WriteHeader(http.StatusNotImplemented)
+	ctx := r.Context()
+
+	clientID := r.URL.Query().Get("client_id")
+	if clientID == "" {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_request",
+			Description: "client_id parameter is required",
+			HTTPStatus:  400,
+		}, "")
+		return
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	if !s.validateRegistrationAccessToken(authHeader, clientID) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_token",
+			Description: "Invalid or missing registration access token",
+			HTTPStatus:  401,
+		}, "")
+		return
+	}
+
+	if _, err := s.clientStore.GetByID(ctx, clientID); err != nil {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "invalid_client_id",
+			Description: "Client not found",
+			HTTPStatus:  404,
+		}, "")
+		return
+	}
+
+	if err := s.revokeAllClientTokens(ctx, clientID); err != nil {
+		fmt.Printf("Warning: Failed to revoke tokens for client %s: %v\n", clientID, err)
+	}
+
+	if err := s.clientStore.Delete(ctx, clientID); err != nil {
+		s.writeErrorResponse(w, &errors.AuthError{
+			Code:        "server_error",
+			Description: "Failed to delete client",
+			HTTPStatus:  500,
+		}, "")
+		return
+	}
+
+	// 删除该 clientID 的所有注册 token
+	s.removeRegistrationTokensForClient(clientID)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// 从 Authorization header 提取 Bearer token
+func (s *OAuthServerProvider) extractBearerToken(authHeader string) string {
+	parts := strings.Fields(authHeader)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		return parts[1]
+	}
+	return ""
+}
+
+// 验证注册访问令牌是否有效且匹配 clientID
+func (s *OAuthServerProvider) validateRegistrationAccessToken(authHeader, clientID string) bool {
+	token := s.extractBearerToken(authHeader)
+	if token == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	mappedClient, ok := s.registrationTokens[token]
+	return ok && mappedClient == clientID
+}
+
+// 保存新的注册 token
+func (s *OAuthServerProvider) storeRegistrationToken(token, clientID string) {
+	s.mu.Lock()
+	s.registrationTokens[token] = clientID
+	s.mu.Unlock()
+}
+
+// 删除某 clientID 的所有注册 token
+func (s *OAuthServerProvider) removeRegistrationTokensForClient(clientID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, cid := range s.registrationTokens {
+		if cid == clientID {
+			delete(s.registrationTokens, token)
+		}
+	}
+}
+
+// revokeAllClientTokens 撤销指定客户端的所有访问令牌和刷新令牌
+func (s *OAuthServerProvider) revokeAllClientTokens(ctx context.Context, clientID string) error {
+	if s.tokenManager == nil {
+		return fmt.Errorf("token manager not initialized")
+	}
+	return s.tokenManager.RevokeAllTokensForClient(clientID)
+}
+
+func (s *OAuthServerProvider) writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
 }

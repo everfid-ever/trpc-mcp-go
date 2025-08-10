@@ -45,6 +45,8 @@ type ClientConfig struct {
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	RevocationEndpoint    string `json:"revocation_endpoint,omitempty"`
 	IntrospectionEndpoint string `json:"introspection_endpoint,omitempty"`
+	//客户端认证方式 "client_secret_basic" 或 "client_secret_post"
+	ClientAuthMethod string `json:"client_auth_method,omitempty"`
 
 	// 客户端凭证
 	ClientID     string `json:"client_id"`
@@ -257,10 +259,31 @@ func (c *OAuthClientProvider) GetAuthorizationURL(flow *AuthorizationFlow) (stri
 	return authURL, nil
 }
 
+func (c *OAuthClientProvider) isValidStateFormat(state string) bool {
+	// 如果 state 为空直接 false
+	if state == "" {
+		return false
+	}
+	// 检查是否可被 base64.RawURLEncoding 解码
+	if _, err := base64.RawURLEncoding.DecodeString(state); err != nil {
+		return false
+	}
+	// 检查最大/最小长度
+	if len(state) < 16 || len(state) > 256 {
+		return false
+	}
+	return true
+}
+
 // CompleteAuthorizationFlow 完成授权流程
 func (c *OAuthClientProvider) CompleteAuthorizationFlow(code, state string) (*token.Token, error) {
 	if code == "" || state == "" {
 		return nil, fmt.Errorf("missing authorization code or state")
+	}
+
+	if !c.isValidStateFormat(state) {
+		c.updateFailureStats()
+		return nil, fmt.Errorf("invalid state format")
 	}
 
 	// 查找并验证流程
@@ -453,20 +476,25 @@ func (c *OAuthClientProvider) RevokeToken(token string) error {
 	// 构建撤销请求
 	data := url.Values{}
 	data.Set("token", token)
-	data.Set("client_id", c.config.ClientID)
 
-	if c.config.ClientSecret != "" {
-		data.Set("client_secret", c.config.ClientSecret)
-	}
-
-	// 发送撤销请求
-	req, err := http.NewRequest("POST", c.config.RevocationEndpoint, strings.NewReader(data.Encode()))
+	var body io.Reader = strings.NewReader(data.Encode())
+	req, err := http.NewRequest("POST", c.config.RevocationEndpoint, body)
 	if err != nil {
-		return fmt.Errorf("failed to create revocation request: %w", err)
+		return fmt.Errorf("revoke token request failed: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	c.setCommonHeaders(req)
+
+	if c.config.ClientAuthMethod == "client_secret_basic" && c.config.ClientSecret != "" {
+		basicAuth := base64.StdEncoding.EncodeToString([]byte(c.config.ClientID + ":" + c.config.ClientSecret))
+		req.Header.Set("Authorization", "Basic "+basicAuth)
+	} else if c.config.ClientSecret != "" {
+		data.Set("client_id", c.config.ClientID)
+		data.Set("client_secret", c.config.ClientSecret)
+		body = strings.NewReader(data.Encode())
+		req.Body = io.NopCloser(body)
+	}
 
 	resp, err := c.doHTTPRequest(req)
 	if err != nil {
@@ -560,40 +588,62 @@ func (c *OAuthClientProvider) exchangeCodeForToken(code string, flow *Authorizat
 }
 
 func (c *OAuthClientProvider) sendTokenRequest(data url.Values) (*TokenResponse, error) {
-	req, err := http.NewRequest("POST", c.config.TokenEndpoint, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create token request: %w", err)
-	}
 
+	var body io.Reader = strings.NewReader(data.Encode())
+	req, err := http.NewRequest("POST", c.config.TokenEndpoint, body)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	c.setCommonHeaders(req)
 
+	// 客户端认证方式
+	if c.config.ClientAuthMethod == "client_secret_basic" && c.config.ClientSecret != "" {
+		baseAuth := base64.StdEncoding.EncodeToString([]byte(c.config.ClientID + ":" + c.config.ClientSecret))
+		req.Header.Set("Authorization", "Basic "+baseAuth)
+	} else if c.config.ClientSecret != "" {
+		data.Set("client_id", c.config.ClientID)
+		data.Set("client_secret", c.config.ClientSecret)
+		body = strings.NewReader(data.Encode())
+		req.Body = io.NopCloser(body)
+	}
+
 	resp, err := c.doHTTPRequest(req)
 	if err != nil {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	if resp == nil {
+		return nil, fmt.Errorf("token request failed: nil response")
+	}
+	defer func() {
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+	}()
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		// 尝试解析错误响应
 		var errorResp struct {
 			Error            string `json:"error"`
 			ErrorDescription string `json:"error_description"`
 		}
-		if json.Unmarshal(body, &errorResp) == nil && errorResp.Error != "" {
+		if json.Unmarshal(respBody, &errorResp) == nil && errorResp.Error != "" {
 			return nil, fmt.Errorf("token request failed: %s - %s", errorResp.Error, errorResp.ErrorDescription)
 		}
 		return nil, fmt.Errorf("token request failed: %s", resp.Status)
 	}
 
 	var tokenResp TokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
+	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
@@ -601,7 +651,6 @@ func (c *OAuthClientProvider) sendTokenRequest(data url.Values) (*TokenResponse,
 }
 
 func (c *OAuthClientProvider) doHTTPRequest(req *http.Request) (*http.Response, error) {
-	// 更新统计
 	if c.config.EnableStats {
 		c.updateStats(func(stats *ClientStats) {
 			stats.HTTPRequestsTotal++
@@ -611,19 +660,19 @@ func (c *OAuthClientProvider) doHTTPRequest(req *http.Request) (*http.Response, 
 	var resp *http.Response
 	var err error
 
-	// 重试逻辑
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
 			time.Sleep(c.config.RetryDelay * time.Duration(attempt))
 		}
 
 		resp, err = c.httpClient.Do(req)
-		if err == nil && resp.StatusCode < 500 {
-			// 成功或客户端错误（不重试）
+		// 如果没有网络错误且有响应，且状态码 < 500 表示不需要重试
+		if err == nil && resp != nil && resp.StatusCode < 500 {
 			break
 		}
 
-		if resp != nil {
+		// 若需要重试且 resp 非 nil，关闭 body 避免泄露
+		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
 	}
@@ -631,7 +680,7 @@ func (c *OAuthClientProvider) doHTTPRequest(req *http.Request) (*http.Response, 
 	// 更新统计
 	if c.config.EnableStats {
 		c.updateStats(func(stats *ClientStats) {
-			if err == nil && resp.StatusCode < 400 {
+			if err == nil && resp != nil && resp.StatusCode < 400 {
 				stats.HTTPRequestsSuccess++
 			} else {
 				stats.HTTPRequestsFailure++
@@ -653,7 +702,12 @@ func (c *OAuthClientProvider) setCommonHeaders(req *http.Request) {
 }
 
 func (c *OAuthClientProvider) generateSecureState() (string, error) {
-	bytes := make([]byte, c.config.StateLength)
+	// 最小熵 16 字节
+	length := c.config.StateLength
+	if length < 16 {
+		length = 16
+	}
+	bytes := make([]byte, length)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
@@ -775,7 +829,9 @@ func (c *OAuthClientProvider) Close() {
 	// 停止所有刷新定时器
 	c.mu.Lock()
 	for _, timer := range c.refreshTimers {
-		timer.Stop()
+		if timer != nil {
+			timer.Stop()
+		}
 	}
 	c.refreshTimers = make(map[string]*time.Timer)
 
@@ -787,10 +843,19 @@ func (c *OAuthClientProvider) Close() {
 	if c.pkceManager != nil {
 		c.pkceManager.Close()
 	}
+
+	// 关闭 tokenStore 如果支持 Close()
+	if closer, ok := c.tokenStore.(interface{ Close() error }); ok {
+		closer.Close() // 忽略错误
+	}
+
+	// 关闭 http idle 连接（如果 transport 支持）
+	if transport, ok := c.httpClient.Transport.(*http.Transport); ok {
+		transport.CloseIdleConnections()
+	}
 }
 
-// 配置验证和默认值设置
-
+// validateClientConfig 配置验证和默认值设置
 func validateClientConfig(config *ClientConfig) error {
 	if config.ClientID == "" {
 		return fmt.Errorf("client_id is required")
@@ -853,6 +918,10 @@ func setClientConfigDefaults(config *ClientConfig) {
 	// OAuth 2.1 强制要求 PKCE
 	config.PKCEEnabled = true
 	config.PKCEMethod = "S256"
+
+	if config.ClientAuthMethod == "" {
+		config.ClientAuthMethod = "client_secret_post"
+	}
 
 	if config.UserAgent == "" {
 		config.UserAgent = "OAuth2.1-Client/1.0"
