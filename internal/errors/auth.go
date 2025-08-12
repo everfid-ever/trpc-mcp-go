@@ -31,8 +31,6 @@ var (
 	ErrTooManyRequests         OAuthError = errors.New("too many requests")
 	ErrInvalidClientMetadata   OAuthError = errors.New("invalid client metadata")
 	ErrInsufficientScope       OAuthError = errors.New("insufficient scope")
-	ErrRegistrationUnsupported OAuthError = errors.New("dynamic client registration is unsupported")
-	ErrRevokeTokenFailed       OAuthError = errors.New("revoke token failed")
 )
 
 // NewOAuthErrorResponse creates a new OAuthErrorResponse
