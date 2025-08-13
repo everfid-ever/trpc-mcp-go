@@ -31,10 +31,10 @@ type AuthRouterOptions struct {
 	ResourceName *string
 
 	// Individual options per route (simulated with interface{} for flexibility, assuming they are passed correctly to handlers)
-	AuthorizationOptions      interface{} // Omit<AuthorizationHandlerOptions, "provider">
-	ClientRegistrationOptions interface{} // Omit<ClientRegistrationHandlerOptions, "clientsStore">
-	RevocationOptions         interface{} // Omit<RevocationHandlerOptions, "provider">
-	TokenOptions              interface{} // Omit<TokenHandlerOptions, "provider">
+	AuthorizationOptions      *handler.AuthorizationHandlerOptions      // Omit<AuthorizationHandlerOptions, "provider">
+	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions // Omit<ClientRegistrationHandlerOptions, "clientsStore">
+	RevocationOptions         interface{}                               // Omit<RevocationHandlerOptions, "provider">
+	TokenOptions              interface{}                               // Omit<TokenHandlerOptions, "provider">
 }
 
 // AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
@@ -91,7 +91,7 @@ func CreateOAuthMetadata(options struct {
 	// This part needs to be adapted based on your actual server.OAuthServerProvider interface
 	var registrationEndpoint *string
 	clientsStore := options.Provider.ClientsStore()
-	if clientsStore != nil && clientsStore.RegisterClient != nil {
+	if clientsStore != nil {
 		endpoint := "/register"
 		registrationEndpoint = &endpoint
 	}
@@ -146,8 +146,7 @@ func CreateOAuthMetadata(options struct {
 	return metadata
 }
 
-// McpAuthRouter 严格对齐TypeScript版本的mcpAuthRouter函数
-// 安装标准MCP授权服务器端点，包括动态客户端注册和令牌撤销
+// McpAuthRouter sets up standard MCP authorization server endpoints, including dynamic client registration and token revocation
 func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 	oauthMetadata := CreateOAuthMetadata(struct {
 		Provider                server.OAuthServerProvider
@@ -163,15 +162,31 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 		ScopesSupported:         options.ScopesSupported,
 	})
 
-	// 1) 授权端点
+	// 1) Authorization endpoint
 	authorizationURL, _ := url.Parse(oauthMetadata.AuthorizationEndpoint)
-	mux.Handle("GET "+authorizationURL.Path, handler.AuthorizeHandler(options.Provider))
 
-	// 2) Token 端点
+	// Create authorization handler options
+	authzOptions := handler.AuthorizationHandlerOptions{
+		Provider: options.Provider,
+	}
+	if options.AuthorizationOptions != nil && options.AuthorizationOptions.RateLimit != nil {
+		authzOptions.RateLimit = options.AuthorizationOptions.RateLimit
+	}
+	mux.Handle("GET "+authorizationURL.Path, handler.AuthorizationHandler(authzOptions))
+
+	// 2) Token endpoint
 	tokenURL, _ := url.Parse(oauthMetadata.TokenEndpoint)
-	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(options.Provider))
+	// Create token handler options
+	tokenOptions := handler.TokenHandlerOptions{
+		Provider: options.Provider,
+	}
+	if options.TokenOptions != nil && options.TokenOptions.RateLimit != nil {
+		tokenOptions.RateLimit = options.TokenOptions.RateLimit
+	}
 
-	// 3) 元数据路由器
+	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
+
+	// 3) Metadata router
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
 	McpAuthMetadataRouter(mux, AuthMetadataOptions{
 		OAuthMetadata:           oauthMetadata,
@@ -181,38 +196,55 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 		ResourceName:            options.ResourceName,
 	})
 
-	// 4) 动态客户端注册（可选）
+	// 4) Dynamic client registration (optional)
 	if oauthMetadata.RegistrationEndpoint != nil {
 		registrationURL, _ := url.Parse(*oauthMetadata.RegistrationEndpoint)
 		clientsStore := options.Provider.ClientsStore()
 
 		regOpts := handler.ClientRegistrationHandlerOptions{
 			ClientsStore: clientsStore,
-			RateLimit: &handler.RateLimitConfig{
+		}
+
+		// Use provided options or set defaults
+		if options.ClientRegistrationOptions != nil {
+			regOpts = *options.ClientRegistrationOptions
+			regOpts.ClientsStore = clientsStore // Ensure the clients store is set
+		} else {
+			// Set default rate limiting
+			regOpts.RateLimit = &handler.RateLimitConfig{
 				WindowMs: 60000,
 				Max:      10,
-			},
+			}
 		}
 
 		ginRouter := gin.New()
 		ginRouter.POST(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 
-		mux.Handle(registrationURL.Path, ginRouter) // gin.Engine 实现了 http.Handler
+		mux.Handle(registrationURL.Path, ginRouter)
 	}
 
-	// 5) 撤销端点（可选）
+	// 5) Revocation endpoint (optional)
 	if oauthMetadata.RevocationEndpoint != nil {
 		revocationURL, _ := url.Parse(*oauthMetadata.RevocationEndpoint)
-		mux.Handle("POST "+revocationURL.Path, handler.RevocationHandler(options.Provider))
+
+		// Create revocation handler options
+		revOpts := handler.RevocationHandlerOptions{
+			Provider: options.Provider,
+		}
+		if options.RevocationOptions != nil && options.RevocationOptions.RateLimit != nil {
+			revOpts.RateLimit = options.RevocationOptions.RateLimit
+		}
+
+		mux.Handle("POST "+revocationURL.Path, handler.RevocationHandler(revOpts))
 	}
 }
 
-// McpAuthMetadataRouter 严格对齐TypeScript版本的mcpAuthMetadataRouter函数
+// McpAuthMetadataRouter sets up OAuth 2.0 metadata endpoints
 func McpAuthMetadataRouter(mux *http.ServeMux, options AuthMetadataOptions) {
 	issuerURL, _ := url.Parse(options.OAuthMetadata.Issuer)
 	checkIssuerUrl(issuerURL)
 
-	// 创建受保护资源元数据
+	// Create protected resource metadata
 	protectedResourceMetadata := auth.OAuthProtectedResourceMetadata{
 		Resource: options.ResourceServerUrl.String(),
 		AuthorizationServers: []string{
@@ -221,7 +253,7 @@ func McpAuthMetadataRouter(mux *http.ServeMux, options AuthMetadataOptions) {
 		ScopesSupported: options.ScopesSupported,
 	}
 
-	// 添加可选字段
+	// Add optional fields
 	if options.ResourceName != nil {
 		protectedResourceMetadata.ResourceName = options.ResourceName
 	}
@@ -231,36 +263,32 @@ func McpAuthMetadataRouter(mux *http.ServeMux, options AuthMetadataOptions) {
 		protectedResourceMetadata.ResourceDocumentation = &resourceDoc
 	}
 
-	// 受保护资源元数据端点
+	// Protected resource metadata endpoint
 	mux.Handle("GET /.well-known/oauth-protected-resource",
 		handler.MetadataHandler(protectedResourceMetadata))
 
-	// 授权服务器元数据端点（为了向后兼容总是添加）
+	// Authorization server metadata endpoint (always added for backward compatibility)
 	mux.Handle("GET /.well-known/oauth-authorization-server",
 		handler.MetadataHandler(options.OAuthMetadata))
 }
 
-// GetOAuthProtectedResourceMetadataUrl 从给定的服务器URL构造OAuth 2.0受保护资源元数据URL的辅助函数
-// 这会将路径替换为标准元数据端点
-//
-// 示例:
-// GetOAuthProtectedResourceMetadataUrl(url.Parse('https://api.example.com/mcp'))
-// 返回: 'https://api.example.com/.well-known/oauth-protected-resource'
+// GetOAuthProtectedResourceMetadataUrl constructs the OAuth 2.0 Protected Resource Metadata URL from a given server URL
+// This will replace the path with the standard metadata endpoint
 func GetOAuthProtectedResourceMetadataUrl(serverUrl *url.URL) string {
 	metadataUrl, _ := url.Parse("/.well-known/oauth-protected-resource")
 	return serverUrl.ResolveReference(metadataUrl).String()
 }
 
-// InstallMCPAuthRoutes 便利函数，简化路由安装
+// InstallMCPAuthRoutes convenience function to simplify route installation
 func InstallMCPAuthRoutes(
 	mux *http.ServeMux,
-	issuerBaseURL string,     // = OAuthMetadata.issuer（例如 https://auth.example.com）
-	resourceServerURL string, // 你的 MCP 服务 URL（例如 https://api.example.com/mcp）
+	issuerBaseURL string,     // = OAuthMetadata.issuer (e.g. https://auth.example.com)
+	resourceServerURL string, // Your MCP service URL (e.g. https://api.example.com/mcp)
 	clientsStore *server.OAuthClientsStoreInterface,
-	provider server.OAuthServerProvider, // 你已有的服务端 provider 接口
-	scopesSupported []string,            // 可为 nil
-	resourceName *string,                // 可为 nil
-	serviceDocURL *string,               // 可为 nil
+	provider server.OAuthServerProvider, // Your existing server provider interface
+	scopesSupported []string,            // Can be nil
+	resourceName *string,                // Can be nil
+	serviceDocURL *string,               // Can be nil
 ) {
 	issuerURL, _ := url.Parse(issuerBaseURL)
 	var serviceDocumentationUrl *url.URL
