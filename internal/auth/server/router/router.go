@@ -1,6 +1,7 @@
 package router
 
 import (
+	"github.com/gin-gonic/gin"
 	"net/http"
 	"net/url"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -8,64 +9,54 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
 )
 
+// AuthRouterOptions holds configuration options for the MCP authentication router.
 type AuthRouterOptions struct {
-	// Provider 实现此路由器实际授权逻辑的提供者
-	// A provider implementing the actual authorization logic for this router.
+	// Provider implementing the actual authorization logic for this router.
 	Provider server.OAuthServerProvider
 
-	// IssuerUrl 授权服务器的颁发者标识符，必须是使用 "https" 方案且没有查询或片段组件的 URL
 	// The authorization server's issuer identifier, which is a URL that uses the "https" scheme and has no query or fragment components.
 	IssuerUrl *url.URL
 
-	// BaseUrl 用于元数据端点的授权服务器基础 URL（可选）
 	// The base URL of the authorization server to use for the metadata endpoints.
 	// If not provided, the issuer URL will be used as the base URL.
 	BaseUrl *url.URL
 
-	// ServiceDocumentationUrl 包含开发者在使用授权服务器时可能需要了解的人类可读信息的页面 URL（可选）
 	// An optional URL of a page containing human-readable information that developers might want or need to know when using the authorization server.
 	ServiceDocumentationUrl *url.URL
 
-	// ScopesSupported 此授权服务器支持的作用域列表（可选）
 	// An optional list of scopes supported by this authorization server
 	ScopesSupported []string
 
-	// ResourceName 在受保护资源元数据中显示的资源名称
 	// The resource name to be displayed in protected resource metadata
 	ResourceName *string
 
-	// TODO: 个别路由选项
-	// Individual options per route
-	// AuthorizationOptions
-	// ClientRegistrationOptions
-	// RevocationOptions
-	// TokenOptions
+	// Individual options per route (simulated with interface{} for flexibility, assuming they are passed correctly to handlers)
+	AuthorizationOptions      interface{} // Omit<AuthorizationHandlerOptions, "provider">
+	ClientRegistrationOptions interface{} // Omit<ClientRegistrationHandlerOptions, "clientsStore">
+	RevocationOptions         interface{} // Omit<RevocationHandlerOptions, "provider">
+	TokenOptions              interface{} // Omit<TokenHandlerOptions, "provider">
 }
 
+// AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
 type AuthMetadataOptions struct {
-	// OAuthMetadata 从此 MCP 服务器依赖的授权服务器返回的 OAuth 元数据
 	// OAuth Metadata as would be returned from the authorization server this MCP server relies on
 	OAuthMetadata auth.OAuthMetadata
 
-	// ResourceServerUrl MCP 服务器的 URL，用于受保护资源元数据
 	// The url of the MCP server, for use in protected resource metadata
 	ResourceServerUrl *url.URL
 
-	// ServiceDocumentationUrl MCP 服务器文档的 URL
 	// The url for documentation for the MCP server
 	ServiceDocumentationUrl *url.URL
 
-	// ScopesSupported 此 MCP 服务器支持的作用域列表（可选）
 	// An optional list of scopes supported by this MCP server
 	ScopesSupported []string
 
-	// ResourceName 在资源元数据中显示的可选资源名称
 	// An optional resource name to display in resource metadata
 	ResourceName *string
 }
 
+// checkIssuerUrl validates the issuer URL according to RFC 8414.
 func checkIssuerUrl(issuer *url.URL) {
-	// 技术上 RFC 8414 不允许 localhost HTTPS 豁免，但这对于测试的便利性是必要的
 	// Technically RFC 8414 does not permit a localhost HTTPS exemption, but this will be necessary for ease of testing
 	if issuer.Scheme != "https" && issuer.Hostname() != "localhost" && issuer.Hostname() != "127.0.0.1" {
 		panic("Issuer URL must be HTTPS")
@@ -78,7 +69,7 @@ func checkIssuerUrl(issuer *url.URL) {
 	}
 }
 
-// CreateOAuthMetadata 严格对齐TypeScript版本的createOAuthMetadata函数
+// CreateOAuthMetadata generates the OAuth 2.0 Authorization Server Metadata.
 func CreateOAuthMetadata(options struct {
 	Provider                server.OAuthServerProvider
 	IssuerUrl               *url.URL
@@ -94,21 +85,25 @@ func CreateOAuthMetadata(options struct {
 	authorizationEndpoint := "/authorize"
 	tokenEndpoint := "/token"
 
+	// Check if the provider supports client registration and token revocation
+	// This assumes the provider has methods or fields indicating support
+	// For simplicity, we'll check if the relevant methods/store are non-nil
+	// This part needs to be adapted based on your actual server.OAuthServerProvider interface
 	var registrationEndpoint *string
-	if options.Provider.ClientsStore() != nil {
-		// 假设如果有ClientsStore则支持注册，这里需要根据实际接口调整
+	clientsStore := options.Provider.ClientsStore()
+	if clientsStore != nil && clientsStore.RegisterClient != nil {
 		endpoint := "/register"
 		registrationEndpoint = &endpoint
 	}
 
 	var revocationEndpoint *string
-	// 需要检查provider是否支持撤销，这里需要根据实际接口调整
-	// if options.Provider.RevokeToken != nil {
+	// Assuming there's a RevokeToken method on the provider interface
+	// This check needs to be adapted based on your actual interface
+	// if options.Provider.RevokeToken != nil { // Example check
 	endpoint := "/revoke"
 	revocationEndpoint = &endpoint
 	// }
 
-	// 构建完整的endpoint URLs
 	var baseUrlForEndpoints *url.URL
 	if baseUrl != nil {
 		baseUrlForEndpoints = baseUrl
@@ -120,26 +115,21 @@ func CreateOAuthMetadata(options struct {
 	tokenEndpointUrl, _ := url.Parse(tokenEndpoint)
 
 	metadata := auth.OAuthMetadata{
-		Issuer: issuer.String(),
-
-		AuthorizationEndpoint:         baseUrlForEndpoints.ResolveReference(authEndpointUrl).String(),
-		ResponseTypesSupported:        []string{"code"},
-		CodeChallengeMethodsSupported: []string{"S256"},
-
+		Issuer:                            issuer.String(),
+		AuthorizationEndpoint:             baseUrlForEndpoints.ResolveReference(authEndpointUrl).String(),
+		ResponseTypesSupported:            []string{"code"},
+		CodeChallengeMethodsSupported:     []string{"S256"},
 		TokenEndpoint:                     baseUrlForEndpoints.ResolveReference(tokenEndpointUrl).String(),
 		TokenEndpointAuthMethodsSupported: []string{"client_secret_post"},
 		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
-
-		ScopesSupported: options.ScopesSupported,
+		ScopesSupported:                   options.ScopesSupported,
 	}
 
-	// 添加可选的service documentation
 	if options.ServiceDocumentationUrl != nil {
 		serviceDoc := options.ServiceDocumentationUrl.String()
 		metadata.ServiceDocumentation = &serviceDoc
 	}
 
-	// 添加可选的revocation endpoint
 	if revocationEndpoint != nil {
 		revEndpointUrl, _ := url.Parse(*revocationEndpoint)
 		revEndpoint := baseUrlForEndpoints.ResolveReference(revEndpointUrl).String()
@@ -147,7 +137,6 @@ func CreateOAuthMetadata(options struct {
 		metadata.RevocationEndpointAuthMethodsSupported = []string{"client_secret_post"}
 	}
 
-	// 添加可选的registration endpoint
 	if registrationEndpoint != nil {
 		regEndpointUrl, _ := url.Parse(*registrationEndpoint)
 		regEndpoint := baseUrlForEndpoints.ResolveReference(regEndpointUrl).String()
@@ -158,13 +147,7 @@ func CreateOAuthMetadata(options struct {
 }
 
 // McpAuthRouter 严格对齐TypeScript版本的mcpAuthRouter函数
-// 安装标准MCP授权服务器端点，包括动态客户端注册和令牌撤销（如果支持）
-// 还发布标准授权服务器元数据，以便客户端更容易发现支持的配置
-// 注意：如果您的MCP服务器只是资源服务器而不是授权服务器，请使用McpAuthMetadataRouter
-//
-// 默认情况下，对所有端点应用速率限制以防止滥用
-//
-// 此路由器必须安装在应用程序根目录下
+// 安装标准MCP授权服务器端点，包括动态客户端注册和令牌撤销
 func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 	oauthMetadata := CreateOAuthMetadata(struct {
 		Provider                server.OAuthServerProvider
@@ -188,7 +171,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 	tokenURL, _ := url.Parse(oauthMetadata.TokenEndpoint)
 	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(options.Provider))
 
-	// 3) 元数据路由器（此路由器用于AS+RS组合，因此颁发者也是资源服务器）
+	// 3) 元数据路由器
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
 	McpAuthMetadataRouter(mux, AuthMetadataOptions{
 		OAuthMetadata:           oauthMetadata,
@@ -202,7 +185,19 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 	if oauthMetadata.RegistrationEndpoint != nil {
 		registrationURL, _ := url.Parse(*oauthMetadata.RegistrationEndpoint)
 		clientsStore := options.Provider.ClientsStore()
-		mux.Handle("POST "+registrationURL.Path, handler.RegisterHandler(clientsStore))
+
+		regOpts := handler.ClientRegistrationHandlerOptions{
+			ClientsStore: clientsStore,
+			RateLimit: &handler.RateLimitConfig{
+				WindowMs: 60000,
+				Max:      10,
+			},
+		}
+
+		ginRouter := gin.New()
+		ginRouter.POST(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
+
+		mux.Handle(registrationURL.Path, ginRouter) // gin.Engine 实现了 http.Handler
 	}
 
 	// 5) 撤销端点（可选）
@@ -261,7 +256,7 @@ func InstallMCPAuthRoutes(
 	mux *http.ServeMux,
 	issuerBaseURL string,     // = OAuthMetadata.issuer（例如 https://auth.example.com）
 	resourceServerURL string, // 你的 MCP 服务 URL（例如 https://api.example.com/mcp）
-	clientsStore server.OAuthClientsStoreInterface,
+	clientsStore *server.OAuthClientsStoreInterface,
 	provider server.OAuthServerProvider, // 你已有的服务端 provider 接口
 	scopesSupported []string,            // 可为 nil
 	resourceName *string,                // 可为 nil
