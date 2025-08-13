@@ -61,7 +61,6 @@ func AllowedMethods(methods []string) gin.HandlerFunc {
 	}
 }
 
-// Simple rate limiter using golang.org/x/time/rate
 type RateLimiter struct {
 	limiter *rate.Limiter
 }
@@ -168,7 +167,7 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) gin.Han
 			}
 		}
 
-		// 根据types.go中的结构体定义创建客户端信息
+		// Create client information
 		clientInfo := auth.OAuthClientInformationFull{
 			OAuthClientMetadata: clientMetadata,
 			OAuthClientInformation: auth.OAuthClientInformation{
