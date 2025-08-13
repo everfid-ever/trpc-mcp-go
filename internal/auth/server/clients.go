@@ -1,9 +1,8 @@
 package server
 
 import (
-	"fmt"
-
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
 // OAuthClientsStoreInterface 有关此服务器注册的OAuth客户端的的获取与动态注册
@@ -43,7 +42,7 @@ func (s OAuthClientsStore) GetClient(clientID string) (*auth.OAuthClientInformat
 
 func (s OAuthClientsStore) RegisterClient(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
 	if s.registerClient == nil {
-		return nil, fmt.Errorf("dynamic client registration is not supported")
+		return nil, errors.ErrRegistrationUnsupported
 	}
 	return s.registerClient(client)
 }
@@ -58,9 +57,4 @@ func NewOAuthClientStore(getClient func(clientID string) (*auth.OAuthClientInfor
 	return &OAuthClientsStore{
 		getClient: getClient,
 	}
-}
-
-// SupportsRegistration checks if dynamic client registration is supported
-func (s OAuthClientsStore) SupportsRegistration() bool {
-	return s.registerClient != nil
 }

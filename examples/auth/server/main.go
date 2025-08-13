@@ -1,149 +1,251 @@
 package main
 
 import (
-	"context"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
-	"net/url"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
+	"net/http"
+	"time"
 
-	mcp "trpc.group/trpc-go/trpc-mcp-go"
+	"github.com/gin-gonic/gin"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/providers"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/router"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
 )
 
-func mustURL(s string) *url.URL {
-	u, err := url.Parse(s)
-	if err != nil {
-		panic(err)
-	}
-	return u
+// 模拟客户端存储实现
+type MockClientStore struct {
+	clients map[string]auth.OAuthClientInformationFull
 }
 
-func strPtr(s string) *string {
-	return &s
+func NewMockClientStore() *MockClientStore {
+	return &MockClientStore{
+		clients: make(map[string]auth.OAuthClientInformationFull),
+	}
+}
+
+func (m *MockClientStore) RegisterClient(clientInfo auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
+	clientID := clientInfo.OAuthClientInformation.ClientID
+	m.clients[clientID] = clientInfo
+	log.Printf("✅ 客户端注册成功: %s", clientID)
+	return &clientInfo, nil
+}
+
+func (m *MockClientStore) GetClient(clientID string) (*auth.OAuthClientInformationFull, error) {
+	if client, exists := m.clients[clientID]; exists {
+		return &client, nil
+	}
+	return nil, fmt.Errorf("client not found")
+}
+
+func (m *MockClientStore) ListClients() map[string]auth.OAuthClientInformationFull {
+	return m.clients
+}
+
+// 启动测试服务器
+func startTestServer() {
+	// 创建存储
+	clientStore := NewMockClientStore()
+
+	// 配置注册处理器选项
+	registrationOptions := handler.ClientRegistrationHandlerOptions{
+		ClientsStore: clientStore,
+		RateLimit: &handler.RateLimitConfig{
+			WindowMs: 60000, // 1分钟
+			Max:      10,    // 最多10个请求
+		},
+	}
+
+	// 创建Gin路由器
+	r := gin.Default()
+
+	// CORS中间件
+	r.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if c.Request.Method == "OPTIONS" {
+			c.Status(http.StatusOK)
+			return
+		}
+		c.Next()
+	})
+
+	// 注册端点
+	r.POST("/register", handler.ClientRegistrationHandler(registrationOptions))
+
+	// 元数据端点 - 显示支持的功能
+	oauthMetadata := auth.OAuthMetadata{
+		Issuer:                            "http://localhost:8080",
+		AuthorizationEndpoint:             "http://localhost:8080/authorize",
+		TokenEndpoint:                     "http://localhost:8080/token",
+		ResponseTypesSupported:            []string{"code"},
+		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
+		CodeChallengeMethodsSupported:     []string{"S256"},
+		TokenEndpointAuthMethodsSupported: []string{"client_secret_basic", "client_secret_post", "none"},
+	}
+	registrationEndpoint := "http://localhost:8080/register"
+	oauthMetadata.RegistrationEndpoint = &registrationEndpoint
+
+	r.GET("/.well-known/oauth-authorization-server", handler.MetadataHandlerGin(oauthMetadata))
+
+	// 调试端点 - 查看已注册的客户端
+	r.GET("/debug/clients", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"clients": clientStore.ListClients(),
+		})
+	})
+
+	log.Println("🚀 OAuth测试服务器启动在 http://localhost:8080")
+	log.Println("📋 可用端点:")
+	log.Println("   POST /register - 客户端注册")
+	log.Println("   GET /.well-known/oauth-authorization-server - 服务器元数据")
+	log.Println("   GET /debug/clients - 调试：查看已注册客户端")
+
+	if err := r.Run(":8080"); err != nil {
+		log.Fatal("服务器启动失败:", err)
+	}
+}
+
+// 测试客户端注册
+func testClientRegistration() {
+	time.Sleep(2 * time.Second) // 等待服务器启动
+
+	fmt.Println("\n🧪 开始测试客户端注册链路...")
+
+	// 测试案例1: 机密客户端注册
+	fmt.Println("\n📝 测试1: 注册机密客户端")
+	testCase1 := auth.OAuthClientMetadata{
+		RedirectUris:            []string{"https://example.com/callback"},
+		TokenEndpointAuthMethod: "client_secret_post",
+		GrantTypes:              []string{"authorization_code", "refresh_token"},
+		ResponseTypes:           []string{"code"},
+		ClientName:              "测试应用1",
+		Scope:                   "read write",
+	}
+
+	result1, err := registerClient(testCase1)
+	if err != nil {
+		log.Printf("❌ 测试1失败: %v", err)
+	} else {
+		log.Printf("✅ 测试1成功:")
+		log.Printf("   Client ID: %s", result1.ClientID)
+		log.Printf("   Client Secret: %s", result1.ClientSecret)
+		log.Printf("   Client Name: %s", result1.ClientName)
+	}
+
+	// 测试案例2: 公共客户端注册
+	fmt.Println("\n📝 测试2: 注册公共客户端")
+	testCase2 := auth.OAuthClientMetadata{
+		RedirectUris:            []string{"https://mobile-app.com/callback"},
+		TokenEndpointAuthMethod: "none", // 公共客户端
+		GrantTypes:              []string{"authorization_code"},
+		ResponseTypes:           []string{"code"},
+		ClientName:              "移动应用",
+		Scope:                   "read",
+	}
+
+	result2, err := registerClient(testCase2)
+	if err != nil {
+		log.Printf("❌ 测试2失败: %v", err)
+	} else {
+		log.Printf("✅ 测试2成功:")
+		log.Printf("   Client ID: %s", result2.ClientID)
+		log.Printf("   Client Secret: %s (公共客户端应为空)", result2.ClientSecret)
+		log.Printf("   Client Name: %s", result2.ClientName)
+	}
+
+	// 测试案例3: 错误请求
+	fmt.Println("\n📝 测试3: 无效请求（缺少必要字段）")
+	testCase3 := auth.OAuthClientMetadata{
+		RedirectUris: []string{"https://example.com/callback"},
+		// 缺少 TokenEndpointAuthMethod
+	}
+
+	_, err = registerClient(testCase3)
+	if err != nil {
+		log.Printf("✅ 测试3成功: 正确拒绝了无效请求: %v", err)
+	} else {
+		log.Printf("❌ 测试3失败: 应该拒绝无效请求")
+	}
+
+	// 验证元数据端点
+	fmt.Println("\n📝 测试4: 验证服务器元数据")
+	testMetadata()
+
+	fmt.Println("\n🎉 测试完成！")
+}
+
+// 注册客户端的辅助函数
+func registerClient(metadata auth.OAuthClientMetadata) (auth.OAuthClientInformationFull, error) {
+	jsonData, err := json.Marshal(metadata)
+	if err != nil {
+		return auth.OAuthClientInformationFull{}, err
+	}
+
+	resp, err := http.Post("http://localhost:8080/register", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return auth.OAuthClientInformationFull{}, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return auth.OAuthClientInformationFull{}, err
+	}
+
+	if resp.StatusCode != http.StatusCreated {
+		return auth.OAuthClientInformationFull{}, fmt.Errorf("注册失败 (状态码: %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result auth.OAuthClientInformationFull
+	if err := json.Unmarshal(body, &result); err != nil {
+		return auth.OAuthClientInformationFull{}, err
+	}
+
+	return result, nil
+}
+
+// 测试元数据端点
+func testMetadata() {
+	resp, err := http.Get("http://localhost:8080/.well-known/oauth-authorization-server")
+	if err != nil {
+		log.Printf("❌ 元数据请求失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("❌ 元数据端点返回错误状态码: %d", resp.StatusCode)
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("❌ 读取元数据响应失败: %v", err)
+		return
+	}
+
+	var metadata auth.OAuthMetadata
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		log.Printf("❌ 解析元数据失败: %v", err)
+		return
+	}
+
+	log.Printf("✅ 元数据端点正常:")
+	log.Printf("   Issuer: %s", metadata.Issuer)
+	log.Printf("   Registration Endpoint: %s", *metadata.RegistrationEndpoint)
+	log.Printf("   支持的授权类型: %v", metadata.GrantTypesSupported)
 }
 
 func main() {
-	log.Println("Starting server...")
+	// 启动测试
+	go func() {
+		testClientRegistration()
+	}()
 
-	// 1. 创建代理 OAuth Provider，但指向本地端点
-	provider := providers.NewProxyOAuthServerProvider(providers.ProxyOptions{
-		Endpoints: providers.ProxyEndpoints{
-			// 关键修改：将外部 URL 改为本地 URL
-			AuthorizationURL: "http://localhost:3000/authorize",
-			TokenURL:         "http://localhost:3000/token",
-			RevocationURL:    "http://localhost:3000/revoke",
-			RegistrationURL:  "http://localhost:3000/register",
-		},
-		VerifyAccessToken: func(token string) (*server.AuthInfo, error) {
-			// 暂时返回一个模拟有效的用户信息
-			return &server.AuthInfo{
-				Token:    token,
-				ClientID: "test-client-id",
-				Scopes:   []string{"mcp.read", "mcp.write"},
-			}, nil
-		},
-		GetClient: func(clientID string) (*auth.OAuthClientInformationFull, error) {
-			// 返回一个模拟的客户端信息
-			if clientID == "test-client-id" {
-				return &auth.OAuthClientInformationFull{
-					OAuthClientMetadata: auth.OAuthClientMetadata{
-						RedirectURIs:  []string{"http://localhost:5173/callback"},
-						ResponseTypes: []string{"code"},
-						GrantTypes:    []string{"authorization_code", "refresh_token"},
-						ClientName:    strPtr("demo-client"),
-						Scope:         strPtr("mcp.read mcp.write"),
-					},
-					OAuthClientInformation: auth.OAuthClientInformation{
-						ClientID:     clientID,
-						ClientSecret: "test-secret",
-					},
-				}, nil
-			}
-			return nil, errors.NewOAuthError(errors.ErrInvalidClient, "Client not found", "")
-		},
-		Fetch: nil, // 可选自定义 HTTP 请求函数
-	})
-
-	ctx := context.Background()
-
-	// 2. 构建访问令牌校验器（本地 JWKS）
-	tv, err := server.NewTokenVerifier(ctx, server.TokenVerifierConfig{
-		Local: &server.LocalJWKSConfig{
-			JWKS: `{
-                "keys": [
-                    {
-                        "kty": "oct",
-                        "k": "dGVzdC1zZWNyZXQta2V5LWZvci1qd3QtdG9rZW4tc2lnbmluZw==",
-                        "kid": "test-key-id",
-                        "alg": "HS256"
-                    }
-                ]
-            }`,
-		},
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	//// 3. 手动生成 OAuth 元数据，用于 .well-known 端点
-	//meta, err := router.CreateOAuthMetadata(struct {
-	//	Provider                server.OAuthServerProvider
-	//	IssuerUrl               *url.URL
-	//	BaseUrl                 *url.URL
-	//	ServiceDocumentationUrl *url.URL
-	//	ScopesSupported         []string
-	//}{
-	//	Provider:                provider,
-	//	IssuerUrl:               mustURL("http://localhost:3000"),
-	//	BaseUrl:                 mustURL("http://localhost:3000"),
-	//	ServiceDocumentationUrl: mustURL("http://localhost:3000/docs"),
-	//	ScopesSupported:         []string{"mcp.read", "mcp.write"},
-	//})
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
-
-	// 4. 启动 MCP Server（包含鉴权上下文与 .well-known 元数据）
-	mcpServer := mcp.NewServer(
-		"Auth-Example-Server",
-		"1.0.0",
-		mcp.WithServerAddress(":3000"),
-		mcp.WithServerPath("/mcp"),
-
-		// 在每个请求前执行：抽取 Authorization: Bearer 并校验
-		mcp.WithHTTPContextFunc(mcp.NewAuthHTTPContextFunc(*tv, mcp.ServerAuthConfig{
-			Issuer:         "http://localhost:3000",
-			Audience:       []string{"http://localhost:3000"},
-			RequiredScopes: []string{"mcp.read"},
-		})),
-
-		//// 安装 .well-known 元数据端点
-		//mcp.WithOAuthMetadata(router.AuthMetadataOptions{
-		//	OAuthMetadata:           meta,
-		//	ResourceServerUrl:       mustURL("http://localhost:3000"),
-		//	ServiceDocumentationUrl: mustURL("http://localhost:3000/docs"),
-		//	ScopesSupported:         []string{"mcp.read", "mcp.write"},
-		//}),
-
-		// OAuth 路由：暴露 /authorize、/token 等端点
-		mcp.WithOAuthRoutes(router.AuthRouterOptions{
-			Provider:        provider,
-			IssuerUrl:       mustURL("http://localhost:3000"),
-			BaseUrl:         mustURL("http://localhost:3000"),
-			ScopesSupported: []string{"mcp.read", "mcp.write"},
-		}),
-	)
-
-	log.Println("Server listening on :3000")
-	log.Println("OAuth endpoints available:")
-	log.Println("  - Authorization: http://localhost:3000/authorize")
-	log.Println("  - Token: http://localhost:3000/token")
-	log.Println("  - Metadata: http://localhost:3000/.well-known/oauth-authorization-server")
-
-	if err := mcpServer.Start(); err != nil {
-		log.Fatal(err)
-	}
+	// 启动服务器（这会阻塞）
+	startTestServer()
 }

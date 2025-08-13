@@ -15,6 +15,15 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
+// validateOAuthTokens 验证OAuthTokens。
+func validateOAuthTokens(tokens *auth.OAuthTokens) error {
+	validate := validator.New()
+	if err := validate.Struct(tokens); err != nil {
+		return fmt.Errorf("validation errors: %v", err)
+	}
+	return nil
+}
+
 // ProxyEndpoints defines the OAuth 2.0/2.1 server endpoints used by the proxy.
 // It contains the URLs for various OAuth operations.
 //
@@ -52,6 +61,15 @@ type ProxyEndpoints struct {
 	// 如果提供，允许客户端动态注册到授权服务器。
 	// "https://auth.example.com/register"
 	RegistrationURL string `json:"registrationUrl,omitempty"`
+
+	// SkipLocalPkceValidation 是否跳过本地PKCE验证。
+	// 如果为true，服务器不会在本地执行PKCE验证，而是将code_verifier传递给上游服务器。
+	// 注意：仅当上游服务器执行实际的PKCE验证时，此值应为true。
+	// Whether to skip local PKCE validation.
+	// If true, the server will not perform PKCE validation locally and will pass the code_verifier to the upstream server.
+	// NOTE: This should only be true if the upstream server is performing the actual PKCE validation.
+	// 可选字段，默认false / Optional field, defaults to false
+	SkipLocalPkceValidation bool `json:"skipLocalPkceValidation,omitempty"`
 }
 
 // ProxyOptions 定义代理OAuth服务器的配置选项
@@ -89,17 +107,19 @@ type ProxyOAuthServerProvider struct {
 	// Function to fetch client information
 	getClient func(clientID string) (*auth.OAuthClientInformationFull, error)
 
-	// SkipLocalPkceValidation 是否跳过本地PKCE验证。
-	// 如果为true，服务器不会在本地执行PKCE验证，而是将code_verifier传递给上游服务器。
-	// 注意：仅当上游服务器执行实际的PKCE验证时，此值应为true。
-	// Whether to skip local PKCE validation.
-	// If true, the server will not perform PKCE validation locally and will pass the code_verifier to the upstream server.
-	// NOTE: This should only be true if the upstream server is performing the actual PKCE validation.
-	// 可选字段，默认false / Optional field, defaults to false
-	SkipLocalPkceValidation bool `json:"skipLocalPkceValidation,omitempty"`
-
+	// fixme fetch 自定义HTTP请求函数，可选
 	// Custom fetch implementation, optional
 	fetch auth.FetchFunc
+
+	// SkipLocalPkceValidation 跳过本地PKCE验证，默认为true
+	// Skips local PKCE validation, defaults to true
+	SkipLocalPkceValidation bool
+}
+
+type clientRegistrationInput struct {
+	auth.OAuthClientInformationFull
+	ClientSecret          string `json:"client_secret,omitempty"`
+	ClientSecretExpiresAt *int64 `json:"client_secret_expires_at,omitempty"`
 }
 
 // Authorize 处理OAuth授权请求并重定向到授权端点
@@ -173,6 +193,7 @@ func (p *ProxyOAuthServerProvider) doFetch(req *http.Request) (*http.Response, e
 
 func (p *ProxyOAuthServerProvider) RevokeToken(client auth.OAuthClientInformationFull, request auth.OAuthTokenRevocationRequest) error {
 	if p.endpoints.RevocationURL == "" {
+		//todo 增加错误码？
 		return fmt.Errorf("no revocation endpoint configured")
 	}
 	params := url.Values{
@@ -196,7 +217,8 @@ func (p *ProxyOAuthServerProvider) RevokeToken(client auth.OAuthClientInformatio
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("Token revocation failed: %v", resp.StatusCode), "")
+		//fixme
+		return errors.ErrRevokeTokenFailed
 	}
 
 	return nil
@@ -204,7 +226,7 @@ func (p *ProxyOAuthServerProvider) RevokeToken(client auth.OAuthClientInformatio
 
 // ClientsStore 返回 OAuthRegisteredClientsStore
 // Returns an OAuthRegisteredClientsStore
-func (p *ProxyOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
+func (p *ProxyOAuthServerProvider) ClientsStore() server.OAuthClientsStore {
 	var store *server.OAuthClientsStore
 
 	if p.endpoints.RegistrationURL != "" {
@@ -214,7 +236,7 @@ func (p *ProxyOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
 			// Serialize client information to JSON
 			body, err := json.Marshal(client)
 			if err != nil {
-				//todo 日志化错误
+				//todo 格式化错误？
 				return nil, fmt.Errorf("failed to marshal client: %v", err)
 			}
 
@@ -222,7 +244,7 @@ func (p *ProxyOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
 			// Create HTTP request
 			req, err := http.NewRequest("POST", p.endpoints.RegistrationURL, bytes.NewReader(body))
 			if err != nil {
-				//todo 日志化错误
+				//todo 格式化错误？
 				return nil, fmt.Errorf("failed to create request: %v", err)
 			}
 			req.Header.Set("Content-Type", "application/json")
@@ -237,16 +259,17 @@ func (p *ProxyOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
 
 			// 检查响应状态
 			// Check response status
-			if resp.StatusCode != http.StatusOK {
-				// return nil, &ServerError{Message: fmt.Sprintf("client registration failed: %v", resp.StatusCode)
-				return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("client registration failed: %v", resp.StatusCode), "")
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+				// return nil, &ServerError{Message: fmt.Sprintf("client registration failed: %v", resp.StatusCode)}
+				//todo 格式化错误？
+				return nil, fmt.Errorf("client registration failed: %v", resp.StatusCode)
 			}
 
 			// 解析响应
 			// Parse response
 			var data auth.OAuthClientInformationFull
 			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-				//todo 日志化错误
+				//todo 格式化错误？
 				return nil, fmt.Errorf("failed to decode response: %v", err)
 			}
 
@@ -260,7 +283,7 @@ func (p *ProxyOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
 		store = server.NewOAuthClientStore(p.getClient)
 	}
 
-	return store
+	return *store
 }
 
 // ChallengeForAuthorizationCode 返回指定授权开始时使用的 codeChallenge 值。
@@ -271,11 +294,17 @@ func (p *ProxyOAuthServerProvider) ChallengeForAuthorizationCode(client auth.OAu
 	return "", nil
 }
 
-func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthClientInformationFull, authorizationCode string, codeVerifier *string, redirectUri *string, resource *url.URL) (*auth.OAuthTokens, error) {
+func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(
+	client auth.OAuthClientInformationFull,
+	authorizationCode string,
+	codeVerifier *string, // 可选，若为nil表示未提供 / Optional, nil if not provided
+	redirectUri *string, // 可选，若为nil表示未提供 / Optional, nil if not provided
+	resource *url.URL, // 可选，若为nil表示未提供 / Optional, nil if not provided
+) (auth.OAuthTokens, error) {
 	// 验证 token URL
 	// Validate token URL
 	if p.endpoints.TokenURL == "" {
-		return nil, fmt.Errorf("no token endpoint configured")
+		return auth.OAuthTokens{}, fmt.Errorf("no token endpoint configured")
 	}
 	// 构建表单参数
 	// Build form parameters
@@ -301,7 +330,7 @@ func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthCl
 	// Create HTTP request
 	req, err := http.NewRequest("POST", p.endpoints.TokenURL, bytes.NewReader([]byte(params.Encode())))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
+		return auth.OAuthTokens{}, fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
@@ -309,26 +338,26 @@ func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthCl
 	// Perform HTTP request
 	resp, err := p.doFetch(req)
 	if err != nil {
-		return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("token exchange failed: %v", resp.StatusCode), "")
+		return auth.OAuthTokens{}, fmt.Errorf("token exchange failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	// 检查响应状态
 	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("token exchange failed: %v", resp.StatusCode), "")
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return auth.OAuthTokens{}, fmt.Errorf("token exchange failed: %d", resp.StatusCode)
 	}
 
 	// 解析响应 JSON
 	// Parse response JSON
 	var data auth.OAuthTokens
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %v", err)
+		return auth.OAuthTokens{}, fmt.Errorf("failed to decode response: %v", err)
 	}
 
 	// 返回令牌
 	// Return tokens
-	return &data, nil
+	return data, nil
 }
 
 func (p *ProxyOAuthServerProvider) ExchangeRefreshToken(
@@ -375,8 +404,8 @@ func (p *ProxyOAuthServerProvider) ExchangeRefreshToken(
 	defer resp.Body.Close()
 
 	// 检查响应状态
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("token refresh failed: %v", resp.StatusCode), "")
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("token refresh failed: %v", resp.StatusCode)
 	}
 
 	// 解析响应
@@ -391,19 +420,4 @@ func (p *ProxyOAuthServerProvider) ExchangeRefreshToken(
 	}
 
 	return &data, nil
-}
-
-// validateOAuthTokens 验证OAuthTokens结构体
-func validateOAuthTokens(tokens *auth.OAuthTokens) error {
-	validate := validator.New()
-	if err := validate.Struct(tokens); err != nil {
-		return fmt.Errorf("validation errors: %v", err)
-	}
-	return nil
-}
-
-// GetSkipLocalPkceValidation returns the skipLocalPkceValidation setting
-// This method allows the token handler to check if PKCE validation should be skipped locally
-func (p *ProxyOAuthServerProvider) GetSkipLocalPkceValidation() bool {
-	return p.SkipLocalPkceValidation
 }

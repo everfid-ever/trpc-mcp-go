@@ -4,22 +4,22 @@ import "net/http"
 
 // OAuthClientMetadata defines RFC 7591 OAuth 2.0 Dynamic Client Registration metadata
 type OAuthClientMetadata struct {
-	RedirectURIs            []string    `json:"redirect_uris"`
+	RedirectUris            []string    `json:"redirect_uris"`
 	TokenEndpointAuthMethod string      `json:"token_endpoint_auth_method,omitempty"`
 	GrantTypes              []string    `json:"grant_types,omitempty"`
 	ResponseTypes           []string    `json:"response_types,omitempty"`
-	ClientName              *string     `json:"client_name,omitempty"`
-	ClientURI               *string     `json:"client_uri,omitempty"`
-	LogoURI                 *string     `json:"logo_uri,omitempty"`
-	Scope                   *string     `json:"scope,omitempty"`
+	ClientName              string      `json:"client_name,omitempty"`
+	ClientURI               string      `json:"client_uri,omitempty"`
+	LogoURI                 string      `json:"logo_uri,omitempty"`
+	Scope                   string      `json:"scope,omitempty"`
 	Contacts                []string    `json:"contacts,omitempty"`
-	TosURI                  *string     `json:"tos_uri,omitempty"`
-	PolicyURI               *string     `json:"policy_uri,omitempty"`
-	JwksURI                 *string     `json:"jwks_uri,omitempty"`
+	TosURI                  string      `json:"tos_uri,omitempty"`
+	PolicyURI               string      `json:"policy_uri,omitempty"`
+	JwksURI                 string      `json:"jwks_uri,omitempty"`
 	Jwks                    interface{} `json:"jwks,omitempty"`
-	SoftwareID              *string     `json:"software_id,omitempty"`
-	SoftwareVersion         *string     `json:"software_version,omitempty"`
-	SoftwareStatement       *string     `json:"software_statement,omitempty"`
+	SoftwareID              string      `json:"software_id,omitempty"`
+	SoftwareVersion         string      `json:"software_version,omitempty"`
+	SoftwareStatement       string      `json:"software_statement,omitempty"`
 }
 
 // OAuthClientInformation defines RFC 7591 OAuth 2.0 Dynamic Client Registration client information
@@ -34,6 +34,12 @@ type OAuthClientInformation struct {
 type OAuthClientInformationFull struct {
 	OAuthClientMetadata
 	OAuthClientInformation
+}
+
+// OAuthClientRegistrationError defines RFC 7591 OAuth 2.0 Dynamic Client Registration error response
+type OAuthClientRegistrationError struct {
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description,omitempty"`
 }
 
 // OAuthProtectedResourceMetadata defines RFC 9728 OAuth Protected Resource Metadata
@@ -119,14 +125,6 @@ type AuthorizationServerMetadata interface {
 	// GetResponseTypesSupported 返回服务器支持的响应类型。
 	// Returns the response types supported by the server.
 	GetResponseTypesSupported() []string
-
-	// GetGrantTypesSupported 返回服务器支持的授权类型。
-	// Returns the grant types supported by the server.
-	GetGrantTypesSupported() []string
-
-	// GetTokenEndpointAuthMethodsSupported 返回令牌端点支持的客户端认证方法。
-	// Returns the client authentication methods supported by the token endpoint.
-	GetTokenEndpointAuthMethodsSupported() []string
 }
 
 // OAuthMetadata 定义OAuth 2.0授权服务器元数据，符合RFC 8414。
@@ -165,14 +163,6 @@ func (m OAuthMetadata) GetTokenEndpoint() string {
 
 func (m OAuthMetadata) GetResponseTypesSupported() []string {
 	return m.ResponseTypesSupported
-}
-
-func (m OAuthMetadata) GetGrantTypesSupported() []string {
-	return m.GrantTypesSupported
-}
-
-func (m OAuthMetadata) GetTokenEndpointAuthMethodsSupported() []string {
-	return m.TokenEndpointAuthMethodsSupported
 }
 
 // OpenIdProviderMetadata 定义OpenID Connect Discovery 1.0提供者元数据。
@@ -214,24 +204,6 @@ type OpenIdProviderMetadata struct {
 	OpTosUri                                   *string  `json:"op_tos_uri,omitempty"`
 }
 
-// AuthOptions contains configuration options for the OAuth authorization process
-type AuthOptions struct {
-	ServerUrl           string    // OAuth server URL
-	ResourceMetadataUrl *string   // Resource metadata URL
-	AuthorizationCode   *string   // Authorization code
-	Scope               *string   // Requested authorization scope
-	ProtocolVersion     *string   // OAuth protocol version
-	FetchFn             FetchFunc // Custom HTTP request function
-}
-
-// DiscoveryOptions contains options for discovering OAuth server metadata
-type DiscoveryOptions struct {
-	ServerUrl           string    // Server URL
-	ResourceMetadataUrl *string   // Resource metadata URL
-	FetchFn             FetchFunc // Custom HTTP request function
-	ProtocolVersion     *string   // Protocol version
-}
-
 func (m OpenIdProviderMetadata) GetIssuer() string {
 	return m.Issuer
 }
@@ -246,14 +218,6 @@ func (m OpenIdProviderMetadata) GetTokenEndpoint() string {
 
 func (m OpenIdProviderMetadata) GetResponseTypesSupported() []string {
 	return m.ResponseTypesSupported
-}
-
-func (m OpenIdProviderMetadata) GetGrantTypesSupported() []string {
-	return m.GrantTypesSupported
-}
-
-func (m OpenIdProviderMetadata) GetTokenEndpointAuthMethodsSupported() []string {
-	return m.TokenEndpointAuthMethodsSupported
 }
 
 // OpenIdProviderDiscoveryMetadata 定义OpenID Connect发现元数据，合并OAuth 2.0字段。
@@ -276,14 +240,6 @@ func (m OpenIdProviderDiscoveryMetadata) GetTokenEndpoint() string {
 
 func (m OpenIdProviderDiscoveryMetadata) GetResponseTypesSupported() []string {
 	return m.OpenIdProviderMetadata.ResponseTypesSupported
-}
-
-func (m OpenIdProviderDiscoveryMetadata) GetGrantTypesSupported() []string {
-	return m.OpenIdProviderMetadata.GrantTypesSupported
-}
-
-func (m OpenIdProviderDiscoveryMetadata) GetTokenEndpointAuthMethodsSupported() []string {
-	return m.OpenIdProviderMetadata.TokenEndpointAuthMethodsSupported
 }
 
 type FetchFunc func(url string, req *http.Request) (*http.Response, error)
