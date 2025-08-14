@@ -10,6 +10,7 @@ import (
 	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
@@ -126,13 +127,11 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 			return
 		}
 
-		// TODO 客户端认证（从上下文中获取，应该由中间件设置）
-		// 从 HTTP 上下文获取客户端信息（需要通过中间件设置）
-		client, ok := r.Context().Value("client").(auth.OAuthClientInformationFull)
+		// 使用AuthenticateClient中间件设置的客户端信息
+		client, ok := middleware.GetAuthenticatedClient(r)
 		if !ok {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-
 			errResp := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
 			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
@@ -140,9 +139,9 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 
 		switch tokenReq.GrantType {
 		case "authorization_code":
-			handleAuthorizationCodeGrantHTTP(w, r, validate, options.Provider, client)
+			handleAuthorizationCodeGrantHTTP(w, r, validate, options.Provider, *client)
 		case "refresh_token":
-			handleRefreshTokenGrantHTTP(w, r, validate, options.Provider, client)
+			handleRefreshTokenGrantHTTP(w, r, validate, options.Provider, *client)
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
