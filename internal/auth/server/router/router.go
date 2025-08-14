@@ -31,10 +31,10 @@ type AuthRouterOptions struct {
 	ResourceName *string
 
 	// Individual options per route (simulated with interface{} for flexibility, assuming they are passed correctly to handlers)
-	AuthorizationOptions      *handler.AuthorizationHandlerOptions      // Omit<AuthorizationHandlerOptions, "provider">
-	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions // Omit<ClientRegistrationHandlerOptions, "clientsStore">
-	RevocationOptions         interface{}                               // Omit<RevocationHandlerOptions, "provider">
-	TokenOptions              interface{}                               // Omit<TokenHandlerOptions, "provider">
+	AuthorizationOptions      *handler.AuthorizationHandlerOptions
+	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions
+	RevocationOptions         *handler.RevocationHandlerOptions // TODO Omit<RevocationHandlerOptions, "provider">
+	TokenOptions              interface{}                       // TODO Omit<TokenHandlerOptions, "provider">
 }
 
 // AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
@@ -235,7 +235,9 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 			revOpts.RateLimit = options.RevocationOptions.RateLimit
 		}
 
-		mux.Handle("POST "+revocationURL.Path, handler.RevocationHandler(revOpts))
+		ginRouter := gin.New()
+		ginRouter.POST(revocationURL.Path, handler.RevocationHandler(revOpts))
+		mux.Handle("POST "+revocationURL.Path, ginRouter)
 	}
 }
 
