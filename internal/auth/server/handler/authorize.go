@@ -11,6 +11,7 @@ import (
 	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/pkce"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
@@ -174,6 +175,14 @@ func AuthorizationHandler(options AuthorizationHandlerOptions) http.Handler {
 			}
 
 			state = reqParams.State
+
+			tempAuthParams := server.AuthorizationParams{
+				CodeChallenge: reqParams.CodeChallenge,
+			}
+
+			if err := pkce.ValidatePKCEParams(tempAuthParams); err != nil {
+				panic(errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), ""))
+			}
 
 			// Validate scopes
 			var requestedScopes []string

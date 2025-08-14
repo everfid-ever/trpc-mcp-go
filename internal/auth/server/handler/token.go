@@ -48,16 +48,9 @@ type RefreshTokenGrant struct {
 	Resource     *string `json:"resource,omitempty" validate:"omitempty,url"`
 }
 
-// TODO PKCE验证函数 - 简化的实现，实际应该使用crypto包
-func verifyChallenge(codeVerifier, codeChallenge string) bool {
-	// 这里应该实现实际的PKCE验证逻辑
-	// 简化实现，实际应该根据challenge method进行SHA256等计算
-	return len(codeVerifier) >= 43 && len(codeVerifier) <= 128
-}
-
 // TokenHandler creates a token endpoint handler
 func TokenHandler(options TokenHandlerOptions) gin.HandlerFunc {
-	// 创建验证器
+	// Create a validator
 	validate := validator.New()
 
 	// Setting up a rate limiter
@@ -139,7 +132,7 @@ func TokenHandler(options TokenHandlerOptions) gin.HandlerFunc {
 
 // handleAuthorizationCodeGrant processes authorization code grant
 func handleAuthorizationCodeGrant(c *gin.Context, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
-	// 解析授权码grant请求
+	// Parsing the authorization code grant request
 	var redirectURI *string
 	if uri := c.Request.FormValue("redirect_uri"); uri != "" {
 		redirectURI = &uri
@@ -163,33 +156,8 @@ func handleAuthorizationCodeGrant(c *gin.Context, validate *validator.Validate, 
 		return
 	}
 
-	// 检查是否跳过本地PKCE验证
-	skipLocalPkceValidation := false
-	if skipper, ok := provider.(interface{ SkipLocalPkceValidation() bool }); ok {
-		skipLocalPkceValidation = skipper.SkipLocalPkceValidation()
-	}
-
-	// 执行本地PKCE验证（除非明确跳过）
-	if !skipLocalPkceValidation {
-		codeChallenge, err := provider.ChallengeForAuthorizationCode(client, grant.Code)
-		if err != nil {
-			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, "Invalid authorization code", "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
-			return
-		}
-
-		if !verifyChallenge(grant.CodeVerifier, codeChallenge) {
-			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, "code_verifier does not match the challenge", "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
-			return
-		}
-	}
-
-	// Prepare parameters
-	var codeVerifier *string
-	if skipLocalPkceValidation {
-		codeVerifier = &grant.CodeVerifier
-	}
+	// Prepare parameters - 始终传递code_verifier
+	codeVerifier := &grant.CodeVerifier
 
 	var resourceURL *url.URL
 	if grant.Resource != nil {

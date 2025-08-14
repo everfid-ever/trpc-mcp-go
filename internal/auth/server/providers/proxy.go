@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/pkce"
 
 	"github.com/go-playground/validator/v10"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -102,29 +100,11 @@ type ProxyOAuthServerProvider struct {
 
 	// Custom fetch implementation, optional
 	fetch auth.FetchFunc
-
-	challengeStore map[string]string // TODO 更安全的存储方式
-
-	challengeMutex sync.RWMutex // 添加互斥锁
 }
 
 // Authorize 处理OAuth授权请求并重定向到授权端点
 // Handles OAuth authorization requests and redirects to the authorization endpoint
 func (p *ProxyOAuthServerProvider) Authorize(client auth.OAuthClientInformationFull, params server.AuthorizationParams, res http.ResponseWriter, req *http.Request) error {
-	// PKCE 参数验证
-	if err := pkce.ValidatePKCEParams(params); err != nil {
-		return err
-	}
-
-	// 存储challenge
-	if !p.SkipLocalPkceValidation {
-		storeKey := p.generateChallengeStoreKey(client.ClientID, params.RedirectURI)
-
-		p.challengeMutex.Lock()
-		p.challengeStore[storeKey] = params.CodeChallenge
-		p.challengeMutex.Unlock()
-	}
-
 	// 验证授权端点URL
 	// Validate the authorization endpoint URL
 	targetURL, err := url.Parse(p.endpoints.AuthorizationURL)
@@ -176,9 +156,7 @@ func NewProxyOAuthServerProvider(options ProxyOptions) *ProxyOAuthServerProvider
 		verifyAccessToken:       options.VerifyAccessToken,
 		getClient:               options.GetClient,
 		fetch:                   options.Fetch,
-		SkipLocalPkceValidation: false,
-		challengeStore:          make(map[string]string),
-		challengeMutex:          sync.RWMutex{},
+		SkipLocalPkceValidation: true,
 	}
 	return provider
 }
@@ -290,43 +268,10 @@ func (p *ProxyOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
 func (p *ProxyOAuthServerProvider) ChallengeForAuthorizationCode(client auth.OAuthClientInformationFull, authorizationCode string) (string, error) {
 	// In a proxy setup, we don't store the code challenge ourselves
 	// Instead, we proxy the token request and let the upstream server validate it
-	if p.SkipLocalPkceValidation {
-		return "", nil
-	}
-
-	p.challengeMutex.Lock()
-	defer p.challengeMutex.Unlock()
-
-	// 遍历存储查找匹配的challenge
-	for key, challenge := range p.challengeStore {
-		if strings.HasPrefix(key, client.ClientID+":") {
-			delete(p.challengeStore, key)
-			return challenge, nil
-		}
-	}
-
-	return "", fmt.Errorf("authorization code not found or expired")
+	return "", nil
 }
 
 func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthClientInformationFull, authorizationCode string, codeVerifier *string, redirectUri *string, resource *url.URL) (*auth.OAuthTokens, error) {
-	// 强制要求code_verifier
-	if codeVerifier == nil || *codeVerifier == "" {
-		return nil, errors.NewOAuthError(errors.ErrInvalidRequest, "code_verifier is required", "")
-	}
-
-	// 如果不跳过本地验证，进行PKCE验证
-	if !p.SkipLocalPkceValidation {
-		challenge, err := p.ChallengeForAuthorizationCode(client, authorizationCode)
-		if err != nil {
-			return nil, errors.NewOAuthError(errors.ErrInvalidGrant, "invalid authorization code", "")
-		}
-
-		// 验证code_verifier
-		if err := pkce.VerifyPKCE(challenge, *codeVerifier); err != nil {
-			return nil, errors.NewOAuthError(errors.ErrInvalidGrant, "PKCE verification failed", "")
-		}
-	}
-
 	// 验证 token URL
 	// Validate token URL
 	if p.endpoints.TokenURL == "" {
@@ -389,7 +334,7 @@ func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthCl
 func (p *ProxyOAuthServerProvider) ExchangeRefreshToken(
 	client auth.OAuthClientInformationFull,
 	refreshToken string,
-	scopes []string, // 可选，若为空表示未提供 / Optional, empty slice if not provided
+	scopes []string,   // 可选，若为空表示未提供 / Optional, empty slice if not provided
 	resource *url.URL, // 可选，若为nil表示未提供 / Optional, nil if not provided
 ) (*auth.OAuthTokens, error) {
 	params := url.Values{
@@ -455,8 +400,4 @@ func validateOAuthTokens(tokens *auth.OAuthTokens) error {
 		return fmt.Errorf("validation errors: %v", err)
 	}
 	return nil
-}
-
-func (p *ProxyOAuthServerProvider) generateChallengeStoreKey(clientID, redirectURI string) string {
-	return fmt.Sprintf("%s:%s", clientID, redirectURI)
 }
