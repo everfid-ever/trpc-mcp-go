@@ -2,10 +2,11 @@ package handler
 
 import (
 	"encoding/json"
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
 // MetadataHandler creates a handler for OAuth metadata endpoints
@@ -27,43 +28,18 @@ func MetadataHandler(metadata interface{}) http.HandlerFunc {
 		if r.Method != "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":             "method_not_allowed",
-				"error_description": "Only GET method is allowed",
-			})
+			oauthErr := errors.NewOAuthError(
+				errors.ErrMethodNotAllowed,
+				"Only GET method is allowed",
+				"",
+			)
+			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(metadata)
-	}
-}
-
-// MetadataHandlerGin creates a Gin handler for OAuth metadata endpoints
-func MetadataHandlerGin(metadata interface{}) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Configure CORS to allow any origin, to make accessible to web-based MCP clients
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		// Handle preflight OPTIONS request
-		if c.Request.Method == "OPTIONS" {
-			c.Status(http.StatusOK)
-			return
-		}
-
-		// Restrict to only GET method
-		if c.Request.Method != "GET" {
-			c.JSON(http.StatusMethodNotAllowed, gin.H{
-				"error":             "method_not_allowed",
-				"error_description": "Only GET method is allowed",
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, metadata)
 	}
 }
 
@@ -96,27 +72,15 @@ func AuthorizationServerMetadataHandler(baseURL string, store server.OAuthClient
 }
 
 // SetupMetadataRouter sets up a router with metadata endpoint
-func SetupMetadataRouter(metadata interface{}) *gin.Engine {
-	router := gin.New()
+func SetupMetadataRouter(metadata interface{}) *http.ServeMux {
+	mux := http.NewServeMux()
 
-	// Configure CORS middleware
-	router.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	handler := middleware.CorsMiddleware(
+		middleware.AllowedMethods([]string{"GET"})(
+			MetadataHandler(metadata), // 使用已有的原生 HTTP 版本
+		),
+	)
 
-		if c.Request.Method == "OPTIONS" {
-			c.Status(http.StatusOK)
-			return
-		}
-
-		c.Next()
-	})
-
-	// Restrict HTTP methods
-	router.Use(AllowedMethods([]string{"GET"}))
-
-	router.GET("/", MetadataHandlerGin(metadata))
-
-	return router
+	mux.Handle("/", handler)
+	return mux
 }

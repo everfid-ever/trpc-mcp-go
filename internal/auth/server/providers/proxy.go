@@ -334,7 +334,7 @@ func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthCl
 func (p *ProxyOAuthServerProvider) ExchangeRefreshToken(
 	client auth.OAuthClientInformationFull,
 	refreshToken string,
-	scopes []string,   // 可选，若为空表示未提供 / Optional, empty slice if not provided
+	scopes []string, // 可选，若为空表示未提供 / Optional, empty slice if not provided
 	resource *url.URL, // 可选，若为nil表示未提供 / Optional, nil if not provided
 ) (*auth.OAuthTokens, error) {
 	params := url.Values{

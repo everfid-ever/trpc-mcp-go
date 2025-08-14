@@ -3,12 +3,14 @@ package handler
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"net/http"
 	"time"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -79,7 +81,7 @@ func (rl *RateLimiter) Allow() bool {
 var globalRateLimiter = NewRateLimiter(rate.Every(3*time.Minute), 20) // 20 requests per hour (approximated)
 
 // ClientRegistrationHandler creates a handler for OAuth client registration
-func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) gin.HandlerFunc {
+func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.HandlerFunc {
 	if options.ClientsStore == nil {
 		panic("Client registration store does not support registering clients")
 	}
@@ -94,48 +96,61 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) gin.Han
 		clientIdGeneration = *options.ClientIdGeneration
 	}
 
-	return func(c *gin.Context) {
-		// Configure CORS to allow any origin
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "POST, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		c.Header("Cache-Control", "no-store")
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Configure CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Cache-Control", "no-store")
 
 		// Handle preflight OPTIONS request
-		if c.Request.Method == "OPTIONS" {
-			c.Status(http.StatusOK)
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		// Restrict to only POST method
-		if c.Request.Method != "POST" {
-			c.JSON(http.StatusMethodNotAllowed, gin.H{
-				"error":             "method_not_allowed",
-				"error_description": "Only POST method is allowed",
-			})
-			return
-		}
-
-		// Apply rate limiting unless explicitly disabled
+		// Rate limiting
 		if options.RateLimit != nil {
 			if !globalRateLimiter.Allow() {
-				errorResp := errors.ErrTooManyRequests
-				c.JSON(http.StatusTooManyRequests, errorResp)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+
+				oauthErr := errors.NewOAuthError(
+					errors.ErrTooManyRequests,
+					"Too many requests",
+					"",
+				)
+				json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 				return
 			}
 		}
 
+		// Parse JSON request body
 		var clientMetadata auth.OAuthClientMetadata
-		if err := c.ShouldBindJSON(&clientMetadata); err != nil {
-			errorResp := errors.ErrInvalidClientMetadata
-			c.JSON(http.StatusBadRequest, errorResp)
+		if err := json.NewDecoder(r.Body).Decode(&clientMetadata); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
+			oauthErr := errors.NewOAuthError(
+				errors.ErrInvalidClientMetadata,
+				"Invalid JSON in request body",
+				"",
+			)
+			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 			return
 		}
 
-		// Validate client metadata (basic validation)
+		// Validate client metadata
 		if err := validateClientMetadata(&clientMetadata); err != nil {
-			errorResp := errors.ErrInvalidClientMetadata
-			c.JSON(http.StatusBadRequest, errorResp)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
+			oauthErr := errors.NewOAuthError(
+				errors.ErrInvalidClientMetadata,
+				err.Error(),
+				"",
+			)
+			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 			return
 		}
 
@@ -146,8 +161,15 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) gin.Han
 		if !isPublicClient {
 			secret, err := generateClientSecret()
 			if err != nil {
-				errorResp := errors.ErrServerError
-				c.JSON(http.StatusInternalServerError, errorResp)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+
+				oauthErr := errors.NewOAuthError(
+					errors.ErrServerError,
+					"Failed to generate client secret",
+					"",
+				)
+				json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 				return
 			}
 			clientSecret = secret
@@ -185,39 +207,38 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) gin.Han
 
 		registeredClient, err := options.ClientsStore.RegisterClient(clientInfo)
 		if err != nil {
-			errorResp := errors.ErrServerError
-			c.JSON(http.StatusInternalServerError, errorResp)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+
+			oauthErr := errors.NewOAuthError(
+				errors.ErrServerError,
+				"Failed to register client",
+				"",
+			)
+			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 			return
 		}
 
-		c.JSON(http.StatusCreated, registeredClient)
+		// Success response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(registeredClient)
 	}
 }
 
 // SetupClientRegistrationRouter sets up a router with client registration endpoint
-func SetupClientRegistrationRouter(options ClientRegistrationHandlerOptions) *gin.Engine {
-	router := gin.New()
+func SetupClientRegistrationRouter(options ClientRegistrationHandlerOptions) *http.ServeMux {
+	mux := http.NewServeMux()
 
-	// Configure CORS middleware
-	router.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "POST, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	// 组合中间件：CORS + AllowedMethods + Handler
+	handler := middleware.CorsMiddleware(
+		middleware.AllowedMethods([]string{"POST"})(
+			http.HandlerFunc(ClientRegistrationHandler(options)),
+		),
+	)
 
-		if c.Request.Method == "OPTIONS" {
-			c.Status(http.StatusOK)
-			return
-		}
-
-		c.Next()
-	})
-
-	// Restrict HTTP methods
-	router.Use(AllowedMethods([]string{"POST"}))
-
-	router.POST("/", ClientRegistrationHandler(options))
-
-	return router
+	mux.Handle("/", handler)
+	return mux
 }
 
 // generateClientSecret generates a random 32-byte hex string
