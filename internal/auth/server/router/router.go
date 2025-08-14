@@ -1,7 +1,6 @@
 package router
 
 import (
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"net/url"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -184,10 +183,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 		tokenOptions.RateLimit = options.TokenOptions.RateLimit
 	}
 
-	ginRouter := gin.New()
-	ginRouter.POST(tokenURL.Path, handler.TokenHandler(tokenOptions))
-	mux.Handle("POST "+tokenURL.Path, ginRouter)
-
+	mux.Handle(tokenURL.Path, handler.TokenHandler(tokenOptions))
 	// 3) Metadata router
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
 	McpAuthMetadataRouter(mux, AuthMetadataOptions{
@@ -219,10 +215,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 			}
 		}
 
-		ginRouter := gin.New()
-		ginRouter.POST(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
-
-		mux.Handle(registrationURL.Path, ginRouter)
+		mux.Handle(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 	}
 
 	// 5) Revocation endpoint (optional)
@@ -237,9 +230,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 			revOpts.RateLimit = options.RevocationOptions.RateLimit
 		}
 
-		ginRouter := gin.New()
-		ginRouter.POST(revocationURL.Path, handler.RevocationHandler(revOpts))
-		mux.Handle("POST "+revocationURL.Path, ginRouter)
+		mux.Handle("POST "+revocationURL.Path, handler.RevocationHandler(revOpts))
 	}
 }
 

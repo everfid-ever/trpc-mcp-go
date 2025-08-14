@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"github.com/gin-gonic/gin"
+	"encoding/json"
 	"github.com/go-playground/validator/v10"
 	"golang.org/x/time/rate"
 	"net/http"
@@ -48,8 +48,8 @@ type RefreshTokenGrant struct {
 	Resource     *string `json:"resource,omitempty" validate:"omitempty,url"`
 }
 
-// TokenHandler creates a token endpoint handler
-func TokenHandler(options TokenHandlerOptions) gin.HandlerFunc {
+// TokenHandler creates a token endpoint handler (native HTTP)
+func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 	// Create a validator
 	validate := validator.New()
 
@@ -61,98 +61,124 @@ func TokenHandler(options TokenHandlerOptions) gin.HandlerFunc {
 		limiter = rate.NewLimiter(limit, options.RateLimit.Max)
 	}
 
-	return func(c *gin.Context) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		// Set CORS headers to allow access from any origin (to support web-based MCP clients)
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "POST")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		// Handle preflight OPTIONS request
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 
 		// Check HTTP Method
-		if c.Request.Method != http.MethodPost {
-			c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method_not_allowed"})
+		if r.Method != http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+
+			oauthErr := errors.NewOAuthError(
+				errors.ErrMethodNotAllowed,
+				"Only POST method is allowed",
+				"",
+			)
+			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 			return
 		}
 
 		// Rate limiting is applied (unless explicitly disabled)
 		if limiter != nil {
 			if !limiter.Allow() {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+
 				errResp := errors.NewOAuthError(errors.ErrTooManyRequests, "You have exceeded the rate limit for token requests", "")
-				c.JSON(http.StatusTooManyRequests, errResp.ToResponseStruct())
+				json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 				return
 			}
 		}
 
 		// Set cache-control headers
-		c.Header("Cache-Control", "no-store")
+		w.Header().Set("Cache-Control", "no-store")
 
 		// Parsing form data
-		if err := c.Request.ParseForm(); err != nil {
+		if err := r.ParseForm(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
 			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, "Failed to parse form data", "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
 		}
 
 		// Verify basic token request
 		tokenReq := TokenRequest{
-			GrantType: c.Request.FormValue("grant_type"),
+			GrantType: r.FormValue("grant_type"),
 		}
 
 		if err := validate.Struct(tokenReq); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
 			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
 		}
 
 		// TODO 客户端认证（从上下文中获取，应该由中间件设置）
-		clientInterface, exists := c.Get("client")
-		if !exists {
-			errResp := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-			c.JSON(http.StatusInternalServerError, errResp.ToResponseStruct())
-			return
-		}
-
-		client, ok := clientInterface.(auth.OAuthClientInformationFull)
+		// 从 HTTP 上下文获取客户端信息（需要通过中间件设置）
+		client, ok := r.Context().Value("client").(auth.OAuthClientInformationFull)
 		if !ok {
-			errorResponse := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-			c.JSON(http.StatusInternalServerError, errorResponse)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+
+			errResp := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
 		}
 
 		switch tokenReq.GrantType {
 		case "authorization_code":
-			handleAuthorizationCodeGrant(c, validate, options.Provider, client)
+			handleAuthorizationCodeGrantHTTP(w, r, validate, options.Provider, client)
 		case "refresh_token":
-			handleRefreshTokenGrant(c, validate, options.Provider, client)
+			handleRefreshTokenGrantHTTP(w, r, validate, options.Provider, client)
 		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
 			errResp := errors.NewOAuthError(errors.ErrUnsupportedGrantType, "The grant type is not supported by this authorization server.", "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		}
 	}
 }
 
-// handleAuthorizationCodeGrant processes authorization code grant
-func handleAuthorizationCodeGrant(c *gin.Context, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
+// handleAuthorizationCodeGrantHTTP processes authorization code grant (native HTTP)
+func handleAuthorizationCodeGrantHTTP(w http.ResponseWriter, r *http.Request, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
 	// Parsing the authorization code grant request
 	var redirectURI *string
-	if uri := c.Request.FormValue("redirect_uri"); uri != "" {
+	if uri := r.FormValue("redirect_uri"); uri != "" {
 		redirectURI = &uri
 	}
 
 	var resource *string
-	if res := c.Request.FormValue("resource"); res != "" {
+	if res := r.FormValue("resource"); res != "" {
 		resource = &res
 	}
 
 	grant := AuthorizationCodeGrant{
-		Code:         c.Request.FormValue("code"),
-		CodeVerifier: c.Request.FormValue("code_verifier"),
+		Code:         r.FormValue("code"),
+		CodeVerifier: r.FormValue("code_verifier"),
 		RedirectURI:  redirectURI,
 		Resource:     resource,
 	}
 
 	if err := validate.Struct(grant); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+
 		errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
-		c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+		json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		return
 	}
 
@@ -164,8 +190,11 @@ func handleAuthorizationCodeGrant(c *gin.Context, validate *validator.Validate, 
 		var err error
 		resourceURL, err = url.Parse(*grant.Resource)
 		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
 			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid resource URL", "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
 		}
 	}
@@ -180,46 +209,56 @@ func handleAuthorizationCodeGrant(c *gin.Context, validate *validator.Validate, 
 	)
 
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+
 		// Return an appropriate OAuth error response based on the error type
 		switch {
 		case err == errors.ErrInvalidParams || err == errors.ErrMissingParams:
+			w.WriteHeader(http.StatusBadRequest)
 			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		case err == errors.ErrInvalidJSONRPCParams:
+			w.WriteHeader(http.StatusBadRequest)
 			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, err.Error(), "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		default:
+			w.WriteHeader(http.StatusInternalServerError)
 			errResp := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-			c.JSON(http.StatusInternalServerError, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		}
 		return
 	}
 
-	c.JSON(http.StatusOK, tokens)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(tokens)
 }
 
-// handleRefreshTokenGrant handles refresh token grant
-func handleRefreshTokenGrant(c *gin.Context, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
+// handleRefreshTokenGrantHTTP handles refresh token grant (native HTTP)
+func handleRefreshTokenGrantHTTP(w http.ResponseWriter, r *http.Request, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
 	// 解析刷新token grant请求
 	var scope *string
-	if s := c.Request.FormValue("scope"); s != "" {
+	if s := r.FormValue("scope"); s != "" {
 		scope = &s
 	}
 
 	var resource *string
-	if res := c.Request.FormValue("resource"); res != "" {
+	if res := r.FormValue("resource"); res != "" {
 		resource = &res
 	}
 
 	grant := RefreshTokenGrant{
-		RefreshToken: c.Request.FormValue("refresh_token"),
+		RefreshToken: r.FormValue("refresh_token"),
 		Scope:        scope,
 		Resource:     resource,
 	}
 
 	if err := validate.Struct(grant); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+
 		errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
-		c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+		json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		return
 	}
 
@@ -235,8 +274,11 @@ func handleRefreshTokenGrant(c *gin.Context, validate *validator.Validate, provi
 		var err error
 		resourceURL, err = url.Parse(*grant.Resource)
 		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
 			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid resource URL", "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
 		}
 	}
@@ -245,19 +287,26 @@ func handleRefreshTokenGrant(c *gin.Context, validate *validator.Validate, provi
 	tokens, err := provider.ExchangeRefreshToken(client, grant.RefreshToken, scopes, resourceURL)
 
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+
 		switch {
 		case err == errors.ErrInvalidParams || err == errors.ErrMissingParams:
+			w.WriteHeader(http.StatusBadRequest)
 			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		case err == errors.ErrInvalidJSONRPCParams:
+			w.WriteHeader(http.StatusBadRequest)
 			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, err.Error(), "")
-			c.JSON(http.StatusBadRequest, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		default:
+			w.WriteHeader(http.StatusInternalServerError)
 			errResp := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-			c.JSON(http.StatusInternalServerError, errResp.ToResponseStruct())
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 		}
 		return
 	}
 
-	c.JSON(http.StatusOK, tokens)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(tokens)
 }
