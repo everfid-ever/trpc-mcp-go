@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"github.com/gin-gonic/gin"
+	"encoding/json"
 	"golang.org/x/time/rate"
 	"net/http"
 	"time"
@@ -25,22 +25,16 @@ type RevocationRateLimitConfig struct {
 }
 
 // RevocationHandler creates a handler for OAuth token revocation
-func RevocationHandler(opts RevocationHandlerOptions) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Configure CORS to allow any origin, to make accessible to web-based MCP clients
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "POST, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+func RevocationHandler(opts RevocationHandlerOptions) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Configure CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		// Handle preflight requests
-		if c.Request.Method == "OPTIONS" {
-			c.Status(http.StatusOK)
-			return
-		}
-
-		// Restrict to POST method only
-		if c.Request.Method != "POST" {
-			c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method_not_allowed", "error_description": "Only POST method is allowed"})
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
@@ -52,92 +46,118 @@ func RevocationHandler(opts RevocationHandlerOptions) gin.HandlerFunc {
 			)
 
 			if !limiter.Allow() {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+
 				tooManyRequestsError := errors.NewOAuthError(
 					errors.ErrTooManyRequests,
 					"You have exceeded the rate limit for token revocation requests",
 					"",
 				)
-				c.JSON(http.StatusTooManyRequests, tooManyRequestsError.ToResponseStruct())
+				json.NewEncoder(w).Encode(tooManyRequestsError.ToResponseStruct())
 				return
 			}
 		} else if opts.RateLimit == nil {
 			// Default rate limiting: 50 requests per 15 minutes
-			limiter := rate.NewLimiter(rate.Every(18*time.Second), 10) // 50 requests per 15 minutes ≈ 1 request per 18 seconds
+			limiter := rate.NewLimiter(rate.Every(18*time.Second), 10)
 
 			if !limiter.Allow() {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+
 				tooManyRequestsError := errors.NewOAuthError(
 					errors.ErrTooManyRequests,
 					"You have exceeded the rate limit for token revocation requests",
 					"",
 				)
-				c.JSON(http.StatusTooManyRequests, tooManyRequestsError.ToResponseStruct())
+				json.NewEncoder(w).Encode(tooManyRequestsError.ToResponseStruct())
 				return
 			}
 		}
 
 		// Authenticate and extract client details
-		client, err := AuthenticateClient(c, opts.Provider.ClientsStore())
+		client, err := AuthenticateClient(r, opts.Provider.ClientsStore())
 		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+
 			if oauthErr, ok := err.(errors.OAuthError); ok {
 				status := http.StatusBadRequest
 				if oauthErr.ErrorCode == errors.ErrServerError.Error() {
 					status = http.StatusInternalServerError
 				}
-				c.JSON(status, oauthErr.ToResponseStruct())
+				w.WriteHeader(status)
+				json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 				return
 			}
+
+			w.WriteHeader(http.StatusInternalServerError)
 			serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-			c.JSON(http.StatusInternalServerError, serverError.ToResponseStruct())
+			json.NewEncoder(w).Encode(serverError.ToResponseStruct())
 			return
 		}
 
-		c.Header("Cache-Control", "no-store")
+		w.Header().Set("Cache-Control", "no-store")
 
 		// Parse request body
 		var reqBody auth.OAuthTokenRevocationRequest
-		if err := c.ShouldBindJSON(&reqBody); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
 			invalidReqError := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
-			c.JSON(http.StatusBadRequest, invalidReqError.ToResponseStruct())
+			json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
 			return
 		}
 
 		// Validate request
 		if reqBody.Token == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
 			invalidReqError := errors.NewOAuthError(errors.ErrInvalidRequest, "token is required", "")
-			c.JSON(http.StatusBadRequest, invalidReqError.ToResponseStruct())
+			json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
 			return
 		}
 
 		if client == nil {
-			// This should never happen
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+
 			serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-			c.JSON(http.StatusInternalServerError, serverError.ToResponseStruct())
+			json.NewEncoder(w).Encode(serverError.ToResponseStruct())
 			return
 		}
 
-		// Revoke token - since OAuthServerProvider embeds SupportTokenRevocation,
-		// we can directly call RevokeToken method
+		// Revoke token
 		err = opts.Provider.RevokeToken(*client, reqBody)
 		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+
 			if oauthErr, ok := err.(errors.OAuthError); ok {
 				status := http.StatusBadRequest
 				if oauthErr.ErrorCode == errors.ErrServerError.Error() {
 					status = http.StatusInternalServerError
 				}
-				c.JSON(status, oauthErr.ToResponseStruct())
+				w.WriteHeader(status)
+				json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 				return
 			}
+
+			w.WriteHeader(http.StatusInternalServerError)
 			serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-			c.JSON(http.StatusInternalServerError, serverError.ToResponseStruct())
+			json.NewEncoder(w).Encode(serverError.ToResponseStruct())
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{})
+		// Success response - empty JSON object per OAuth 2.1 spec
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("{}"))
 	}
 }
 
-// AuthenticateClient authenticates the client from the request
-func AuthenticateClient(c *gin.Context, store *server.OAuthClientsStore) (*auth.OAuthClientInformationFull, error) {
+// AuthenticateClient authenticates the client from the HTTP request
+func AuthenticateClient(r *http.Request, store *server.OAuthClientsStore) (*auth.OAuthClientInformationFull, error) {
 	// Implementation would extract client credentials from Authorization header
 	// or from request body and validate against the clients store
 	// This is a placeholder - actual implementation depends on your auth mechanism
