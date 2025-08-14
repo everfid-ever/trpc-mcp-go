@@ -13,11 +13,11 @@ import (
 // RevocationHandlerOptions configuration for the token revocation endpoint
 type RevocationHandlerOptions struct {
 	Provider  server.OAuthServerProvider
-	RateLimit *RateLimitConfig // Set to nil to disable rate limiting for this endpoint
+	RateLimit *RevocationRateLimitConfig // Set to nil to disable rate limiting for this endpoint
 }
 
-// RateLimitConfig rate limiting configuration
-type RateLimitConfig struct {
+// RevocationRateLimitConfig rate limiting configuration
+type RevocationRateLimitConfig struct {
 	WindowMs int  // Window duration in milliseconds
 	Max      int  // Maximum requests per window
 	Burst    int  // Burst size for rate limiter

@@ -16,13 +16,13 @@ import (
 // TokenHandlerOptions defines configuration options for the token endpoint
 type TokenHandlerOptions struct {
 	Provider  server.OAuthServerProvider `json:"provider"`
-	RateLimit *RateLimitConfig           `json:"rateLimit,omitempty"` // 设置为nil禁用速率限制
+	RateLimit *TokenRateLimitConfig      `json:"rateLimit,omitempty"`
 }
 
 // TokenRateLimitConfig defines rate limit configuration
 type TokenRateLimitConfig struct {
-	WindowMs        int64       `json:"windowMs"` // 时间窗口（毫秒）
-	Max             int         `json:"max"`      // 最大请求数
+	WindowMs        int64       `json:"windowMs"` // Time window (milliseconds)
+	Max             int         `json:"max"`      // Maximum number of requests
 	StandardHeaders bool        `json:"standardHeaders"`
 	LegacyHeaders   bool        `json:"legacyHeaders"`
 	Message         interface{} `json:"message"`

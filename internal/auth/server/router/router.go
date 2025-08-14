@@ -213,7 +213,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 			regOpts.ClientsStore = clientsStore // Ensure the clients store is set
 		} else {
 			// Set default rate limiting
-			regOpts.RateLimit = &handler.RateLimitConfig{
+			regOpts.RateLimit = &handler.RegisterRateLimitConfig{
 				WindowMs: 60000,
 				Max:      10,
 			}
