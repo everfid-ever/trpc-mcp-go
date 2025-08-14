@@ -27,16 +27,17 @@ type ClientRegistrationHandlerOptions struct {
 	// Rate limiting configuration for the client registration endpoint.
 	// Set to nil to disable rate limiting for this endpoint.
 	// Registration endpoints are particularly sensitive to abuse and should be rate limited.
-	RateLimit *RateLimitConfig
+	RateLimit *RegisterRateLimitConfig
 
 	// Whether to generate a client ID before calling the client registration endpoint.
 	// If not set, defaults to true.
 	ClientIdGeneration *bool
 }
 
-type RateLimitConfig struct {
-	WindowMs int // Time window in milliseconds
-	Max      int // Maximum requests per window
+type RegisterRateLimitConfig struct {
+	WindowMs int    // Window duration in milliseconds
+	Max      int    // Maximum requests per window
+	Message  string // Customize over-limit prompt information
 }
 
 const DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS = 30 * 24 * 60 * 60 // 30 days
