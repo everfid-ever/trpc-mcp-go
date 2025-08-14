@@ -3,6 +3,7 @@ package middleware
 import (
 	"encoding/json"
 	"fmt"
+	"golang.org/x/time/rate"
 	"net/http"
 	"strings"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
@@ -53,4 +54,26 @@ func CorsMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// RateLimitMiddleware applies rate limiting
+func RateLimitMiddleware(limiter *rate.Limiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !limiter.Allow() {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+
+				tooManyRequestsError := errors.NewOAuthError(
+					errors.ErrTooManyRequests,
+					"You have exceeded the rate limit for token revocation requests",
+					"",
+				)
+				json.NewEncoder(w).Encode(tooManyRequestsError.ToResponseStruct())
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
