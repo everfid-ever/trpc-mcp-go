@@ -12,7 +12,7 @@ type SecurityMiddlewareOption struct {
 	verifier server.TokenVerifier
 }
 
-func AllowedMethods(allowedMethods []string) func(http.Handler) http.Handler {
+func AllowedMethods(allowedMethods []string, req http.Request) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			for _, method := range allowedMethods {
@@ -21,10 +21,10 @@ func AllowedMethods(allowedMethods []string) func(http.Handler) http.Handler {
 					return
 				}
 			}
-			err := &ErrMethodNotAllowed{...}
+			err := errors.NewOAuthError(errors.ErrMethodNotAllowed, "method not allowed", "")
 			w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
 			w.WriteHeader(http.StatusMethodNotAllowed)
-			mcp.newJSONRPCErrorResponse(req.ID, mcp.ErrCodeInvalidParams, errors.ErrMethodNotAllowed.Error(), nil)
+			mcp.newJSONRPCErrorResponse(req.ID, mcp.ErrCodeInvalidParams, err.Error(), err.ToResponseStruct())
 		})
 	}
 }
