@@ -204,7 +204,7 @@ func (p *ProxyOAuthServerProvider) RevokeToken(client auth.OAuthClientInformatio
 
 // ClientsStore 返回 OAuthRegisteredClientsStore
 // Returns an OAuthRegisteredClientsStore
-func (p *ProxyOAuthServerProvider) ClientsStore() server.OAuthClientsStore {
+func (p *ProxyOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
 	var store *server.OAuthClientsStore
 
 	if p.endpoints.RegistrationURL != "" {
@@ -260,7 +260,7 @@ func (p *ProxyOAuthServerProvider) ClientsStore() server.OAuthClientsStore {
 		store = server.NewOAuthClientStore(p.getClient)
 	}
 
-	return *store
+	return store
 }
 
 // ChallengeForAuthorizationCode 返回指定授权开始时使用的 codeChallenge 值。

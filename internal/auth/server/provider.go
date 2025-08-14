@@ -21,7 +21,7 @@ type OAuthServerProvider interface {
 
 	// ClientsStore getter函数:返回用于读取注册OAuth客户端信息的存储。
 	// A store used to read information about registered OAuth clients.
-	ClientsStore() OAuthClientsStore
+	ClientsStore() *OAuthClientsStore
 
 	// Authorize 启动授权流程，可以由服务器自身实现或通过重定向到独立的授权服务器。
 	// AuthorizationFlow的入口点，由服务器实现。

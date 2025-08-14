@@ -14,7 +14,7 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
 )
 
-// 模拟客户端存储实现
+// MockClientStore 模拟客户端存储实现
 type MockClientStore struct {
 	clients map[string]auth.OAuthClientInformationFull
 }
@@ -117,13 +117,15 @@ func testClientRegistration() {
 
 	// 测试案例1: 机密客户端注册
 	fmt.Println("\n📝 测试1: 注册机密客户端")
+	tempClientName := "测试应用1"
+	tempScope := "read write"
 	testCase1 := auth.OAuthClientMetadata{
-		RedirectUris:            []string{"https://example.com/callback"},
+		RedirectURIs:            []string{"https://example.com/callback"},
 		TokenEndpointAuthMethod: "client_secret_post",
 		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
-		ClientName:              "测试应用1",
-		Scope:                   "read write",
+		ClientName:              &tempClientName,
+		Scope:                   &tempScope,
 	}
 
 	result1, err := registerClient(testCase1)
@@ -133,18 +135,20 @@ func testClientRegistration() {
 		log.Printf("✅ 测试1成功:")
 		log.Printf("   Client ID: %s", result1.ClientID)
 		log.Printf("   Client Secret: %s", result1.ClientSecret)
-		log.Printf("   Client Name: %s", result1.ClientName)
+		log.Printf("   Client Name: %s", *result1.ClientName)
 	}
 
 	// 测试案例2: 公共客户端注册
 	fmt.Println("\n📝 测试2: 注册公共客户端")
+	tempClientName = "移动应用"
+	tempScope = "read"
 	testCase2 := auth.OAuthClientMetadata{
-		RedirectUris:            []string{"https://mobile-app.com/callback"},
+		RedirectURIs:            []string{"https://mobile-app.com/callback"},
 		TokenEndpointAuthMethod: "none", // 公共客户端
 		GrantTypes:              []string{"authorization_code"},
 		ResponseTypes:           []string{"code"},
-		ClientName:              "移动应用",
-		Scope:                   "read",
+		ClientName:              &tempClientName,
+		Scope:                   &tempScope,
 	}
 
 	result2, err := registerClient(testCase2)
@@ -154,13 +158,13 @@ func testClientRegistration() {
 		log.Printf("✅ 测试2成功:")
 		log.Printf("   Client ID: %s", result2.ClientID)
 		log.Printf("   Client Secret: %s (公共客户端应为空)", result2.ClientSecret)
-		log.Printf("   Client Name: %s", result2.ClientName)
+		log.Printf("   Client Name: %s", *result2.ClientName)
 	}
 
 	// 测试案例3: 错误请求
 	fmt.Println("\n📝 测试3: 无效请求（缺少必要字段）")
 	testCase3 := auth.OAuthClientMetadata{
-		RedirectUris: []string{"https://example.com/callback"},
+		RedirectURIs: []string{"https://example.com/callback"},
 		// 缺少 TokenEndpointAuthMethod
 	}
 
