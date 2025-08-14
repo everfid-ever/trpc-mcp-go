@@ -33,8 +33,8 @@ type AuthRouterOptions struct {
 	// Individual options per route (simulated with interface{} for flexibility, assuming they are passed correctly to handlers)
 	AuthorizationOptions      *handler.AuthorizationHandlerOptions
 	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions
-	RevocationOptions         *handler.RevocationHandlerOptions // TODO Omit<RevocationHandlerOptions, "provider">
-	TokenOptions              interface{}                       // TODO Omit<TokenHandlerOptions, "provider">
+	RevocationOptions         *handler.RevocationHandlerOptions
+	TokenOptions              *handler.TokenHandlerOptions
 }
 
 // AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
@@ -184,7 +184,9 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 		tokenOptions.RateLimit = options.TokenOptions.RateLimit
 	}
 
-	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
+	ginRouter := gin.New()
+	ginRouter.POST(tokenURL.Path, handler.TokenHandler(tokenOptions))
+	mux.Handle("POST "+tokenURL.Path, ginRouter)
 
 	// 3) Metadata router
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
