@@ -11,6 +11,7 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/pkce"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
@@ -160,8 +161,37 @@ func handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request, valida
 		return
 	}
 
-	// Prepare parameters - 始终传递 code_verifier
-	codeVerifier := &grant.CodeVerifier
+	// Check if the provider supports skipLocalPKceValidation
+	type skipLocalPKceValidation interface {
+		GetSkipLocalPkceValidation() bool
+	}
+
+	skipLocalValidation := false
+	if p, ok := provider.(skipLocalPKceValidation); ok {
+		skipLocalValidation = p.GetSkipLocalPkceValidation()
+	}
+
+	// Perform local PKCE validation unless explicitly skipped
+	if !skipLocalValidation {
+		codeChallenge, err := provider.ChallengeForAuthorizationCode(client, grant.Code)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
+			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, "Failed to retrieve code challenge", "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+			return
+		}
+
+		if !pkce.VerifyPKCEChallenge(grant.Code, codeChallenge) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
+			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, "code_verifier does not match the challenge", "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+			return
+		}
+	}
 
 	var resourceURL *url.URL
 	if grant.Resource != nil {
@@ -175,6 +205,12 @@ func handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request, valida
 			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
 		}
+	}
+
+	// Parse the code_verifier to the provider if PKCE validation did not occur locally
+	var codeVerifier *string
+	if skipLocalValidation {
+		codeVerifier = &grant.CodeVerifier
 	}
 
 	// Exchange the authorization code for a token

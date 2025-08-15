@@ -401,3 +401,9 @@ func validateOAuthTokens(tokens *auth.OAuthTokens) error {
 	}
 	return nil
 }
+
+// GetSkipLocalPkceValidation returns the skipLocalPkceValidation setting
+// This method allows the token handler to check if PKCE validation should be skipped locally
+func (p *ProxyOAuthServerProvider) GetSkipLocalPkceValidation() bool {
+	return p.SkipLocalPkceValidation
+}
