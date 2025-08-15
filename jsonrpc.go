@@ -281,7 +281,3 @@ func parseRawMessageToError(raw *json.RawMessage) (*JSONRPCError, error) {
 	}
 	return &errResp, nil
 }
-
-func MakeJSONRPCErrorResponse(id interface{}, code int, message string, data interface{}) *JSONRPCError {
-	return newJSONRPCErrorResponse(id, code, message, data)
-}
