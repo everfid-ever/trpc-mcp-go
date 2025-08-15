@@ -57,7 +57,7 @@ func (rl *RateLimiter) Allow() bool {
 	return rl.limiter.Allow()
 }
 
-var globalRateLimiter = NewRateLimiter(rate.Every(3*time.Minute), 20) // 20 requests per hour (approximated)
+var globalRateLimiter = NewRateLimiter(rate.Every(time.Hour), 20)
 
 // ClientRegistrationHandler creates a handler for OAuth client registration
 func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.HandlerFunc {
@@ -232,5 +232,16 @@ func validateClientMetadata(metadata *auth.OAuthClientMetadata) error {
 	if metadata.TokenEndpointAuthMethod == "" {
 		return fmt.Errorf("token_endpoint_auth_method is required")
 	}
+
+	switch metadata.TokenEndpointAuthMethod {
+	case "client_secret_basic", "client_secret_post", "none":
+	default:
+		return fmt.Errorf("invalid token_endpoint_auth_method: %s", metadata.TokenEndpointAuthMethod)
+	}
+
+	if len(metadata.RedirectURIs) == 0 {
+		return fmt.Errorf("redirect_uris is required")
+	}
+
 	return nil
 }
