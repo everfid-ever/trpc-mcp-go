@@ -51,7 +51,7 @@ func (v *JWKVerifier) VerifyToken(ctx context.Context, token string, tokenType T
 
 	// Try local keys first
 	v.mu.RLock()
-	key, exists := v.localKeys[keyID.(string)]
+	_, exists := v.localKeys[keyID.(string)]
 	v.mu.RUnlock()
 
 	if exists {
