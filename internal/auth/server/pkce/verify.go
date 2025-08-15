@@ -1,14 +1,13 @@
 package pkce
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"regexp"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
 
-func validatePKCEParams(params server.AuthorizationParams) error {
+func ValidatePKCEParams(params server.AuthorizationParams) error {
 	if params.CodeChallenge == "" {
 		return fmt.Errorf("code_challenge is required")
 	}
@@ -51,25 +50,4 @@ func isValidBase64URL(s string) bool {
 	}
 
 	return true
-}
-
-func verifyPKCE(challenge, verifier string) error {
-	// 计算SHA256哈希
-	hash := sha256.Sum256([]byte(verifier))
-	// BASE64URL编码
-	computed := base64.RawURLEncoding.EncodeToString(hash[:])
-
-	if challenge != computed {
-		return fmt.Errorf("code_challenge verification failed")
-	}
-
-	return nil
-}
-
-func ValidatePKCEParams(params server.AuthorizationParams) error {
-	return validatePKCEParams(params)
-}
-
-func VerifyPKCE(challenge, verifier string) error {
-	return verifyPKCE(challenge, verifier)
 }
