@@ -43,15 +43,27 @@ func AllowedMethods(methods []string) func(http.Handler) http.Handler {
 
 func CorsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
+		// 获取请求的 Origin
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// 非跨域请求
+			next.ServeHTTP(w, r)
 			return
 		}
 
+		// 设置默认的 CORS 头
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE")
+
+		// 处理预检请求
+		if r.Method == http.MethodOptions {
+			// Express 默认返回 204 No Content，并设置 Content-Length: 0
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		// 调用下一个处理器（实际请求不设置 Allow-Headers）
 		next.ServeHTTP(w, r)
 	})
 }
