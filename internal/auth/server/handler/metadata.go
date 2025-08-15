@@ -66,12 +66,3 @@ func AuthorizationServerMetadataHandler(baseURL string, store server.OAuthClient
 		middlewareHandler.ServeHTTP(w, r)
 	}
 }
-
-// SetupMetadataRouter sets up a router with metadata endpoint
-// Since MetadataHandler already includes middleware, this is now very simple
-func SetupMetadataRouter(metadata interface{}) *http.ServeMux {
-	mux := http.NewServeMux()
-	// No need for additional middleware - MetadataHandler includes everything
-	mux.Handle("/", MetadataHandler(metadata))
-	return mux
-}
