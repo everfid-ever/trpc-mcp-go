@@ -36,6 +36,19 @@ type OAuthClientInformationFull struct {
 	OAuthClientInformation
 }
 
+type AuthOptions struct {
+	ServerUrl           string  `json:"serverUrl"`
+	AuthorizationCode   *string `json:"authorizationCode,omitempty"`
+	Scope               *string `json:"scope,omitempty"`
+	ResourceMetadataUrl *string `json:"resourceMetadataUrl,omitempty"`
+	FetchFn             FetchFunc
+}
+
+type DiscoveryOptions struct {
+	ProtocolVersion     *string `json:"protocol_version,omitempty"`
+	ResourceMetadataUrl *string `json:"resource_metadata_url,omitempty"`
+}
+
 // OAuthProtectedResourceMetadata defines RFC 9728 OAuth Protected Resource Metadata
 type OAuthProtectedResourceMetadata struct {
 	Resource               string   `json:"resource"`
