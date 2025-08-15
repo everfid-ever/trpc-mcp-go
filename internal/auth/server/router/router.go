@@ -1,7 +1,7 @@
 package router
 
 import (
-	"github.com/gin-gonic/gin"
+	"fmt"
 	"net/http"
 	"net/url"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -31,10 +31,10 @@ type AuthRouterOptions struct {
 	ResourceName *string
 
 	// Individual options per route (simulated with interface{} for flexibility, assuming they are passed correctly to handlers)
-	AuthorizationOptions      *handler.AuthorizationHandlerOptions      // Omit<AuthorizationHandlerOptions, "provider">
-	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions // Omit<ClientRegistrationHandlerOptions, "clientsStore">
-	RevocationOptions         interface{}                               // Omit<RevocationHandlerOptions, "provider">
-	TokenOptions              interface{}                               // Omit<TokenHandlerOptions, "provider">
+	AuthorizationOptions      *handler.AuthorizationHandlerOptions
+	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions
+	RevocationOptions         *handler.RevocationHandlerOptions
+	TokenOptions              *handler.TokenHandlerOptions
 }
 
 // AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
@@ -56,17 +56,19 @@ type AuthMetadataOptions struct {
 }
 
 // checkIssuerUrl validates the issuer URL according to RFC 8414.
-func checkIssuerUrl(issuer *url.URL) {
-	// Technically RFC 8414 does not permit a localhost HTTPS exemption, but this will be necessary for ease of testing
+func checkIssuerUrl(issuer *url.URL) error {
+	// Technically RFC 8414 does not permit a localhost HTTPS exemption,
+	// but this will be necessary for ease of testing
 	if issuer.Scheme != "https" && issuer.Hostname() != "localhost" && issuer.Hostname() != "127.0.0.1" {
-		panic("Issuer URL must be HTTPS")
+		return fmt.Errorf("issuer URL must be HTTPS")
 	}
 	if issuer.Fragment != "" {
-		panic("Issuer URL must not have a fragment: " + issuer.String())
+		return fmt.Errorf("issuer URL must not have a fragment: %s", issuer.String())
 	}
 	if issuer.RawQuery != "" {
-		panic("Issuer URL must not have a query string: " + issuer.String())
+		return fmt.Errorf("issuer URL must not have a query string: %s", issuer.String())
 	}
+	return nil
 }
 
 // CreateOAuthMetadata generates the OAuth 2.0 Authorization Server Metadata.
@@ -184,8 +186,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 		tokenOptions.RateLimit = options.TokenOptions.RateLimit
 	}
 
-	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
-
+	mux.Handle(tokenURL.Path, handler.TokenHandler(tokenOptions))
 	// 3) Metadata router
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
 	McpAuthMetadataRouter(mux, AuthMetadataOptions{
@@ -211,16 +212,13 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 			regOpts.ClientsStore = clientsStore // Ensure the clients store is set
 		} else {
 			// Set default rate limiting
-			regOpts.RateLimit = &handler.RateLimitConfig{
+			regOpts.RateLimit = &handler.RegisterRateLimitConfig{
 				WindowMs: 60000,
 				Max:      10,
 			}
 		}
 
-		ginRouter := gin.New()
-		ginRouter.POST(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
-
-		mux.Handle(registrationURL.Path, ginRouter)
+		mux.Handle(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 	}
 
 	// 5) Revocation endpoint (optional)
@@ -282,13 +280,13 @@ func GetOAuthProtectedResourceMetadataUrl(serverUrl *url.URL) string {
 // InstallMCPAuthRoutes convenience function to simplify route installation
 func InstallMCPAuthRoutes(
 	mux *http.ServeMux,
-	issuerBaseURL string,     // = OAuthMetadata.issuer (e.g. https://auth.example.com)
+	issuerBaseURL string, // = OAuthMetadata.issuer (e.g. https://auth.example.com)
 	resourceServerURL string, // Your MCP service URL (e.g. https://api.example.com/mcp)
 	clientsStore *server.OAuthClientsStoreInterface,
 	provider server.OAuthServerProvider, // Your existing server provider interface
-	scopesSupported []string,            // Can be nil
-	resourceName *string,                // Can be nil
-	serviceDocURL *string,               // Can be nil
+	scopesSupported []string, // Can be nil
+	resourceName *string, // Can be nil
+	serviceDocURL *string, // Can be nil
 ) {
 	issuerURL, _ := url.Parse(issuerBaseURL)
 	var serviceDocumentationUrl *url.URL
