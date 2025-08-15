@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/go-playground/validator/v10"
+	"golang.org/x/time/rate"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/pkce"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
@@ -18,15 +18,7 @@ import (
 // AuthorizationHandlerOptions contains configuration for the authorization handler
 type AuthorizationHandlerOptions struct {
 	Provider  server.OAuthServerProvider `json:"provider"`
-	RateLimit *RateLimitOptions          `json:"rateLimit,omitempty"`
-}
-
-// RateLimitOptions contains rate limiting configuration
-type RateLimitOptions struct {
-	WindowMs        int  `json:"windowMs"`
-	Max             int  `json:"max"`
-	StandardHeaders bool `json:"standardHeaders"`
-	LegacyHeaders   bool `json:"legacyHeaders"`
+	RateLimit *rate.Limiter              `json:"rateLimit,omitempty"` // 使用标准的 rate.Limiter
 }
 
 // ClientAuthorizationParams that must be validated to issue redirects.
@@ -46,22 +38,13 @@ type RequestAuthorizationParams struct {
 }
 
 // AuthorizationHandler creates an authorization handler
-func AuthorizationHandler(options AuthorizationHandlerOptions) http.Handler {
-	mux := http.NewServeMux()
+// Returns http.HandlerFunc for consistency with other handlers
+func AuthorizationHandler(options AuthorizationHandlerOptions) http.HandlerFunc {
 	validate := validator.New()
 
-	var rateLimitMiddleware func(http.Handler) http.Handler
-	if options.RateLimit != nil {
-		rateLimitMiddleware = createRateLimitMiddleware(*options.RateLimit)
-	}
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Core handler logic
+	coreHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-
-		if r.Method != http.MethodGet && r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
 
 		if r.Method == http.MethodPost {
 			if err := r.ParseForm(); err != nil {
@@ -86,12 +69,21 @@ func AuthorizationHandler(options AuthorizationHandlerOptions) http.Handler {
 		}
 	})
 
-	if rateLimitMiddleware != nil {
-		handler = rateLimitMiddleware(handler).(http.HandlerFunc)
+	// Apply middleware if needed
+	var handler http.Handler = coreHandler
+
+	// Apply rate limiting using standard middleware
+	if options.RateLimit != nil {
+		handler = middleware.RateLimitMiddleware(options.RateLimit)(handler)
 	}
 
-	mux.Handle("/", handler)
-	return mux
+	// Apply method restrictions (GET and POST allowed)
+	handler = middleware.AllowedMethods([]string{"GET", "POST"})(handler)
+
+	// Convert back to http.HandlerFunc
+	return func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	}
 }
 
 // validateClientAndRedirect validates client_id and redirect_uri
@@ -288,81 +280,4 @@ func createErrorRedirect(redirectURI string, err errors.OAuthError, state string
 
 	errorURL.RawQuery = query.Encode()
 	return errorURL.String()
-}
-
-// createRateLimitMiddleware creates rate limiting middleware
-func createRateLimitMiddleware(options RateLimitOptions) func(http.Handler) http.Handler {
-	requestCounts := make(map[string][]time.Time)
-
-	windowDuration := time.Duration(options.WindowMs) * time.Millisecond
-	if windowDuration == 0 {
-		windowDuration = 15 * time.Minute
-	}
-
-	maxRequests := options.Max
-	if maxRequests == 0 {
-		maxRequests = 100
-	}
-
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			clientIP := getClientIP(r)
-			now := time.Now()
-
-			if times, exists := requestCounts[clientIP]; exists {
-				var validTimes []time.Time
-				for _, t := range times {
-					if now.Sub(t) < windowDuration {
-						validTimes = append(validTimes, t)
-					}
-				}
-				requestCounts[clientIP] = validTimes
-			}
-
-			if len(requestCounts[clientIP]) >= maxRequests {
-				tooManyErr := errors.NewOAuthError(errors.ErrTooManyRequests, "You have exceeded the rate limit for authorization requests", "")
-
-				if options.StandardHeaders {
-					w.Header().Set("RateLimit-Limit", strconv.Itoa(maxRequests))
-					w.Header().Set("RateLimit-Remaining", "0")
-					w.Header().Set("RateLimit-Reset", strconv.FormatInt(now.Add(windowDuration).Unix(), 10))
-				}
-
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusTooManyRequests)
-				json.NewEncoder(w).Encode(tooManyErr.ToResponseStruct())
-				return
-			}
-
-			requestCounts[clientIP] = append(requestCounts[clientIP], now)
-
-			if options.StandardHeaders {
-				remaining := maxRequests - len(requestCounts[clientIP])
-				w.Header().Set("RateLimit-Limit", strconv.Itoa(maxRequests))
-				w.Header().Set("RateLimit-Remaining", strconv.Itoa(remaining))
-				w.Header().Set("RateLimit-Reset", strconv.FormatInt(now.Add(windowDuration).Unix(), 10))
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// getClientIP gets the client IP address
-func getClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		return strings.TrimSpace(ips[0])
-	}
-
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
-	}
-
-	ip := r.RemoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
-	}
-
-	return ip
 }
