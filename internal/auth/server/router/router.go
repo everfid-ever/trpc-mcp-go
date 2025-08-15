@@ -1,7 +1,6 @@
 package router
 
 import (
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"net/url"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -31,10 +30,10 @@ type AuthRouterOptions struct {
 	ResourceName *string
 
 	// Individual options per route (simulated with interface{} for flexibility, assuming they are passed correctly to handlers)
-	AuthorizationOptions      *handler.AuthorizationHandlerOptions      // Omit<AuthorizationHandlerOptions, "provider">
-	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions // Omit<ClientRegistrationHandlerOptions, "clientsStore">
-	RevocationOptions         interface{}                               // Omit<RevocationHandlerOptions, "provider">
-	TokenOptions              interface{}                               // Omit<TokenHandlerOptions, "provider">
+	AuthorizationOptions      *handler.AuthorizationHandlerOptions
+	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions
+	RevocationOptions         *handler.RevocationHandlerOptions
+	TokenOptions              *handler.TokenHandlerOptions
 }
 
 // AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
@@ -184,8 +183,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 		tokenOptions.RateLimit = options.TokenOptions.RateLimit
 	}
 
-	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
-
+	mux.Handle(tokenURL.Path, handler.TokenHandler(tokenOptions))
 	// 3) Metadata router
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
 	McpAuthMetadataRouter(mux, AuthMetadataOptions{
@@ -211,16 +209,13 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 			regOpts.ClientsStore = clientsStore // Ensure the clients store is set
 		} else {
 			// Set default rate limiting
-			regOpts.RateLimit = &handler.RateLimitConfig{
+			regOpts.RateLimit = &handler.RegisterRateLimitConfig{
 				WindowMs: 60000,
 				Max:      10,
 			}
 		}
 
-		ginRouter := gin.New()
-		ginRouter.POST(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
-
-		mux.Handle(registrationURL.Path, ginRouter)
+		mux.Handle(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 	}
 
 	// 5) Revocation endpoint (optional)
