@@ -1,6 +1,7 @@
 package pkce
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"regexp"
@@ -50,4 +51,19 @@ func isValidBase64URL(s string) bool {
 	}
 
 	return true
+}
+
+// VerifyPKCEChallenge verifies the PKCE code_verifier against the code_challenge
+func VerifyPKCEChallenge(codeVerifier, codeChallenge string) bool {
+	if codeVerifier == "" || codeChallenge == "" {
+		return false
+	}
+
+	// Create SHA256 hash of the code_verifier
+	hash := sha256.Sum256([]byte(codeVerifier))
+
+	// Base64 URL encode the hash
+	computedChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
+
+	return computedChallenge == codeChallenge
 }
