@@ -33,48 +33,44 @@ func validateClientRequest(req *ClientAuthenticatedRequest) error {
 	return nil
 }
 
-// writeErrorResponse writes an OAuth error response to the HTTP response writer
-func writeErrorResponse(w http.ResponseWriter, oauthErr errors.OAuthError) {
-	var status int
-	if oauthErr.ErrorCode == errors.ErrServerError.Error() {
-		status = http.StatusInternalServerError
-	} else {
-		status = http.StatusBadRequest
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
-}
-
 // AuthenticateClient returns an HTTP middleware function for client authentication
 func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Handle panics and convert to server errors
-			// fixme panic的捕获应该由开发者的全局中间件实现，且sdk不应做panic错误转换，保证透明
-			defer func() {
-				if rec := recover(); rec != nil {
-					serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-					writeErrorResponse(w, serverError)
+			// 处理错误并设置响应函数
+			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError) {
+				var statusCode int
+				switch err.ErrorCode {
+				case errors.ErrInvalidClient.Error():
+					statusCode = http.StatusUnauthorized
+				case errors.ErrInvalidRequest.Error():
+					statusCode = http.StatusBadRequest
+				case errors.ErrServerError.Error():
+					statusCode = http.StatusInternalServerError
+				default:
+					statusCode = http.StatusBadRequest
 				}
-			}()
+
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(statusCode)
+				json.NewEncoder(w).Encode(err.ToResponseStruct())
+			}
 
 			// Parse request body
 			var reqData ClientAuthenticatedRequest
 			if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
 				serverErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid request body", "")
-				writeErrorResponse(w, serverErr)
+				setErrorResponse(w, serverErr)
 				return
 			}
 
 			// Validate request
 			if err := validateClientRequest(&reqData); err != nil {
 				if oauthErr, ok := err.(errors.OAuthError); ok {
-					writeErrorResponse(w, oauthErr)
+					setErrorResponse(w, oauthErr)
 				} else {
 					invalidError := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid client_id", "")
-					writeErrorResponse(w, invalidError)
+					setErrorResponse(w, invalidError)
 				}
 				return
 			}
@@ -83,13 +79,13 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 			client, err := options.ClientsStore.GetClient(reqData.ClientID)
 			if err != nil {
 				serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-				writeErrorResponse(w, serverError)
+				setErrorResponse(w, serverError)
 				return
 			}
 
 			if client == nil {
 				invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_id", "")
-				writeErrorResponse(w, invalidClientError)
+				setErrorResponse(w, invalidClientError)
 				return
 			}
 
@@ -98,14 +94,14 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 				// Check if client_secret is required but not provided
 				if reqData.ClientSecret == "" {
 					invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Client secret is required", "")
-					writeErrorResponse(w, invalidClientError)
+					setErrorResponse(w, invalidClientError)
 					return
 				}
 
 				// Check if client_secret matches
 				if client.ClientSecret != reqData.ClientSecret {
 					invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_secret", "")
-					writeErrorResponse(w, invalidClientError)
+					setErrorResponse(w, invalidClientError)
 					return
 				}
 
@@ -114,7 +110,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 					currentTime := time.Now().Unix()
 					if *client.ClientSecretExpiresAt < currentTime {
 						invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Client secret has expired", "")
-						writeErrorResponse(w, invalidClientError)
+						setErrorResponse(w, invalidClientError)
 						return
 					}
 				}

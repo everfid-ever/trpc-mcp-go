@@ -27,7 +27,17 @@ type RevocationRateLimitConfig struct {
 func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 	// Check if provider supports token revocation
 	if opts.Provider.RevokeToken == nil {
-		panic("Auth provider does not support revoking tokens")
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotImplemented)
+
+			notImplError := errors.NewOAuthError(
+				errors.ErrUnsupportedTokenType,
+				"Token revocation is not supported by this server",
+				"https://datatracker.ietf.org/doc/html/rfc7009",
+			)
+			json.NewEncoder(w).Encode(notImplError.ToResponseStruct())
+		})
 	}
 
 	// Create the core handler

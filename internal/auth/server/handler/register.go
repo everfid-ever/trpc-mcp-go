@@ -83,7 +83,18 @@ var globalRateLimiter = NewRateLimiter(rate.Every(3*time.Minute), 20) // 20 requ
 // ClientRegistrationHandler creates a handler for OAuth client registration
 func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.HandlerFunc {
 	if options.ClientsStore == nil {
-		panic("Client registration store does not support registering clients")
+		// Return a handler that always returns an error
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotImplemented)
+
+			notImplError := errors.NewOAuthError(
+				errors.ErrUnsupportedGrantType,
+				"Dynamic client registration is not supported by this server",
+				"https://datatracker.ietf.org/doc/html/rfc7591",
+			)
+			json.NewEncoder(w).Encode(notImplError.ToResponseStruct())
+		})
 	}
 
 	clientSecretExpirySeconds := DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS
