@@ -2,18 +2,20 @@ package server
 
 import (
 	"context"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"net/http"
 	"sync"
-	"time"
 
-	"github.com/lestrrat-go/jwx/jwk"
-	"github.com/lestrrat-go/jwx/jwt"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jwt"
+)
+
+// TokenType defines the type of token (access or refresh).
+type TokenType string
+
+const (
+	AccessToken  TokenType = "access"
+	RefreshToken TokenType = "refresh"
 )
 
 // JWKVerifier implements TokenVerifier with JWK support.
@@ -36,7 +38,7 @@ func NewJWKVerifier(jwksURL string, remoteEnabled bool) *JWKVerifier {
 }
 
 // VerifyToken verifies the token using RS256/ES256 and JWK cache.
-func (v *JWKVerifier) VerifyToken(ctx context.Context, token string) (jwt.Token, error) {
+func (v *JWKVerifier) VerifyToken(ctx context.Context, token string, tokenType TokenType) (jwt.Token, error) {
 	parsedToken, err := jwt.ParseString(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse token: %v", err)
@@ -53,7 +55,7 @@ func (v *JWKVerifier) VerifyToken(ctx context.Context, token string) (jwt.Token,
 	v.mu.RUnlock()
 
 	if exists {
-		if err := jwt.Verify(parsedToken, jwt.WithKey(parsedToken.Algorithm(), key)); err != nil {
+		if err := jwt.Validate(parsedToken); err != nil {
 			return nil, fmt.Errorf("local key verification failed: %v", err)
 		}
 		return parsedToken, nil
@@ -76,7 +78,7 @@ func (v *JWKVerifier) VerifyToken(ctx context.Context, token string) (jwt.Token,
 			return nil, fmt.Errorf("failed to get raw key: %v", err)
 		}
 
-		if err := jwt.Verify(parsedToken, jwt.WithKey(parsedToken.Algorithm(), rawKey)); err != nil {
+		if err := jwt.Validate(parsedToken); err != nil {
 			return nil, fmt.Errorf("remote key verification failed: %v", err)
 		}
 
@@ -89,6 +91,16 @@ func (v *JWKVerifier) VerifyToken(ctx context.Context, token string) (jwt.Token,
 	}
 
 	return nil, errors.New("no valid key found for verification")
+}
+
+// VerifyAccessToken verifies an access token.
+func (v *JWKVerifier) VerifyAccessToken(ctx context.Context, token string) (jwt.Token, error) {
+	return v.VerifyToken(ctx, token, AccessToken)
+}
+
+// VerifyRefreshToken verifies a refresh token.
+func (v *JWKVerifier) VerifyRefreshToken(ctx context.Context, token string) (jwt.Token, error) {
+	return v.VerifyToken(ctx, token, RefreshToken)
 }
 
 // LoadLocalKey loads a local key for verification.
