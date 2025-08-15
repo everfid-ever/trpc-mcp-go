@@ -28,6 +28,7 @@ type OAuthClientsStoreInterface interface {
 	SupportDynamicClientRegistration
 }
 
+// SupportDynamicClientRegistration 包含动态客户端注册的子接口，可选实现
 type SupportDynamicClientRegistration interface {
 	RegisterClient(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error)
 }
