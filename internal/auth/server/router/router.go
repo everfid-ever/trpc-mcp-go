@@ -30,7 +30,7 @@ type AuthRouterOptions struct {
 	// The resource name to be displayed in protected resource metadata
 	ResourceName *string
 
-	// Individual options per route (simulated with interface{} for flexibility, assuming they are passed correctly to handlers)
+	// Individual options per route
 	AuthorizationOptions      *handler.AuthorizationHandlerOptions
 	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions
 	RevocationOptions         *handler.RevocationHandlerOptions
@@ -280,13 +280,13 @@ func GetOAuthProtectedResourceMetadataUrl(serverUrl *url.URL) string {
 // InstallMCPAuthRoutes convenience function to simplify route installation
 func InstallMCPAuthRoutes(
 	mux *http.ServeMux,
-	issuerBaseURL string, // = OAuthMetadata.issuer (e.g. https://auth.example.com)
+	issuerBaseURL string,     // = OAuthMetadata.issuer (e.g. https://auth.example.com)
 	resourceServerURL string, // Your MCP service URL (e.g. https://api.example.com/mcp)
 	clientsStore *server.OAuthClientsStoreInterface,
 	provider server.OAuthServerProvider, // Your existing server provider interface
-	scopesSupported []string, // Can be nil
-	resourceName *string, // Can be nil
-	serviceDocURL *string, // Can be nil
+	scopesSupported []string,            // Can be nil
+	resourceName *string,                // Can be nil
+	serviceDocURL *string,               // Can be nil
 ) {
 	issuerURL, _ := url.Parse(issuerBaseURL)
 	var serviceDocumentationUrl *url.URL
