@@ -52,7 +52,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Handle panics and convert to server errors
-			// fixme panic应该由开发者的全局中间件实现，并且sdk不应该做panic错误转换，保证透明
+			// fixme panic的捕获应该由开发者的全局中间件实现，且sdk不应做panic错误转换，保证透明
 			defer func() {
 				if rec := recover(); rec != nil {
 					serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
