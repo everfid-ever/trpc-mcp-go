@@ -3,8 +3,6 @@ package middleware
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -24,10 +22,8 @@ type ClientAuthenticatedRequest struct {
 	ClientSecret string `json:"client_secret,omitempty"`
 }
 
-// Context key type for storing authenticated client
-type contextKey string
-
-const ClientContextKey contextKey = "authenticated_client"
+// clientInfoKeyType 用于标识存储OAuthClientInformationFull的上下文键
+type clientInfoKeyType struct{}
 
 // validateClientRequest validates the client authentication request
 func validateClientRequest(req *ClientAuthenticatedRequest) error {
@@ -56,6 +52,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Handle panics and convert to server errors
+			// fixme panic应该由开发者的全局中间件实现，并且sdk不应该做panic错误转换，保证透明
 			defer func() {
 				if rec := recover(); rec != nil {
 					serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
@@ -64,34 +61,26 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 			}()
 
 			// Parse request body
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				invalidError := errors.NewOAuthError(errors.ErrInvalidRequest, fmt.Sprintf("Error reading request body: %v", err), "")
-				writeErrorResponse(w, invalidError)
-				return
-			}
-			r.Body.Close()
-
-			var req ClientAuthenticatedRequest
-			if err := json.Unmarshal(body, &req); err != nil {
-				invalidError := errors.NewOAuthError(errors.ErrInvalidRequest, fmt.Sprintf("Invalid JSON: %v", err), "")
-				writeErrorResponse(w, invalidError)
+			var reqData ClientAuthenticatedRequest
+			if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+				serverErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid request body", "")
+				writeErrorResponse(w, serverErr)
 				return
 			}
 
 			// Validate request
-			if err := validateClientRequest(&req); err != nil {
+			if err := validateClientRequest(&reqData); err != nil {
 				if oauthErr, ok := err.(errors.OAuthError); ok {
 					writeErrorResponse(w, oauthErr)
 				} else {
-					invalidError := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
+					invalidError := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid client_id", "")
 					writeErrorResponse(w, invalidError)
 				}
 				return
 			}
 
 			// Get client from store
-			client, err := options.ClientsStore.GetClient(req.ClientID)
+			client, err := options.ClientsStore.GetClient(reqData.ClientID)
 			if err != nil {
 				serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
 				writeErrorResponse(w, serverError)
@@ -107,14 +96,14 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 			// If client has a secret, validate it
 			if client.ClientSecret != "" {
 				// Check if client_secret is required but not provided
-				if req.ClientSecret == "" {
+				if reqData.ClientSecret == "" {
 					invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Client secret is required", "")
 					writeErrorResponse(w, invalidClientError)
 					return
 				}
 
 				// Check if client_secret matches
-				if client.ClientSecret != req.ClientSecret {
+				if client.ClientSecret != reqData.ClientSecret {
 					invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_secret", "")
 					writeErrorResponse(w, invalidClientError)
 					return
@@ -132,7 +121,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 			}
 
 			// Add authenticated client to request context
-			ctx := context.WithValue(r.Context(), ClientContextKey, client)
+			ctx := context.WithValue(r.Context(), clientInfoKeyType{}, client)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -140,7 +129,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 
 // GetAuthenticatedClient retrieves the authenticated client from HTTP request context
 func GetAuthenticatedClient(r *http.Request) (*auth.OAuthClientInformationFull, bool) {
-	client := r.Context().Value(ClientContextKey)
+	client := r.Context().Value(clientInfoKeyType{})
 	if client == nil {
 		return nil, false
 	}
