@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"golang.org/x/time/rate"
 	"net/http"
+	"strings"
 	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
@@ -13,8 +14,11 @@ import (
 
 // RevocationHandlerOptions configuration for the token revocation endpoint
 type RevocationHandlerOptions struct {
-	Provider  server.OAuthServerProvider
-	RateLimit *RevocationRateLimitConfig // Set to nil to disable rate limiting for this endpoint
+	Provider          server.OAuthServerProvider
+	RateLimit         *RevocationRateLimitConfig // Set to nil to disable rate limiting for this endpoint
+	RequireHTTPS      bool                       // Enforce HTTPS in production (recommended for OAuth 2.1)
+	AllowJSONFallback bool                       // Allow JSON format for backward compatibility (non-compliant with RFC 7009)
+	EnableMCPHeaders  bool                       // Add MCP-specific headers for MCP 2025-03-26 compliance
 }
 
 // RevocationRateLimitConfig rate limiting configuration
@@ -27,42 +31,94 @@ type RevocationRateLimitConfig struct {
 func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 	// Check if provider supports token revocation
 	if opts.Provider.RevokeToken == nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotImplemented)
-
-			notImplError := errors.NewOAuthError(
-				errors.ErrUnsupportedTokenType,
-				"Token revocation is not supported by this server",
-				"https://datatracker.ietf.org/doc/html/rfc7009",
-			)
-			json.NewEncoder(w).Encode(notImplError.ToResponseStruct())
-		})
+		panic("Auth provider does not support revoking tokens")
 	}
 
 	// Create the core handler
 	coreHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set cache control header
+		// Set OAuth 2.1 required security headers
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
 
-		// Parse request body
-		var reqBody auth.OAuthTokenRevocationRequest
-		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		// Add MCP-specific headers if enabled
+		if opts.EnableMCPHeaders {
+			w.Header().Set("X-MCP-Version", "2025-03-26")
+			w.Header().Set("X-MCP-Transport", "http")
+		}
+
+		// Enforce HTTPS if required (OAuth 2.1 best practice)
+		if opts.RequireHTTPS && r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 
-			invalidReqError := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
+			invalidReqError := errors.NewOAuthError(
+				errors.ErrInvalidRequest,
+				"HTTPS is required for OAuth 2.1 token revocation",
+				"https://datatracker.ietf.org/doc/html/rfc6749#section-3",
+			)
 			json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
 			return
 		}
 
-		// Validate request - token is required
-		if reqBody.Token == "" {
+		// RFC 7009 Section 2.1: Strict Content-Type validation
+		contentType := r.Header.Get("Content-Type")
+		isURLEncoded := strings.HasPrefix(contentType, "application/x-www-form-urlencoded")
+		isJSON := strings.HasPrefix(contentType, "application/json")
+
+		if !isURLEncoded && (!opts.AllowJSONFallback || !isJSON) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 
-			invalidReqError := errors.NewOAuthError(errors.ErrInvalidRequest, "token is required", "")
+			errorMsg := "Content-Type must be application/x-www-form-urlencoded per RFC 7009"
+			if opts.AllowJSONFallback {
+				errorMsg = "Content-Type must be application/x-www-form-urlencoded (preferred) or application/json"
+			}
+
+			invalidReqError := errors.NewOAuthError(
+				errors.ErrInvalidRequest,
+				errorMsg,
+				"https://datatracker.ietf.org/doc/html/rfc7009#section-2.1",
+			)
 			json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
+			return
+		}
+
+		// Parse request body based on content type
+		var reqBody auth.OAuthTokenRevocationRequest
+
+		if isURLEncoded {
+			// RFC 7009 compliant: Parse URL-encoded form data
+			if err := r.ParseForm(); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+
+				invalidReqError := errors.NewOAuthError(errors.ErrInvalidRequest,
+					"Failed to parse application/x-www-form-urlencoded data: "+err.Error(), "")
+				json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
+				return
+			}
+
+			// Extract form values
+			reqBody.Token = r.FormValue("token")
+			reqBody.TokenTypeHint = r.FormValue("token_type_hint")
+		} else if opts.AllowJSONFallback && isJSON {
+			// Non-standard JSON fallback for backward compatibility
+			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+
+				invalidReqError := errors.NewOAuthError(errors.ErrInvalidRequest,
+					"Failed to parse JSON data: "+err.Error(), "")
+				json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
+				return
+			}
+		}
+
+		// Validate request - token is required (RFC 7009 Section 2.1)
+		if err := validateRevocationRequest(reqBody); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(err.(errors.OAuthError).ToResponseStruct())
 			return
 		}
 
@@ -99,38 +155,71 @@ func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 			return
 		}
 
-		// Success response - empty JSON object per OAuth 2.1 spec
+		// RFC 7009 Section 2: Success response - HTTP 200 with empty JSON
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("{}"))
 	})
 
-	// Apply middlewares in order (similar to Express middleware chain)
+	// Apply middlewares in order (wrapping from inside out to match TS middleware order)
 	var handler http.Handler = coreHandler
 
-	// Apply client authentication middleware
+	// Apply client authentication middleware (innermost, like TS)
 	handler = middleware.AuthenticateClient(middleware.ClientAuthenticationMiddlewareOptions{
 		ClientsStore: opts.Provider.ClientsStore(),
 	})(handler)
 
-	// Apply rate limiting middleware unless explicitly disabled
+	// Apply rate limiting middleware only if explicitly configured
 	if opts.RateLimit != nil {
 		windowDuration := time.Duration(opts.RateLimit.WindowMs) * time.Millisecond
+		if opts.RateLimit.Max <= 0 {
+			panic("RateLimit Max must be greater than 0")
+		}
+
+		// Calculate rate to match the window-based approach of express-rate-limit
 		limit := rate.Every(windowDuration / time.Duration(opts.RateLimit.Max))
 		limiter := rate.NewLimiter(limit, opts.RateLimit.Max)
 
 		handler = middleware.RateLimitMiddleware(limiter)(handler)
-	} else {
-		// Default rate limiting: 50 requests per 15 minutes
-		limiter := rate.NewLimiter(rate.Every(18*time.Second), 50)
-		handler = middleware.RateLimitMiddleware(limiter)(handler)
 	}
+	// Note: No default rate limiting applied when opts.RateLimit is nil
+	// This matches the TypeScript behavior where rateLimit: false disables it
 
-	// Apply method restriction middleware (only POST allowed)
+	// Apply URL-encoded parsing middleware (RFC 7009 compliance)
+	handler = middleware.URLEncodedValidationMiddleware(opts.AllowJSONFallback)(handler)
+
+	// Apply method restriction middleware (only POST allowed per RFC 7009)
 	handler = middleware.AllowedMethods([]string{"POST"})(handler)
 
-	// Apply CORS middleware
+	// Apply CORS middleware (outermost, like TS)
 	handler = middleware.CorsMiddleware(handler)
 
 	return handler
+}
+
+// validateRevocationRequest validates the OAuth token revocation request per RFC 7009
+func validateRevocationRequest(reqBody auth.OAuthTokenRevocationRequest) error {
+	// RFC 7009 Section 2.1: token parameter is required
+	if reqBody.Token == "" {
+		return errors.NewOAuthError(errors.ErrInvalidRequest,
+			"token parameter is required per RFC 7009",
+			"https://datatracker.ietf.org/doc/html/rfc7009#section-2.1")
+	}
+
+	// RFC 7009 Section 2.1: token_type_hint is optional but must be valid if provided
+	if reqBody.TokenTypeHint != "" {
+		validTypes := map[string]bool{
+			"access_token":  true,
+			"refresh_token": true,
+		}
+		if !validTypes[reqBody.TokenTypeHint] {
+			return errors.NewOAuthError(
+				errors.ErrInvalidRequest,
+				"invalid token_type_hint, must be 'access_token' or 'refresh_token' per RFC 7009",
+				"https://datatracker.ietf.org/doc/html/rfc7009#section-2.1",
+			)
+		}
+	}
+
+	return nil
 }
