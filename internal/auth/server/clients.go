@@ -59,3 +59,8 @@ func NewOAuthClientStore(getClient func(clientID string) (*auth.OAuthClientInfor
 		getClient: getClient,
 	}
 }
+
+// SupportsRegistration checks if dynamic client registration is supported
+func (s OAuthClientsStore) SupportsRegistration() bool {
+	return s.registerClient != nil
+}
