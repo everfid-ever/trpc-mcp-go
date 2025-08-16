@@ -11,26 +11,12 @@ import (
 
 // AuthRouterOptions holds configuration options for the MCP authentication router.
 type AuthRouterOptions struct {
-	// Provider implementing the actual authorization logic for this router.
-	Provider server.OAuthServerProvider
-
-	// The authorization server's issuer identifier, which is a URL that uses the "https" scheme and has no query or fragment components.
-	IssuerUrl *url.URL
-
-	// The base URL of the authorization server to use for the metadata endpoints.
-	// If not provided, the issuer URL will be used as the base URL.
-	BaseUrl *url.URL
-
-	// An optional URL of a page containing human-readable information that developers might want or need to know when using the authorization server.
-	ServiceDocumentationUrl *url.URL
-
-	// An optional list of scopes supported by this authorization server
-	ScopesSupported []string
-
-	// The resource name to be displayed in protected resource metadata
-	ResourceName *string
-
-	// Individual options per route
+	Provider                  server.OAuthServerProvider
+	IssuerUrl                 *url.URL
+	BaseUrl                   *url.URL
+	ServiceDocumentationUrl   *url.URL
+	ScopesSupported           []string
+	ResourceName              *string
 	AuthorizationOptions      *handler.AuthorizationHandlerOptions
 	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions
 	RevocationOptions         *handler.RevocationHandlerOptions
@@ -39,20 +25,11 @@ type AuthRouterOptions struct {
 
 // AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
 type AuthMetadataOptions struct {
-	// OAuth Metadata as would be returned from the authorization server this MCP server relies on
-	OAuthMetadata auth.OAuthMetadata
-
-	// The url of the MCP server, for use in protected resource metadata
-	ResourceServerUrl *url.URL
-
-	// The url for documentation for the MCP server
+	OAuthMetadata           auth.OAuthMetadata
+	ResourceServerUrl       *url.URL
 	ServiceDocumentationUrl *url.URL
-
-	// An optional list of scopes supported by this MCP server
-	ScopesSupported []string
-
-	// An optional resource name to display in resource metadata
-	ResourceName *string
+	ScopesSupported         []string
+	ResourceName            *string
 }
 
 // checkIssuerUrl validates the issuer URL according to RFC 8414.
@@ -71,41 +48,41 @@ func checkIssuerUrl(issuer *url.URL) error {
 	return nil
 }
 
-// CreateOAuthMetadata generates the OAuth 2.0 Authorization Server Metadata.
+// supportsClientRegistration checks if the provider supports dynamic client registration
+func supportsClientRegistration(provider server.OAuthServerProvider) bool {
+	clientsStore := provider.ClientsStore()
+	if clientsStore == nil {
+		return false
+	}
+	// Use type assertion to check if the clients store implements SupportDynamicClientRegistration interface
+	_, ok := provider.(server.SupportTokenRevocation)
+	return ok
+}
+
+// supportsTokenRevocation checks if the provider supports token revocation
+func supportsTokenRevocation(provider server.OAuthServerProvider) bool {
+	// Use type assertion to check if the provider implements SupportTokenRevocation interface
+	_, ok := provider.(server.SupportTokenRevocation)
+	return ok
+}
+
+// CreateOAuthMetadata generates OAuth 2.1 compliant Authorization Server Metadata.
 func CreateOAuthMetadata(options struct {
 	Provider                server.OAuthServerProvider
 	IssuerUrl               *url.URL
 	BaseUrl                 *url.URL
 	ServiceDocumentationUrl *url.URL
 	ScopesSupported         []string
-}) auth.OAuthMetadata {
+}) (auth.OAuthMetadata, error) {
 	issuer := options.IssuerUrl
 	baseUrl := options.BaseUrl
 
-	checkIssuerUrl(issuer)
-
-	authorizationEndpoint := "/authorize"
-	tokenEndpoint := "/token"
-
-	// Check if the provider supports client registration and token revocation
-	// This assumes the provider has methods or fields indicating support
-	// For simplicity, we'll check if the relevant methods/store are non-nil
-	// This part needs to be adapted based on your actual server.OAuthServerProvider interface
-	var registrationEndpoint *string
-	clientsStore := options.Provider.ClientsStore()
-	if clientsStore != nil {
-		endpoint := "/register"
-		registrationEndpoint = &endpoint
+	// Validate issuer URL
+	if err := checkIssuerUrl(issuer); err != nil {
+		return auth.OAuthMetadata{}, err
 	}
 
-	var revocationEndpoint *string
-	// Assuming there's a RevokeToken method on the provider interface
-	// This check needs to be adapted based on your actual interface
-	// if options.Provider.RevokeToken != nil { // Example check
-	endpoint := "/revoke"
-	revocationEndpoint = &endpoint
-	// }
-
+	// Determine base URL for endpoints
 	var baseUrlForEndpoints *url.URL
 	if baseUrl != nil {
 		baseUrlForEndpoints = baseUrl
@@ -113,44 +90,62 @@ func CreateOAuthMetadata(options struct {
 		baseUrlForEndpoints = issuer
 	}
 
+	// Required endpoints
+	authorizationEndpoint := "/authorize"
+	tokenEndpoint := "/token"
+
 	authEndpointUrl, _ := url.Parse(authorizationEndpoint)
 	tokenEndpointUrl, _ := url.Parse(tokenEndpoint)
 
 	metadata := auth.OAuthMetadata{
-		Issuer:                            issuer.String(),
-		AuthorizationEndpoint:             baseUrlForEndpoints.ResolveReference(authEndpointUrl).String(),
-		ResponseTypesSupported:            []string{"code"},
-		CodeChallengeMethodsSupported:     []string{"S256"},
-		TokenEndpoint:                     baseUrlForEndpoints.ResolveReference(tokenEndpointUrl).String(),
-		TokenEndpointAuthMethodsSupported: []string{"client_secret_post"},
-		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
-		ScopesSupported:                   options.ScopesSupported,
+		// Core fields
+		Issuer:                issuer.String(),
+		AuthorizationEndpoint: baseUrlForEndpoints.ResolveReference(authEndpointUrl).String(),
+		TokenEndpoint:         baseUrlForEndpoints.ResolveReference(tokenEndpointUrl).String(),
+
+		// OAuth 2.1 requires PKCE support
+		ResponseTypesSupported:        []string{"code"}, // OAuth 2.1 removes implicit flow
+		CodeChallengeMethodsSupported: []string{"S256"}, // OAuth 2.1 requires S256, plain is deprecated
+
+		// Token endpoint authentication methods
+		TokenEndpointAuthMethodsSupported: []string{"client_secret_post", "client_secret_basic"},
+
+		// OAuth 2.1 supported grant types
+		GrantTypesSupported: []string{"authorization_code", "refresh_token"},
+
+		// Optional fields
+		ScopesSupported: options.ScopesSupported,
 	}
 
+	// Add service documentation if provided
 	if options.ServiceDocumentationUrl != nil {
 		serviceDoc := options.ServiceDocumentationUrl.String()
 		metadata.ServiceDocumentation = &serviceDoc
 	}
 
-	if revocationEndpoint != nil {
-		revEndpointUrl, _ := url.Parse(*revocationEndpoint)
+	// Check for optional endpoints based on provider capabilities
+	if supportsTokenRevocation(options.Provider) {
+		revocationEndpoint := "/revoke"
+		revEndpointUrl, _ := url.Parse(revocationEndpoint)
 		revEndpoint := baseUrlForEndpoints.ResolveReference(revEndpointUrl).String()
 		metadata.RevocationEndpoint = &revEndpoint
-		metadata.RevocationEndpointAuthMethodsSupported = []string{"client_secret_post"}
+		metadata.RevocationEndpointAuthMethodsSupported = []string{"client_secret_post", "client_secret_basic"}
 	}
 
-	if registrationEndpoint != nil {
-		regEndpointUrl, _ := url.Parse(*registrationEndpoint)
+	if supportsClientRegistration(options.Provider) {
+		registrationEndpoint := "/register"
+		regEndpointUrl, _ := url.Parse(registrationEndpoint)
 		regEndpoint := baseUrlForEndpoints.ResolveReference(regEndpointUrl).String()
 		metadata.RegistrationEndpoint = &regEndpoint
 	}
 
-	return metadata
+	return metadata, nil
 }
 
-// McpAuthRouter sets up standard MCP authorization server endpoints, including dynamic client registration and token revocation
-func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
-	oauthMetadata := CreateOAuthMetadata(struct {
+// McpAuthRouter sets up OAuth 2.1 compliant MCP authorization server endpoints
+func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
+	// Create OAuth metadata with error handling
+	oauthMetadata, err := CreateOAuthMetadata(struct {
 		Provider                server.OAuthServerProvider
 		IssuerUrl               *url.URL
 		BaseUrl                 *url.URL
@@ -163,11 +158,12 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 		ServiceDocumentationUrl: options.ServiceDocumentationUrl,
 		ScopesSupported:         options.ScopesSupported,
 	})
+	if err != nil {
+		return fmt.Errorf("failed to create OAuth metadata: %w", err)
+	}
 
-	// 1) Authorization endpoint
+	// Authorization endpoint (GET only for OAuth 2.1)
 	authorizationURL, _ := url.Parse(oauthMetadata.AuthorizationEndpoint)
-
-	// Create authorization handler options
 	authzOptions := handler.AuthorizationHandlerOptions{
 		Provider: options.Provider,
 	}
@@ -176,28 +172,29 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 	}
 	mux.Handle("GET "+authorizationURL.Path, handler.AuthorizationHandler(authzOptions))
 
-	// 2) Token endpoint
+	// Token endpoint (POST only for OAuth 2.1)
 	tokenURL, _ := url.Parse(oauthMetadata.TokenEndpoint)
-	// Create token handler options
 	tokenOptions := handler.TokenHandlerOptions{
 		Provider: options.Provider,
 	}
 	if options.TokenOptions != nil && options.TokenOptions.RateLimit != nil {
 		tokenOptions.RateLimit = options.TokenOptions.RateLimit
 	}
+	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
 
-	mux.Handle(tokenURL.Path, handler.TokenHandler(tokenOptions))
-	// 3) Metadata router
+	// Metadata endpoints
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
-	McpAuthMetadataRouter(mux, AuthMetadataOptions{
+	if err := McpAuthMetadataRouter(mux, AuthMetadataOptions{
 		OAuthMetadata:           oauthMetadata,
 		ResourceServerUrl:       issuerURL,
 		ServiceDocumentationUrl: options.ServiceDocumentationUrl,
 		ScopesSupported:         options.ScopesSupported,
 		ResourceName:            options.ResourceName,
-	})
+	}); err != nil {
+		return fmt.Errorf("failed to setup metadata router: %w", err)
+	}
 
-	// 4) Dynamic client registration (optional)
+	// Dynamic client registration (optional, POST only)
 	if oauthMetadata.RegistrationEndpoint != nil {
 		registrationURL, _ := url.Parse(*oauthMetadata.RegistrationEndpoint)
 		clientsStore := options.Provider.ClientsStore()
@@ -206,26 +203,24 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 			ClientsStore: clientsStore,
 		}
 
-		// Use provided options or set defaults
 		if options.ClientRegistrationOptions != nil {
 			regOpts = *options.ClientRegistrationOptions
-			regOpts.ClientsStore = clientsStore // Ensure the clients store is set
+			regOpts.ClientsStore = clientsStore
 		} else {
-			// Set default rate limiting
+			// OAuth 2.1 recommended rate limiting for client registration
 			regOpts.RateLimit = &handler.RegisterRateLimitConfig{
-				WindowMs: 60000,
-				Max:      10,
+				WindowMs: 60000, // 1 minute window
+				Max:      10,    // Max 10 registrations per minute
 			}
 		}
 
-		mux.Handle(registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
+		mux.Handle("POST "+registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 	}
 
-	// 5) Revocation endpoint (optional)
+	// 5) Token revocation endpoint (optional, POST only)
 	if oauthMetadata.RevocationEndpoint != nil {
 		revocationURL, _ := url.Parse(*oauthMetadata.RevocationEndpoint)
 
-		// Create revocation handler options
 		revOpts := handler.RevocationHandlerOptions{
 			Provider: options.Provider,
 		}
@@ -235,12 +230,16 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) {
 
 		mux.Handle("POST "+revocationURL.Path, handler.RevocationHandler(revOpts))
 	}
+
+	return nil
 }
 
-// McpAuthMetadataRouter sets up OAuth 2.0 metadata endpoints
-func McpAuthMetadataRouter(mux *http.ServeMux, options AuthMetadataOptions) {
+// McpAuthMetadataRouter sets up OAuth 2.1 compliant metadata endpoints
+func McpAuthMetadataRouter(mux *http.ServeMux, options AuthMetadataOptions) error {
 	issuerURL, _ := url.Parse(options.OAuthMetadata.Issuer)
-	checkIssuerUrl(issuerURL)
+	if err := checkIssuerUrl(issuerURL); err != nil {
+		return fmt.Errorf("invalid issuer URL in metadata: %w", err)
+	}
 
 	// Create protected resource metadata
 	protectedResourceMetadata := auth.OAuthProtectedResourceMetadata{
@@ -261,37 +260,44 @@ func McpAuthMetadataRouter(mux *http.ServeMux, options AuthMetadataOptions) {
 		protectedResourceMetadata.ResourceDocumentation = &resourceDoc
 	}
 
-	// Protected resource metadata endpoint
+	// Protected resource metadata endpoint (GET only)
 	mux.Handle("GET /.well-known/oauth-protected-resource",
 		handler.MetadataHandler(protectedResourceMetadata))
 
-	// Authorization server metadata endpoint (always added for backward compatibility)
+	// Authorization server metadata endpoint (GET only, for backward compatibility)
 	mux.Handle("GET /.well-known/oauth-authorization-server",
 		handler.MetadataHandler(options.OAuthMetadata))
+
+	return nil
 }
 
 // GetOAuthProtectedResourceMetadataUrl constructs the OAuth 2.0 Protected Resource Metadata URL from a given server URL
-// This will replace the path with the standard metadata endpoint
 func GetOAuthProtectedResourceMetadataUrl(serverUrl *url.URL) string {
 	metadataUrl, _ := url.Parse("/.well-known/oauth-protected-resource")
 	return serverUrl.ResolveReference(metadataUrl).String()
 }
 
-// InstallMCPAuthRoutes convenience function to simplify route installation
+// InstallMCPAuthRoutes convenience function to simplify OAuth 2.1 compliant route installation
 func InstallMCPAuthRoutes(
 	mux *http.ServeMux,
-	issuerBaseURL string, // = OAuthMetadata.issuer (e.g. https://auth.example.com)
-	resourceServerURL string, // Your MCP service URL (e.g. https://api.example.com/mcp)
-	clientsStore *server.OAuthClientsStoreInterface,
-	provider server.OAuthServerProvider, // Your existing server provider interface
-	scopesSupported []string, // Can be nil
-	resourceName *string, // Can be nil
-	serviceDocURL *string, // Can be nil
-) {
-	issuerURL, _ := url.Parse(issuerBaseURL)
+	issuerBaseURL string,                // OAuth metadata issuer (e.g. https://auth.example.com)
+	resourceServerURL string,            // Your MCP service URL (e.g. https://api.example.com/mcp)
+	provider server.OAuthServerProvider, // Your server provider interface
+	scopesSupported []string,            // Can be nil
+	resourceName *string,                // Can be nil
+	serviceDocURL *string,               // Can be nil
+) error {
+	issuerURL, err := url.Parse(issuerBaseURL)
+	if err != nil {
+		return fmt.Errorf("invalid issuer URL: %w", err)
+	}
+
 	var serviceDocumentationUrl *url.URL
 	if serviceDocURL != nil {
-		serviceDocumentationUrl, _ = url.Parse(*serviceDocURL)
+		serviceDocumentationUrl, err = url.Parse(*serviceDocURL)
+		if err != nil {
+			return fmt.Errorf("invalid service documentation URL: %w", err)
+		}
 	}
 
 	options := AuthRouterOptions{
@@ -302,5 +308,5 @@ func InstallMCPAuthRoutes(
 		ResourceName:            resourceName,
 	}
 
-	McpAuthRouter(mux, options)
+	return McpAuthRouter(mux, options)
 }
