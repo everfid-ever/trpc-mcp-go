@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
@@ -44,26 +43,6 @@ type RegisterRateLimitConfig struct {
 
 const DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS = 30 * 24 * 60 * 60 // 30 days
 
-// AllowedMethods middleware to restrict HTTP methods
-func AllowedMethods(methods []string) gin.HandlerFunc {
-	allowedMap := make(map[string]bool)
-	for _, method := range methods {
-		allowedMap[method] = true
-	}
-
-	return func(c *gin.Context) {
-		if !allowedMap[c.Request.Method] {
-			c.JSON(http.StatusMethodNotAllowed, gin.H{
-				"error":             "method_not_allowed",
-				"error_description": fmt.Sprintf("Method %s not allowed", c.Request.Method),
-			})
-			c.Abort()
-			return
-		}
-		c.Next()
-	}
-}
-
 type RateLimiter struct {
 	limiter *rate.Limiter
 }
@@ -78,7 +57,7 @@ func (rl *RateLimiter) Allow() bool {
 	return rl.limiter.Allow()
 }
 
-var globalRateLimiter = NewRateLimiter(rate.Every(3*time.Minute), 20) // 20 requests per hour (approximated)
+var globalRateLimiter = NewRateLimiter(rate.Every(time.Hour), 20)
 
 // ClientRegistrationHandler creates a handler for OAuth client registration
 func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.HandlerFunc {
@@ -107,20 +86,11 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 		clientIdGeneration = *options.ClientIdGeneration
 	}
 
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Configure CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	// Core handler logic
+	coreHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 
-		// Handle preflight OPTIONS request
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		// Rate limiting
+		// Rate limiting (if configured)
 		if options.RateLimit != nil {
 			if !globalRateLimiter.Allow() {
 				w.Header().Set("Content-Type", "application/json")
@@ -234,22 +204,17 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(registeredClient)
-	}
-}
+	})
 
-// SetupClientRegistrationRouter sets up a router with client registration endpoint
-func SetupClientRegistrationRouter(options ClientRegistrationHandlerOptions) *http.ServeMux {
-	mux := http.NewServeMux()
-
-	// 组合中间件：CORS + AllowedMethods + Handler
-	handler := middleware.CorsMiddleware(
-		middleware.AllowedMethods([]string{"POST"})(
-			http.HandlerFunc(ClientRegistrationHandler(options)),
-		),
+	// Apply middleware stack
+	middlewareHandler := middleware.CorsMiddleware(
+		middleware.AllowedMethods([]string{"POST"})(coreHandler),
 	)
 
-	mux.Handle("/", handler)
-	return mux
+	// Convert http.Handler to http.HandlerFunc
+	return func(w http.ResponseWriter, r *http.Request) {
+		middlewareHandler.ServeHTTP(w, r)
+	}
 }
 
 // generateClientSecret generates a random 32-byte hex string
@@ -267,5 +232,16 @@ func validateClientMetadata(metadata *auth.OAuthClientMetadata) error {
 	if metadata.TokenEndpointAuthMethod == "" {
 		return fmt.Errorf("token_endpoint_auth_method is required")
 	}
+
+	switch metadata.TokenEndpointAuthMethod {
+	case "client_secret_basic", "client_secret_post", "none":
+	default:
+		return fmt.Errorf("invalid token_endpoint_auth_method: %s", metadata.TokenEndpointAuthMethod)
+	}
+
+	if len(metadata.RedirectURIs) == 0 {
+		return fmt.Errorf("redirect_uris is required")
+	}
+
 	return nil
 }

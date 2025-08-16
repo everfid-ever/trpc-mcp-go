@@ -11,22 +11,14 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/pkce"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
 // TokenHandlerOptions defines configuration options for the token endpoint
 type TokenHandlerOptions struct {
 	Provider  server.OAuthServerProvider `json:"provider"`
-	RateLimit *TokenRateLimitConfig      `json:"rateLimit,omitempty"`
-}
-
-// TokenRateLimitConfig defines rate limit configuration
-type TokenRateLimitConfig struct {
-	WindowMs        int64       `json:"windowMs"` // Time window (milliseconds)
-	Max             int         `json:"max"`      // Maximum number of requests
-	StandardHeaders bool        `json:"standardHeaders"`
-	LegacyHeaders   bool        `json:"legacyHeaders"`
-	Message         interface{} `json:"message"`
+	RateLimit *rate.Limiter              `json:"rateLimit,omitempty"` // 使用标准的 rate.Limiter
 }
 
 // TokenRequest defines basic token request structure
@@ -49,57 +41,45 @@ type RefreshTokenGrant struct {
 	Resource     *string `json:"resource,omitempty" validate:"omitempty,url"`
 }
 
-// TokenHandler creates a token endpoint handler (native HTTP)
+// TokenHandler creates a token endpoint handler with full middleware stack
 func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
+	// Create the core handler logic
+	coreHandler := createTokenCoreHandler(options)
+
+	// Apply middlewares in order
+	var handler http.Handler = coreHandler
+
+	// Apply client authentication middleware
+	handler = middleware.AuthenticateClient(middleware.ClientAuthenticationMiddlewareOptions{
+		ClientsStore: options.Provider.ClientsStore(),
+	})(handler)
+
+	// Apply rate limiting middleware
+	limiter := options.RateLimit
+	if limiter == nil {
+		// Default rate limiting: 60 requests per minute
+		limiter = rate.NewLimiter(rate.Every(time.Second), 60)
+	}
+	handler = middleware.RateLimitMiddleware(limiter)(handler)
+
+	// Apply method restriction middleware (only POST allowed)
+	handler = middleware.AllowedMethods([]string{"POST"})(handler)
+
+	// Apply CORS middleware
+	handler = middleware.CorsMiddleware(handler)
+
+	// Convert http.Handler to http.HandlerFunc
+	return func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	}
+}
+
+// createTokenCoreHandler creates the core token handler logic shared between both versions
+func createTokenCoreHandler(options TokenHandlerOptions) http.HandlerFunc {
 	// Create a validator
 	validate := validator.New()
 
-	// Setting up a rate limiter
-	var limiter *rate.Limiter
-	if options.RateLimit != nil {
-		windowDuration := time.Duration(options.RateLimit.WindowMs) * time.Millisecond
-		limit := rate.Every(windowDuration / time.Duration(options.RateLimit.Max))
-		limiter = rate.NewLimiter(limit, options.RateLimit.Max)
-	}
-
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers to allow access from any origin (to support web-based MCP clients)
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		// Handle preflight OPTIONS request
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		// Check HTTP Method
-		if r.Method != http.MethodPost {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-
-			oauthErr := errors.NewOAuthError(
-				errors.ErrMethodNotAllowed,
-				"Only POST method is allowed",
-				"",
-			)
-			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
-			return
-		}
-
-		// Rate limiting is applied (unless explicitly disabled)
-		if limiter != nil {
-			if !limiter.Allow() {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusTooManyRequests)
-
-				errResp := errors.NewOAuthError(errors.ErrTooManyRequests, "You have exceeded the rate limit for token requests", "")
-				json.NewEncoder(w).Encode(errResp.ToResponseStruct())
-				return
-			}
-		}
-
 		// Set cache-control headers
 		w.Header().Set("Cache-Control", "no-store")
 
@@ -127,7 +107,7 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 			return
 		}
 
-		// 使用AuthenticateClient中间件设置的客户端信息
+		// 使用 AuthenticateClient 中间件设置的客户端信息
 		client, ok := middleware.GetAuthenticatedClient(r)
 		if !ok {
 			w.Header().Set("Content-Type", "application/json")
@@ -139,9 +119,9 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 
 		switch tokenReq.GrantType {
 		case "authorization_code":
-			handleAuthorizationCodeGrantHTTP(w, r, validate, options.Provider, *client)
+			handleAuthorizationCodeGrant(w, r, validate, options.Provider, *client)
 		case "refresh_token":
-			handleRefreshTokenGrantHTTP(w, r, validate, options.Provider, *client)
+			handleRefreshTokenGrant(w, r, validate, options.Provider, *client)
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -152,8 +132,8 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 	}
 }
 
-// handleAuthorizationCodeGrantHTTP processes authorization code grant (native HTTP)
-func handleAuthorizationCodeGrantHTTP(w http.ResponseWriter, r *http.Request, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
+// handleAuthorizationCodeGrant processes authorization code grant
+func handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
 	// Parsing the authorization code grant request
 	var redirectURI *string
 	if uri := r.FormValue("redirect_uri"); uri != "" {
@@ -181,8 +161,37 @@ func handleAuthorizationCodeGrantHTTP(w http.ResponseWriter, r *http.Request, va
 		return
 	}
 
-	// Prepare parameters - 始终传递code_verifier
-	codeVerifier := &grant.CodeVerifier
+	// Check if the provider supports skipLocalPKceValidation
+	type skipLocalPKceValidation interface {
+		GetSkipLocalPkceValidation() bool
+	}
+
+	skipLocalValidation := false
+	if p, ok := provider.(skipLocalPKceValidation); ok {
+		skipLocalValidation = p.GetSkipLocalPkceValidation()
+	}
+
+	// Perform local PKCE validation unless explicitly skipped
+	if !skipLocalValidation {
+		codeChallenge, err := provider.ChallengeForAuthorizationCode(client, grant.Code)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
+			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, "Failed to retrieve code challenge", "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+			return
+		}
+
+		if !pkce.VerifyPKCEChallenge(grant.Code, codeChallenge) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
+			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, "code_verifier does not match the challenge", "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+			return
+		}
+	}
 
 	var resourceURL *url.URL
 	if grant.Resource != nil {
@@ -196,6 +205,12 @@ func handleAuthorizationCodeGrantHTTP(w http.ResponseWriter, r *http.Request, va
 			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
 		}
+	}
+
+	// Parse the code_verifier to the provider if PKCE validation did not occur locally
+	var codeVerifier *string
+	if skipLocalValidation {
+		codeVerifier = &grant.CodeVerifier
 	}
 
 	// Exchange the authorization code for a token
@@ -233,9 +248,9 @@ func handleAuthorizationCodeGrantHTTP(w http.ResponseWriter, r *http.Request, va
 	json.NewEncoder(w).Encode(tokens)
 }
 
-// handleRefreshTokenGrantHTTP handles refresh token grant (native HTTP)
-func handleRefreshTokenGrantHTTP(w http.ResponseWriter, r *http.Request, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
-	// 解析刷新token grant请求
+// handleRefreshTokenGrant handles refresh token grant
+func handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
+	// 解析刷新 token grant 请求
 	var scope *string
 	if s := r.FormValue("scope"); s != "" {
 		scope = &s

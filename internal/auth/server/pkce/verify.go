@@ -8,7 +8,7 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
 
-func validatePKCEParams(params server.AuthorizationParams) error {
+func ValidatePKCEParams(params server.AuthorizationParams) error {
 	if params.CodeChallenge == "" {
 		return fmt.Errorf("code_challenge is required")
 	}
@@ -53,23 +53,17 @@ func isValidBase64URL(s string) bool {
 	return true
 }
 
-func verifyPKCE(challenge, verifier string) error {
-	// 计算SHA256哈希
-	hash := sha256.Sum256([]byte(verifier))
-	// BASE64URL编码
-	computed := base64.RawURLEncoding.EncodeToString(hash[:])
-
-	if challenge != computed {
-		return fmt.Errorf("code_challenge verification failed")
+// VerifyPKCEChallenge verifies the PKCE code_verifier against the code_challenge
+func VerifyPKCEChallenge(codeVerifier, codeChallenge string) bool {
+	if codeVerifier == "" || codeChallenge == "" {
+		return false
 	}
 
-	return nil
-}
+	// Create SHA256 hash of the code_verifier
+	hash := sha256.Sum256([]byte(codeVerifier))
 
-func ValidatePKCEParams(params server.AuthorizationParams) error {
-	return validatePKCEParams(params)
-}
+	// Base64 URL encode the hash
+	computedChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
 
-func VerifyPKCE(challenge, verifier string) error {
-	return verifyPKCE(challenge, verifier)
+	return computedChallenge == codeChallenge
 }
