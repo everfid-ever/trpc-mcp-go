@@ -91,7 +91,7 @@ func RateLimitMiddleware(limiter *rate.Limiter) func(http.Handler) http.Handler 
 }
 
 // ContentTypeValidationMiddleware validates Content-Type header for OAuth endpoints
-// Per RFC 7009 Section 2.1, OAuth token revocation requests must use application/x-www-form-urlencoded
+// This is the base validation middleware that other content type middlewares can build upon
 func ContentTypeValidationMiddleware(allowedTypes []string, allowJSONFallback bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +105,7 @@ func ContentTypeValidationMiddleware(allowedTypes []string, allowJSONFallback bo
 				invalidReqError := errors.NewOAuthError(
 					errors.ErrInvalidRequest,
 					"Content-Type header is required",
-					"https://datatracker.ietf.org/doc/html/rfc7009#section-2.1",
+					"",
 				)
 				json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
 				return
@@ -137,7 +137,7 @@ func ContentTypeValidationMiddleware(allowedTypes []string, allowJSONFallback bo
 				invalidReqError := errors.NewOAuthError(
 					errors.ErrInvalidRequest,
 					errorMsg,
-					"https://datatracker.ietf.org/doc/html/rfc7009#section-2.1",
+					"",
 				)
 				json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
 				return
@@ -149,7 +149,13 @@ func ContentTypeValidationMiddleware(allowedTypes []string, allowJSONFallback bo
 }
 
 // URLEncodedValidationMiddleware validates that Content-Type is application/x-www-form-urlencoded
-// This is a convenience wrapper for OAuth 2.1 RFC 7009 compliance
+// This is a convenience wrapper for OAuth 2.1 RFC 7009 compliance (token revocation)
 func URLEncodedValidationMiddleware(allowJSONFallback bool) func(http.Handler) http.Handler {
 	return ContentTypeValidationMiddleware([]string{"application/x-www-form-urlencoded"}, allowJSONFallback)
+}
+
+// JSONValidationMiddleware validates that Content-Type is application/json
+// This is a convenience wrapper for endpoints that only accept JSON (like client registration)
+func JSONValidationMiddleware() func(http.Handler) http.Handler {
+	return ContentTypeValidationMiddleware([]string{"application/json"}, false)
 }
