@@ -170,12 +170,12 @@ func processAuthorization(r *http.Request, validate *validator.Validate, client 
 			oauthErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid resource URL", "")
 			return &oauthErr
 		}
-	}
 
-	// 验证resource URL是否为绝对URL
-	if !resourceURL.IsAbs() {
-		oauthErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Resource must be an absolute URL", "")
-		return &oauthErr
+		// Verify that the resource URL is an absolute URL
+		if !resourceURL.IsAbs() {
+			oauthErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Resource must be an absolute URL", "")
+			return &oauthErr
+		}
 	}
 
 	authParams := server.AuthorizationParams{
@@ -241,10 +241,10 @@ func handleDirectError(w http.ResponseWriter, oauthErr errors.OAuthError) {
 	switch oauthErr.ErrorCode {
 	case errors.ErrServerError.Error():
 		status = http.StatusInternalServerError
-	case errors.ErrInvalidClient.Error():
-		status = http.StatusUnauthorized
 	default:
-		status = http.StatusBadRequest
+		if oauthErr.ErrorCode == errors.ErrServerError.Error() {
+			status = http.StatusBadRequest
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
