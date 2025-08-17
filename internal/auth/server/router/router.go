@@ -55,7 +55,7 @@ func supportsClientRegistration(provider server.OAuthServerProvider) bool {
 		return false
 	}
 	// Use type assertion to check if the clients store implements SupportDynamicClientRegistration interface
-	_, ok := provider.(server.SupportTokenRevocation)
+	_, ok := provider.(server.SupportDynamicClientRegistration)
 	return ok
 }
 
