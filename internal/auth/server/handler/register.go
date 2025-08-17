@@ -16,6 +16,12 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
 
+const (
+	DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS = 30 * 24 * 60 * 60 // 30 days
+	DEFAULT_RATE_LIMIT_WINDOW_MS         = 60 * 60 * 1000    // 1 hour
+	DEFAULT_RATE_LIMIT_MAX               = 20                // 20 requests per hour
+)
+
 // ClientRegistrationHandlerOptions configuration for client registration handler
 type ClientRegistrationHandlerOptions struct {
 	// A store used to save information about dynamically registered OAuth clients.
@@ -41,26 +47,16 @@ type RegisterRateLimitConfig struct {
 	Message  string // Customize over-limit prompt information
 }
 
-const DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS = 30 * 24 * 60 * 60 // 30 days
-
-type RateLimiter struct {
-	limiter *rate.Limiter
-}
-
-func NewRateLimiter(rps rate.Limit, burst int) *RateLimiter {
-	return &RateLimiter{
-		limiter: rate.NewLimiter(rps, burst),
-	}
-}
-
-func (rl *RateLimiter) Allow() bool {
-	return rl.limiter.Allow()
-}
-
-var globalRateLimiter = NewRateLimiter(rate.Every(time.Hour), 20)
-
 // ClientRegistrationHandler creates a handler for OAuth client registration
-func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.HandlerFunc {
+func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Handler {
+	rateLimitConfig := options.RateLimit
+	if rateLimitConfig == nil {
+		rateLimitConfig = &RegisterRateLimitConfig{
+			WindowMs: DEFAULT_RATE_LIMIT_WINDOW_MS,
+			Max:      DEFAULT_RATE_LIMIT_MAX,
+		}
+	}
+
 	if options.ClientsStore == nil {
 		// Return a handler that always returns an error
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,22 +86,6 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 	coreHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 
-		// Rate limiting (if configured)
-		if options.RateLimit != nil {
-			if !globalRateLimiter.Allow() {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusTooManyRequests)
-
-				oauthErr := errors.NewOAuthError(
-					errors.ErrTooManyRequests,
-					"Too many requests",
-					"",
-				)
-				json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
-				return
-			}
-		}
-
 		// Parse JSON request body
 		var clientMetadata auth.OAuthClientMetadata
 		if err := json.NewDecoder(r.Body).Decode(&clientMetadata); err != nil {
@@ -114,7 +94,7 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 
 			oauthErr := errors.NewOAuthError(
 				errors.ErrInvalidClientMetadata,
-				"Invalid JSON in request body",
+				fmt.Sprintf("Invalid JSON in request body: %v", err),
 				"",
 			)
 			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
@@ -206,15 +186,23 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 		json.NewEncoder(w).Encode(registeredClient)
 	})
 
-	// Apply middleware stack
-	middlewareHandler := middleware.CorsMiddleware(
-		middleware.AllowedMethods([]string{"POST"})(coreHandler),
-	)
+	var handler http.Handler = coreHandler
 
-	// Convert http.Handler to http.HandlerFunc
-	return func(w http.ResponseWriter, r *http.Request) {
-		middlewareHandler.ServeHTTP(w, r)
+	if options.RateLimit != nil {
+		windowDuration := time.Duration(rateLimitConfig.WindowMs) * time.Millisecond
+		limit := rate.Every(windowDuration / time.Duration(rateLimitConfig.Max))
+		limiter := rate.NewLimiter(limit, rateLimitConfig.Max)
+
+		handler = middleware.RateLimitMiddleware(limiter)(handler)
 	}
+
+	handler = middleware.JSONValidationMiddleware()(handler)
+
+	handler = middleware.AllowedMethods([]string{"POST"})(handler)
+
+	handler = middleware.CorsMiddleware(handler)
+
+	return handler
 }
 
 // generateClientSecret generates a random 32-byte hex string

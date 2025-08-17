@@ -150,7 +150,13 @@ func processAuthorization(r *http.Request, validate *validator.Validate, client 
 	// Validate scopes
 	var requestedScopes []string
 	if reqParams.Scope != "" {
-		requestedScopes = strings.Split(reqParams.Scope, " ")
+		scopes := strings.Fields(reqParams.Scope)
+		for _, scope := range scopes {
+			if scope != "" {
+				requestedScopes = append(requestedScopes, scope)
+			}
+		}
+
 		if err := validateScopes(requestedScopes, client); err != nil {
 			return err
 		}
@@ -162,6 +168,12 @@ func processAuthorization(r *http.Request, validate *validator.Validate, client 
 		resourceURL, err = url.Parse(reqParams.Resource)
 		if err != nil {
 			oauthErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid resource URL", "")
+			return &oauthErr
+		}
+
+		// Verify that the resource URL is an absolute URL
+		if !resourceURL.IsAbs() {
+			oauthErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Resource must be an absolute URL", "")
 			return &oauthErr
 		}
 	}
@@ -184,15 +196,35 @@ func processAuthorization(r *http.Request, validate *validator.Validate, client 
 
 // validateScopes validates the requested scopes against client allowed scopes
 func validateScopes(requestedScopes []string, client *auth.OAuthClientInformationFull) *errors.OAuthError {
+	// If no scope is requested, return success directly
+	if len(requestedScopes) == 0 {
+		return nil
+	}
+
 	allowedScopes := make(map[string]bool)
 
+	// Handling client-scoped configuration
 	if client.Scope != nil && *client.Scope != "" {
-		for _, scope := range strings.Split(*client.Scope, " ") {
-			allowedScopes[scope] = true
+		scopes := strings.Fields(*client.Scope)
+		for _, scope := range scopes {
+			if scope != "" {
+				allowedScopes[scope] = true
+			}
 		}
 	}
 
+	// If the client does not have any scopes configured, reject all scope requests
+	if len(requestedScopes) == 0 {
+		oauthErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Client has no registered scopes", "")
+		return &oauthErr
+	}
+
+	// Verify the scope of each request
 	for _, scope := range requestedScopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
 		if !allowedScopes[scope] {
 			oauthErr := errors.NewOAuthError(errors.ErrInvalidScope, fmt.Sprintf("Client was not registered with scope %s", scope), "")
 			return &oauthErr
@@ -205,8 +237,14 @@ func validateScopes(requestedScopes []string, client *auth.OAuthClientInformatio
 // handleDirectError handles direct error responses (before redirect)
 func handleDirectError(w http.ResponseWriter, oauthErr errors.OAuthError) {
 	status := http.StatusBadRequest
-	if oauthErr.ErrorCode == errors.ErrServerError.Error() {
+
+	switch oauthErr.ErrorCode {
+	case errors.ErrServerError.Error():
 		status = http.StatusInternalServerError
+	default:
+		if oauthErr.ErrorCode == errors.ErrServerError.Error() {
+			status = http.StatusBadRequest
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -227,12 +265,12 @@ func parseClientAuthorizationParams(r *http.Request) ClientAuthorizationParams {
 	var params ClientAuthorizationParams
 
 	if r.Method == http.MethodPost {
-		params.ClientID = r.FormValue("client_id")
-		params.RedirectURI = r.FormValue("redirect_uri")
+		params.ClientID = strings.TrimSpace(r.FormValue("client_id"))
+		params.RedirectURI = strings.TrimSpace(r.FormValue("redirect_uri"))
 	} else {
 		query := r.URL.Query()
-		params.ClientID = query.Get("client_id")
-		params.RedirectURI = query.Get("redirect_uri")
+		params.ClientID = strings.TrimSpace(query.Get("client_id"))
+		params.RedirectURI = strings.TrimSpace(query.Get("redirect_uri"))
 	}
 
 	return params
@@ -243,20 +281,20 @@ func parseRequestAuthorizationParams(r *http.Request) RequestAuthorizationParams
 	var params RequestAuthorizationParams
 
 	if r.Method == http.MethodPost {
-		params.ResponseType = r.FormValue("response_type")
-		params.CodeChallenge = r.FormValue("code_challenge")
-		params.CodeChallengeMethod = r.FormValue("code_challenge_method")
-		params.Scope = r.FormValue("scope")
+		params.ResponseType = strings.TrimSpace(r.FormValue("response_type"))
+		params.CodeChallenge = strings.TrimSpace(r.FormValue("code_challenge"))
+		params.CodeChallengeMethod = strings.TrimSpace(r.FormValue("code_challenge_method"))
+		params.Scope = strings.TrimSpace(r.FormValue("scope"))
 		params.State = r.FormValue("state")
-		params.Resource = r.FormValue("resource")
+		params.Resource = strings.TrimSpace(r.FormValue("resource"))
 	} else {
 		query := r.URL.Query()
-		params.ResponseType = query.Get("response_type")
-		params.CodeChallenge = query.Get("code_challenge")
-		params.CodeChallengeMethod = query.Get("code_challenge_method")
-		params.Scope = query.Get("scope")
+		params.ResponseType = strings.TrimSpace(query.Get("response_type"))
+		params.CodeChallenge = strings.TrimSpace(query.Get("code_challenge"))
+		params.CodeChallengeMethod = strings.TrimSpace(query.Get("code_challenge_method"))
+		params.Scope = strings.TrimSpace(query.Get("scope"))
 		params.State = query.Get("state")
-		params.Resource = query.Get("resource")
+		params.Resource = strings.TrimSpace(query.Get("resource"))
 	}
 
 	return params

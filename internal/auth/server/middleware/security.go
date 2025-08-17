@@ -89,3 +89,73 @@ func RateLimitMiddleware(limiter *rate.Limiter) func(http.Handler) http.Handler 
 		})
 	}
 }
+
+// ContentTypeValidationMiddleware validates Content-Type header for OAuth endpoints
+// This is the base validation middleware that other content type middlewares can build upon
+func ContentTypeValidationMiddleware(allowedTypes []string, allowJSONFallback bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			contentType := r.Header.Get("Content-Type")
+
+			// Content-Type header is required
+			if contentType == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+
+				invalidReqError := errors.NewOAuthError(
+					errors.ErrInvalidRequest,
+					"Content-Type header is required",
+					"",
+				)
+				json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
+				return
+			}
+
+			// Check if content type is allowed
+			var isValid bool
+			for _, allowedType := range allowedTypes {
+				if strings.HasPrefix(contentType, allowedType) {
+					isValid = true
+					break
+				}
+			}
+
+			// Special handling for JSON fallback
+			if !isValid && allowJSONFallback && strings.HasPrefix(contentType, "application/json") {
+				isValid = true
+			}
+
+			if !isValid {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+
+				errorMsg := fmt.Sprintf("Content-Type must be one of: %s", strings.Join(allowedTypes, ", "))
+				if allowJSONFallback {
+					errorMsg = fmt.Sprintf("Content-Type must be %s (preferred) or application/json", allowedTypes[0])
+				}
+
+				invalidReqError := errors.NewOAuthError(
+					errors.ErrInvalidRequest,
+					errorMsg,
+					"",
+				)
+				json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// URLEncodedValidationMiddleware validates that Content-Type is application/x-www-form-urlencoded
+// This is a convenience wrapper for OAuth 2.1 RFC 7009 compliance (token revocation)
+func URLEncodedValidationMiddleware(allowJSONFallback bool) func(http.Handler) http.Handler {
+	return ContentTypeValidationMiddleware([]string{"application/x-www-form-urlencoded"}, allowJSONFallback)
+}
+
+// JSONValidationMiddleware validates that Content-Type is application/json
+// This is a convenience wrapper for endpoints that only accept JSON (like client registration)
+func JSONValidationMiddleware() func(http.Handler) http.Handler {
+	return ContentTypeValidationMiddleware([]string{"application/json"}, false)
+}
