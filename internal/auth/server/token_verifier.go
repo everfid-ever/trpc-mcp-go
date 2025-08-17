@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"sync"
+	"time"
 
-	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/lestrrat-go/httprc/v3"
+	"github.com/lestrrat-go/jwx/v3/jwk"
+	"github.com/lestrrat-go/jwx/v3/jwt"
 )
+
+type TokenVerifierInterface interface {
+	VerifyAccessToken(token string) (AuthInfo, error)
+}
 
 // TokenType defines the type of token (access or refresh).
 type TokenType string
@@ -20,34 +25,71 @@ const (
 	RefreshToken TokenType = "refresh"
 )
 
-// JWKVerifier implements TokenVerifier with JWK support and returns AuthInfo directly.
-type JWKVerifier struct {
-	jwksURL       string
-	cache         *jwk.Cache
-	localKeys     jwk.Set
-	remoteEnabled bool
-	mu            sync.RWMutex
+// JWKVerifierConfig 定义 JWKVerifier 的配置
+type JWKVerifierConfig struct {
+	// LocalJWKS: 本地 JWKS JSON 字符串（优先于 LocalFile）
+	LocalJWKS string
+	// LocalFile: 本地 JWKS 文件路径
+	LocalFile string
+	// RemoteURL: 远程 JWKS URL（如果设置，则使用远程模式）
+	RemoteURL string
+	// RefreshInterval: 远程 JWKS 刷新间隔（默认 5 分钟）
+	RefreshInterval time.Duration
 }
 
-// NewJWKVerifier creates a new JWKVerifier instance.
-func NewJWKVerifier(jwksURL string, remoteEnabled bool) *JWKVerifier {
-	return &JWKVerifier{
-		jwksURL:       jwksURL,
-		cache:         jwk.NewCache(context.Background()),
-		localKeys:     jwk.NewSet(),
-		remoteEnabled: remoteEnabled,
+// JWKVerifier 结构体
+type JWKVerifier struct {
+	keySet        jwk.Set    // 本地模式下使用的固定 key set
+	cache         *jwk.Cache // 远程模式下使用的缓存
+	remoteURL     string
+	remoteEnabled bool
+}
+
+// NewJWKVerifier 创建一个新的 JWKVerifier
+func NewJWKVerifier(cfg JWKVerifierConfig) (*JWKVerifier, error) {
+	if cfg.RemoteURL != "" {
+		ctx := context.Background()
+		// 远程模式
+		if cfg.RefreshInterval == 0 {
+			cfg.RefreshInterval = 5 * time.Minute
+		}
+		cache, err := jwk.NewCache(ctx, httprc.NewClient())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create jwk cache: %w", err)
+		}
+		if err := cache.Register(ctx, cfg.RemoteURL, jwk.WithConstantInterval(cfg.RefreshInterval)); err != nil {
+			return nil, fmt.Errorf("failed to register remote JWKS: %w", err)
+		}
+		return &JWKVerifier{
+			cache:         cache,
+			remoteURL:     cfg.RemoteURL,
+			remoteEnabled: true,
+		}, nil
+	} else if cfg.LocalJWKS != "" || cfg.LocalFile != "" {
+		// 本地模式
+		var set jwk.Set
+		var err error
+		if cfg.LocalJWKS != "" {
+			set, err = jwk.Parse([]byte(cfg.LocalJWKS))
+		} else {
+			set, err = jwk.ReadFile(cfg.LocalFile)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse local JWKS: %w", err)
+		}
+		return &JWKVerifier{
+			keySet:        set,
+			remoteEnabled: false,
+		}, nil
 	}
+	return nil, errors.New("must provide either RemoteURL or LocalJWKS/LocalFile")
 }
 
 // VerifyToken verifies the token using RS256/ES256 and JWK cache, returns parsed and verified jwt.Token.
 func (v *JWKVerifier) VerifyToken(ctx context.Context, token string, tokenType TokenType) (jwt.Token, error) {
-	// First, try to parse with local keys
-	v.mu.RLock()
-	localKeys := v.localKeys
-	v.mu.RUnlock()
 
-	if localKeys.Len() > 0 {
-		parsedToken, err := jwt.Parse([]byte(token), jwt.WithKeySet(localKeys))
+	if v.keySet.Len() > 0 {
+		parsedToken, err := jwt.Parse([]byte(token), jwt.WithKeySet(v.keySet), jwt.WithValidate(true))
 		if err == nil {
 			return parsedToken, nil
 		}
@@ -55,8 +97,8 @@ func (v *JWKVerifier) VerifyToken(ctx context.Context, token string, tokenType T
 	}
 
 	// Fallback to remote JWKS if enabled
-	if v.remoteEnabled && v.jwksURL != "" {
-		keySet, err := v.cache.Get(ctx, v.jwksURL)
+	if v.remoteEnabled && v.remoteURL != "" {
+		keySet, err := v.cache.Lookup(ctx, v.remoteURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch JWKS: %v", err)
 		}
@@ -114,29 +156,27 @@ func (v *JWKVerifier) VerifyRefreshToken(token string) (AuthInfo, error) {
 	return authInfo, nil
 }
 
-// cacheRemoteKey extracts and caches the key used for verification
-func (v *JWKVerifier) cacheRemoteKey(jwtToken jwt.Token, keySet jwk.Set) {
-	keyID, ok := jwtToken.Get(jwk.KeyIDKey)
-	if !ok {
-		return
-	}
-
-	keyIDStr, ok := keyID.(string)
-	if !ok {
-		return
-	}
-
-	key, found := keySet.LookupKeyID(keyIDStr)
-	if !found {
-		return
-	}
-
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	// Add key to local set
-	v.localKeys.AddKey(key)
-}
+//// cacheRemoteKey extracts and caches the key used for verification
+//// fixme 不需要手动缓存，删除
+//func (v *JWKVerifier) cacheRemoteKey(jwtToken jwt.Token, keySet jwk.Set) {
+//	keyID, ok := jwtToken.Get(jwk.KeyIDKey)
+//	if !ok {
+//		return
+//	}
+//
+//	keyIDStr, ok := keyID.(string)
+//	if !ok {
+//		return
+//	}
+//
+//	key, found := keySet.LookupKeyID(keyIDStr)
+//	if !found {
+//		return
+//	}
+//
+//	// Add key to local set
+//	v.localKeys.AddKey(key)
+//}
 
 // convertJWTToAuthInfo converts jwt.Token to AuthInfo structure.
 func (v *JWKVerifier) convertJWTToAuthInfo(jwtToken jwt.Token, token string) (AuthInfo, error) {
@@ -151,7 +191,7 @@ func (v *JWKVerifier) convertJWTToAuthInfo(jwtToken jwt.Token, token string) (Au
 	authInfo.Scopes = v.extractScopes(jwtToken)
 
 	// Extract expiration time
-	if exp := jwtToken.Expiration(); !exp.IsZero() {
+	if exp, _ := jwtToken.Expiration(); !exp.IsZero() {
 		expiresAt := exp.Unix()
 		authInfo.ExpiresAt = &expiresAt
 	}
@@ -290,12 +330,11 @@ func (v *JWKVerifier) splitScopes(scopeStr string) []string {
 
 // LoadLocalKey loads a JWK key for local verification.
 func (v *JWKVerifier) LoadLocalKey(key jwk.Key) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.localKeys.AddKey(key)
+	return v.keySet.AddKey(key)
 }
 
 // LoadLocalKeyFromBytes loads a key from raw bytes (PEM, etc.)
+// fixme 不符合应用场景，删除？
 func (v *JWKVerifier) LoadLocalKeyFromBytes(keyData []byte, keyID string) error {
 	key, err := jwk.ParseKey(keyData)
 	if err != nil {
@@ -313,9 +352,8 @@ func (v *JWKVerifier) LoadLocalKeyFromBytes(keyData []byte, keyID string) error 
 }
 
 // GetLocalKeys returns information about currently loaded local keys.
+// fixme 不符合应用场景，删除？
 func (v *JWKVerifier) GetLocalKeys() []map[string]interface{} {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
 
 	var keys []map[string]interface{}
 	iter := v.localKeys.Keys(context.Background())
@@ -340,22 +378,16 @@ func (v *JWKVerifier) GetLocalKeys() []map[string]interface{} {
 
 // SetJWKSURL updates the JWKS URL (useful for configuration changes).
 func (v *JWKVerifier) SetJWKSURL(url string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	v.jwksURL = url
 }
 
 // ClearLocalKeys clears all locally cached keys.
 func (v *JWKVerifier) ClearLocalKeys() {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.localKeys = jwk.NewSet()
+	_ = v.localKeys.Clear()
 }
 
 // GetCacheStats returns cache statistics for monitoring
 func (v *JWKVerifier) GetCacheStats() map[string]interface{} {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
 
 	return map[string]interface{}{
 		"local_keys_count": v.localKeys.Len(),

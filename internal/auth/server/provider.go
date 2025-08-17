@@ -72,7 +72,3 @@ type SupportTokenRevocation interface {
 	// 可选方法 / Optional method
 	RevokeToken(client auth.OAuthClientInformationFull, request auth.OAuthTokenRevocationRequest) error
 }
-
-type TokenVerifier interface {
-	VerifyAccessToken(token string) (AuthInfo, error)
-}

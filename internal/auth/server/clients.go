@@ -43,7 +43,7 @@ func (s OAuthClientsStore) GetClient(clientID string) (*auth.OAuthClientInformat
 }
 
 func (s OAuthClientsStore) RegisterClient(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
-	if s.registerClient == nil {
+	if s.supportsRegistration() == false {
 		return nil, fmt.Errorf("dynamic client registration is not supported")
 	}
 	return s.registerClient(client)
@@ -62,6 +62,6 @@ func NewOAuthClientStore(getClient func(clientID string) (*auth.OAuthClientInfor
 }
 
 // SupportsRegistration checks if dynamic client registration is supported
-func (s OAuthClientsStore) SupportsRegistration() bool {
+func (s OAuthClientsStore) supportsRegistration() bool {
 	return s.registerClient != nil
 }

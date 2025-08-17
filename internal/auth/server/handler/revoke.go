@@ -2,10 +2,11 @@ package handler
 
 import (
 	"encoding/json"
-	"golang.org/x/time/rate"
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"

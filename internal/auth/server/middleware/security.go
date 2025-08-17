@@ -3,9 +3,10 @@ package middleware
 import (
 	"encoding/json"
 	"fmt"
-	"golang.org/x/time/rate"
 	"net/http"
 	"strings"
+
+	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
