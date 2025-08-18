@@ -12,7 +12,7 @@ import (
 )
 
 type SecurityMiddlewareOption struct {
-	verifier server.TokenVerifier
+	verifier server.TokenVerifierInterface
 }
 
 func AllowedMethods(methods []string) func(http.Handler) http.Handler {
