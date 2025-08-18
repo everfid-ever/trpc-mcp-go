@@ -32,7 +32,7 @@ type JWKVerifierConfig struct {
 	// LocalFile: 本地 JWKS 文件路径
 	LocalFile string
 	// RemoteURL: 远程 JWKS URL（如果设置，则使用远程模式）
-	RemoteURL string
+	RemoteURLs []string
 	// RefreshInterval: 远程 JWKS 刷新间隔（默认 5 分钟）
 	RefreshInterval time.Duration
 }
@@ -41,13 +41,13 @@ type JWKVerifierConfig struct {
 type JWKVerifier struct {
 	keySet        jwk.Set    // 本地模式下使用的固定 key set
 	cache         *jwk.Cache // 远程模式下使用的缓存
-	remoteURL     string
+	remoteURLs    []string
 	remoteEnabled bool
 }
 
 // NewJWKVerifier 创建一个新的 JWKVerifier
 func NewJWKVerifier(cfg JWKVerifierConfig) (*JWKVerifier, error) {
-	if cfg.RemoteURL != "" {
+	if len(cfg.RemoteURLs) != 0 {
 		ctx := context.Background()
 		// 远程模式
 		if cfg.RefreshInterval == 0 {
@@ -57,12 +57,14 @@ func NewJWKVerifier(cfg JWKVerifierConfig) (*JWKVerifier, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create jwk cache: %w", err)
 		}
-		if err := cache.Register(ctx, cfg.RemoteURL, jwk.WithConstantInterval(cfg.RefreshInterval)); err != nil {
-			return nil, fmt.Errorf("failed to register remote JWKS: %w", err)
+		for _, jwksURL := range cfg.RemoteURLs {
+			if err := cache.Register(ctx, jwksURL, jwk.WithConstantInterval(cfg.RefreshInterval)); err != nil {
+				return nil, fmt.Errorf("failed to register remote JWKS: %w", err)
+			}
 		}
 		return &JWKVerifier{
 			cache:         cache,
-			remoteURL:     cfg.RemoteURL,
+			remoteURLs:    cfg.RemoteURLs,
 			remoteEnabled: true,
 		}, nil
 	} else if cfg.LocalJWKS != "" || cfg.LocalFile != "" {
@@ -97,8 +99,8 @@ func (v *JWKVerifier) VerifyToken(ctx context.Context, token string, tokenType T
 	}
 
 	// Fallback to remote JWKS if enabled
-	if v.remoteEnabled && v.remoteURL != "" {
-		keySet, err := v.cache.Lookup(ctx, v.remoteURL)
+	if v.remoteEnabled && len(v.remoteURLs) != 0 {
+		keySet, err := v.cache.Lookup(ctx, v.remoteURLs)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch JWKS: %v", err)
 		}
