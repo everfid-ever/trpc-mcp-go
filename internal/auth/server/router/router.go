@@ -55,7 +55,7 @@ func supportsClientRegistration(provider server.OAuthServerProvider) bool {
 		return false
 	}
 	// Use type assertion to check if the clients store implements SupportDynamicClientRegistration interface
-	_, ok := provider.(server.SupportDynamicClientRegistration)
+	_, ok := provider.(server.SupportTokenRevocation)
 	return ok
 }
 
@@ -280,12 +280,12 @@ func GetOAuthProtectedResourceMetadataUrl(serverUrl *url.URL) string {
 // InstallMCPAuthRoutes convenience function to simplify OAuth 2.1 compliant route installation
 func InstallMCPAuthRoutes(
 	mux *http.ServeMux,
-	issuerBaseURL string,                // OAuth metadata issuer (e.g. https://auth.example.com)
-	resourceServerURL string,            // Your MCP service URL (e.g. https://api.example.com/mcp)
+	issuerBaseURL string, // OAuth metadata issuer (e.g. https://auth.example.com)
+	resourceServerURL string, // Your MCP service URL (e.g. https://api.example.com/mcp)
 	provider server.OAuthServerProvider, // Your server provider interface
-	scopesSupported []string,            // Can be nil
-	resourceName *string,                // Can be nil
-	serviceDocURL *string,               // Can be nil
+	scopesSupported []string, // Can be nil
+	resourceName *string, // Can be nil
+	serviceDocURL *string, // Can be nil
 ) error {
 	issuerURL, err := url.Parse(issuerBaseURL)
 	if err != nil {
