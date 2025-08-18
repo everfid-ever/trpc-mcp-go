@@ -74,5 +74,6 @@ type SupportTokenRevocation interface {
 }
 
 type TokenVerifier interface {
-	VerifyAccessToken(token string) (AuthInfo, error)
+	VerifyAccessToken(token string) (*AuthInfo, error)
+	VerifyRefreshToken(token string) (*AuthInfo, error)
 }
