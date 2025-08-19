@@ -17,7 +17,7 @@ import (
 type BearerAuthMiddlewareOptions struct {
 	// Verifier 用于验证令牌的提供者。
 	// Token verifier provider.
-	Verifier server.TokenVerifier
+	Verifier server.TokenVerifierInterface
 
 	// RequiredScopes 可选的权限范围，验证令牌必须包含所有指定范围。
 	// Optional scopes that the token must have.
@@ -35,20 +35,10 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions, onDecision OnDecisio
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 
 			// 审计辅助函数
-			audit := func(allowed bool, reason string, info server.AuthInfo) {
+			audit := func(allowed bool, reason string, info *server.AuthInfo) {
 				if onDecision != nil {
 					var clientID, subject string
 					var scopes []string
-
-					clientID = info.ClientID
-					scopes = info.Scopes
-					// 从 JWT token 中提取 subject
-					if info.Extra != nil {
-						if sub, ok := info.Extra["sub"].(string); ok {
-							subject = sub
-						}
-					}
-
 					onDecision(Decision{
 						Allowed:   allowed,
 						Reason:    reason,
@@ -72,7 +62,7 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions, onDecision OnDecisio
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(statusCode)
 				json.NewEncoder(w).Encode(err.ToResponseStruct())
-				audit(false, err.Message, server.AuthInfo{})
+				audit(false, err.Message, nil)
 			}
 
 			// 获取Authorization头
@@ -91,7 +81,7 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions, onDecision OnDecisio
 			token := parts[1]
 
 			// 验证令牌
-			authInfo, err := options.Verifier.VerifyAccessToken(req.Context(), token)
+			authInfo, err := options.Verifier.VerifyAccessToken(token)
 			if err != nil {
 				if oauthErr, ok := err.(errors.OAuthError); ok {
 					switch oauthErr.ErrorCode {

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 )
@@ -17,7 +18,10 @@ func MetadataHandler(metadata interface{}) http.HandlerFunc {
 	})
 
 	middlewareHandler := middleware.CorsMiddleware(
-		middleware.AllowedMethods([]string{"GET"})(coreHandler),
+		middleware.AllowedMethods([]string{"GET"}, func(d middleware.Decision) {
+			fmt.Printf("[METHOD AUDIT] allowed=%v reason=%s action=%s path=%s\n",
+				d.Allowed, d.Reason, d.Action, d.Resource)
+		})(coreHandler),
 	)
 
 	// Convert http.Handler to http.HandlerFunc
