@@ -25,11 +25,5 @@ type AuthInfo struct {
 	// Extra 是与令牌关联的额外数据。
 	// 此字段用于附加任何需要附着在认证信息上的额外数据。
 	// 如果为nil，表示未提供额外数据。
-	Extra     map[string]interface{} `json:"extra,omitempty"`
-	Subject   string                 `json:"subject"`
-	Issuer    string                 `json:"issuer"`
-	Audience  []string               `json:"audience"`
-	IssuedAt  *int64                 `json:"issuedAt,omitempty"`
-	NotBefore *int64                 `json:"notBefore,omitempty"`
-	TokenType string                 `json:"tokenType"`
+	Extra map[string]interface{} `json:"extra,omitempty"`
 }
