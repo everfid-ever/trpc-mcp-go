@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/lestrrat-go/httprc/v3"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/lestrrat-go/httprc/v3"
 	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 
 	"github.com/lestrrat-go/jwx/v3/jwk"
@@ -25,124 +26,155 @@ type TokenVerifierInterface interface {
 	VerifyAccessToken(token string) (AuthInfo, error)
 }
 
-// TokenVerifierConfig 定义 TokenVerifier 的配置
+// LocalJWKSConfig 本地 JWKS 配置
+type LocalJWKSConfig struct {
+	JWKS      string            // 本地 JWKS JSON 字符串
+	File      string            // 本地 JWKS 文件路径
+	IssuerMap map[string]string // iss 到本地 JWKS 的映射
+}
+
+// RemoteJWKSConfig 远程 JWKS 配置
+type RemoteJWKSConfig struct {
+	URLs            []string          // 远程 JWKS URLs
+	IssuerToURL     map[string]string // iss 到远程 URL 的映射
+	RefreshInterval time.Duration     // 刷新间隔
+}
+
+// TokenVerifierConfig TokenVerifier 的配置
 type TokenVerifierConfig struct {
-	// LocalJWKS: 本地 JWKS JSON 字符串（优先于 LocalFile）
-	LocalJWKS string
-	// LocalFile: 本地 JWKS 文件路径
-	LocalFile string
-	// RemoteURLs: 远程 JWKS URLs 列表（如果设置，则使用远程模式）
-	RemoteURLs []string
-	// IssuerToURL: iss 到远程 URL 的映射
-	IssuerToURL map[string]string
-	// IssuerToLocalJWKS: iss 到本地 JWKS 的映射（如果使用本地 JWKS）
-	IssuerToLocalJWKS map[string]string
-	// RefreshInterval: 远程 JWKS 刷新间隔（默认 5 分钟）
-	RefreshInterval time.Duration
+	Local  *LocalJWKSConfig  // 本地 JWKS 配置
+	Remote *RemoteJWKSConfig // 远程 JWKS 配置
 }
 
 // TokenVerifier 结构体
-// 必选 iss 字段
 type TokenVerifier struct {
 	localKeySets map[string]jwk.Set // iss 到本地 jwk.Set 的映射
-	cache        *jwk.Cache         // 远程模式下使用的缓存
+	cache        *jwk.Cache         // 远程模式缓存
 	issuerToURL  map[string]string  // iss 到远程 URL 的映射
 	isRemote     bool               // 是否使用远程模式
 }
 
 // NewTokenVerifier 创建一个新的 TokenVerifier
-func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerifier, error) {
+func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVerifier, error) {
 	verifier := &TokenVerifier{
 		localKeySets: make(map[string]jwk.Set),
-		issuerToURL:  cfg.IssuerToURL,
 	}
 
-	if len(cfg.RemoteURLs) > 0 {
-		// 远程模式
-		if cfg.RefreshInterval == 0 {
-			cfg.RefreshInterval = 24 * time.Hour
-		}
-		cache, err := jwk.NewCache(ctx, httprc.NewClient())
+	// 加载默认 JWKS
+	if cfg.JWKS != "" {
+		set, err := jwk.Parse([]byte(cfg.JWKS))
 		if err != nil {
-			return nil, fmt.Errorf("failed to create jwk cache: %w", err)
+			return nil, fmt.Errorf("failed to parse local JWKS: %w", err)
 		}
-		for _, url_ := range cfg.RemoteURLs {
-			if err := cache.Register(ctx, url_, jwk.WithConstantInterval(cfg.RefreshInterval)); err != nil {
-				return nil, fmt.Errorf("failed to register remote JWKS %s: %w", url_, err)
-			}
+		verifier.localKeySets["default"] = set
+	} else if cfg.File != "" {
+		set, err := jwk.ReadFile(cfg.File)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse local JWKS file: %w", err)
 		}
-		verifier.cache = cache
-		verifier.isRemote = true
+		verifier.localKeySets["default"] = set
 	}
 
-	// 处理本地 JWKS（支持 iss 映射）
-	if cfg.LocalJWKS != "" || cfg.LocalFile != "" || len(cfg.IssuerToLocalJWKS) > 0 {
-		// 单 JWKS（无 iss 映射）
-		if cfg.LocalJWKS != "" {
-			set, err := jwk.Parse([]byte(cfg.LocalJWKS))
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse local JWKS: %w", err)
-			}
-			verifier.localKeySets["default"] = set
-		} else if cfg.LocalFile != "" {
-			set, err := jwk.ReadFile(cfg.LocalFile)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse local JWKS file: %w", err)
-			}
-			verifier.localKeySets["default"] = set
+	// 加载按 iss 映射的 JWKS
+	for iss, jwks := range cfg.IssuerMap {
+		set, err := jwk.Parse([]byte(jwks))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse local JWKS for issuer %s: %w", iss, err)
 		}
-
-		// 按 iss 加载本地 JWKS
-		for iss, jwks := range cfg.IssuerToLocalJWKS {
-			set, err := jwk.Parse([]byte(jwks))
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse local JWKS for issuer %s: %w", iss, err)
-			}
-			verifier.localKeySets[iss] = set
-		}
+		verifier.localKeySets[iss] = set
 	}
 
-	if len(verifier.localKeySets) == 0 && len(cfg.RemoteURLs) == 0 {
-		return nil, errors.New("must provide either RemoteURLs, LocalJWKS, LocalFile, or IssuerToLocalJWKS")
+	if len(verifier.localKeySets) == 0 {
+		return nil, errors.New("must provide JWKS, File, or IssuerMap")
 	}
 
 	return verifier, nil
 }
 
-// validateOAuth21Claims validates OAuth 2.1 standard JWT claims according to RFC 6749, RFC 7519, and RFC 9068.
-func (v *TokenVerifier) validateOAuth21Claims(jwtToken jwt.Token) error {
-
-	// Verify subject
-	//fixme 校验又重复
-	if jwtToken.Subject() == "" {
-		return fmt.Errorf("missing required 'sub' claim")
+// NewRemoteTokenVerifier 创建仅使用远程 JWKS 的 TokenVerifier
+func NewRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVerifier, error) {
+	if len(cfg.URLs) == 0 {
+		return nil, errors.New("must provide at least one RemoteURL")
 	}
 
-	// Verify audience
-	if len(jwtToken.Audience()) == 0 {
-		return fmt.Errorf("missing required 'aud' claim")
+	// 设置默认刷新间隔
+	refreshInterval := cfg.RefreshInterval
+	if refreshInterval == 0 {
+		refreshInterval = 24 * time.Hour
 	}
 
-	// Verify token type specific claims
-	return v.validateTokenTypeSpecificClaims(jwtToken, tokenType)
+	// 初始化缓存
+	cache, err := jwk.NewCache(ctx, httprc.NewClient())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create jwk cache: %w", err)
+	}
+
+	// 注册远程 URLs
+	for _, url := range cfg.URLs {
+		if err := cache.Register(ctx, url, jwk.WithConstantInterval(refreshInterval)); err != nil {
+			return nil, fmt.Errorf("failed to register remote JWKS %s: %w", url, err)
+		}
+	}
+
+	return &TokenVerifier{
+		cache:       cache,
+		issuerToURL: cfg.IssuerToURL,
+		isRemote:    true,
+	}, nil
+}
+
+// NewTokenVerifier 创建综合 TokenVerifier，支持本地和远程模式
+func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerifier, error) {
+	var verifier *TokenVerifier
+	var err error
+
+	// 处理远程配置
+	if cfg.Remote != nil && len(cfg.Remote.URLs) > 0 {
+		verifier, err = NewRemoteTokenVerifier(ctx, *cfg.Remote)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// 处理本地配置
+	if cfg.Local != nil && (cfg.Local.JWKS != "" || cfg.Local.File != "" || len(cfg.Local.IssuerMap) > 0) {
+		localVerifier, err := NewLocalTokenVerifier(ctx, *cfg.Local)
+		if err != nil {
+			return nil, err
+		}
+		// 如果已存在远程模式的 verifier，合并 localKeySets
+		if verifier != nil {
+			for iss, set := range localVerifier.localKeySets {
+				verifier.localKeySets[iss] = set
+			}
+		} else {
+			verifier = localVerifier
+		}
+	}
+
+	if verifier == nil {
+		return nil, errors.New("must provide either Local or Remote configuration")
+	}
+
+	return verifier, nil
 }
 
 // VerifyAccessToken 验证 JWT token，返回解析后的 token 或错误
-func (v *TokenVerifier) VerifyAccessToken(tokenStr string) (AuthInfo, error) {
-	var iss string
+func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) (AuthInfo, error) {
 	// 先解析 token（不验证签名）以获取 iss
 	unverifiedToken, err := jwt.ParseInsecure([]byte(tokenStr))
 	if err != nil {
-		return nil, oauthErrors.NewOAuthError(oauthErrors.ErrServerError, fmt.Sprintf("failed to parse token: %w", err), "")
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrServerError, fmt.Sprintf("failed to parse token: %w", err), "")
 	}
 
-	if iss, ok := unverifiedToken.Issuer(); !ok || iss == "" {
-		return nil, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get iss from token", "")
+	iss, ok := unverifiedToken.Issuer()
+	if !ok || iss == "" {
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get iss from token", "")
 	}
 
-	keySet, err := v.getTargetKeySet(iss)
+	keySet, err := v.getTargetKeySet(ctx, iss)
 	if err != nil {
-		return nil, err
+		return AuthInfo{}, err
 	}
 
 	// 验证 token,包括基本验证并配置时间验证偏差
@@ -150,25 +182,22 @@ func (v *TokenVerifier) VerifyAccessToken(tokenStr string) (AuthInfo, error) {
 		jwt.WithKeySet(keySet),
 		jwt.WithValidate(true),
 		jwt.WithAcceptableSkew(30*time.Second),
-		// rfc 9068
+		// rfc 9068,对于exp、iat会自动验证合法性，其他此处只验证存在性
 		jwt.WithRequiredClaim("exp"),
 		jwt.WithRequiredClaim("aud"),
 		jwt.WithRequiredClaim("sub"),
 		jwt.WithRequiredClaim("client_id"),
 		jwt.WithRequiredClaim("iat"),
 		jwt.WithRequiredClaim("jti"),
+		jwt.WithRequiredClaim("scope"),
 	)
-	//todo 以下字段自行校验是否为空
-	if jwtToken.Subject() == "" {
-		return fmt.Errorf("missing required 'sub' claim")
-	}
-	// Verify audience
-	if len(jwtToken.Audience()) == 0 {
-		return fmt.Errorf("missing required 'aud' claim")
+	if err != nil || token == nil {
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to verify token", "")
 	}
 
-	if err != nil {
-		return nil, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to verify token", "")
+	// 校验sub字段非空
+	if sub, ok := token.Subject(); !ok || sub == "" {
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing required 'sub' claim", "")
 	}
 
 	authInfo, err := v.convertJWTToAuthInfo(token, tokenStr)
@@ -178,79 +207,64 @@ func (v *TokenVerifier) VerifyAccessToken(tokenStr string) (AuthInfo, error) {
 	return authInfo, nil
 }
 
-func (v *TokenVerifier) getTargetKeySet(iss string) (jwk.Set, error) {
-	var keySet jwk.Set
-	if v.isRemote {
-		// 优先尝试远程 JWKS
-		url_, ok := v.issuerToURL[iss]
-		if ok {
-			keySet, err = v.cache.Lookup(ctx, url_)
-			if err != nil {
-				// 回退到本地 JWKS（如果存在）
-				if localSet, ok := v.localKeySets[iss]; ok {
-					keySet = localSet
-				} else if defaultSet, ok := v.localKeySets["default"]; ok {
-					keySet = defaultSet
-				} else {
-					return nil, fmt.Errorf("failed to lookup remote JWKS for issuer %s and no local fallback: %w", iss, err)
-				}
-			}
-		} else if localSet, ok := v.localKeySets[iss]; ok {
-			// 如果没有远程 URL，但有 iss 对应的本地 JWKS
-			keySet = localSet
-		} else if defaultSet, ok := v.localKeySets["default"]; ok {
-			// 回退到默认本地 JWKS
-			keySet = defaultSet
-		} else {
-			return nil, fmt.Errorf("no JWKS found for issuer %s", iss)
-		}
-	} else {
-		// 仅本地模式
-		if localSet, ok := v.localKeySets[iss]; ok {
-			keySet = localSet
-		} else if defaultSet, ok := v.localKeySets["default"]; ok {
-			keySet = defaultSet
-		} else {
-			return nil, fmt.Errorf("no JWKS found for issuer %s", iss)
-		}
+func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss string) (jwk.Set, error) {
+	// 优先尝试 iss 对应的本地 JWKS
+	if localSet, ok := v.localKeySets[iss]; ok {
+		return localSet, nil
 	}
-	return keySet, nil
+
+	// 回退到默认本地 JWKS
+	if defaultSet, ok := v.localKeySets["default"]; ok {
+		return defaultSet, nil
+	}
+
+	// 如果是远程模式，尝试远程 JWKS
+	if v.isRemote {
+		if url_, ok := v.issuerToURL[iss]; ok {
+			keySet, err := v.cache.Lookup(ctx, url_)
+			if err != nil {
+				return nil, fmt.Errorf("failed to lookup remote JWKS for issuer %s: %w", iss, err)
+			}
+			return keySet, nil
+		}
+		return nil, fmt.Errorf("no remote JWKS URL found for issuer %s", iss)
+	}
+
+	return nil, fmt.Errorf("no JWKS found for issuer %s", iss)
 }
 
 // convertJWTToAuthInfo converts jwt.Token to AuthInfo structure.
 func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (AuthInfo, error) {
-	authInfo := AuthInfo{
-		Token: tokenStr,
+	authInfo := AuthInfo{Token: tokenStr}
+
+	// 提取 OAuth 字段
+	var err error
+	if authInfo.ClientID, err = extractClientID(token); err != nil {
+		return AuthInfo{}, err
+	}
+	if authInfo.Resource, err = extractResource(token); err != nil {
+		return AuthInfo{}, err
+	}
+	if authInfo.Scopes, err = extractScopes(token); err != nil {
+		return AuthInfo{}, err
 	}
 
-	// Extract Basic OAuth fields with fallback chain
-	authInfo.ClientID = v.extractClientID(token)
-	authInfo.Scopes = v.extractScopes(token)
-	authInfo.Resource = v.extractResource(token)
-	authInfo.Extra = v.extractExtra(token)
-
-	// Validate required fields
-	// fixme 校验重复了
-	if authInfo.ClientID == "" {
-		return AuthInfo{}, errors.New("token does not contain valid client_id")
-	}
-
-	if authInfo.Subject == "" {
-		return AuthInfo{}, errors.New("token does not contain valid subject")
-	}
-
+	// optional fields
+	authInfo.Extra = extractExtra(token)
 	return authInfo, nil
 }
 
 // extractClientID extracts client ID with fallback chain
-func (v *TokenVerifier) extractClientID(token jwt.Token) string {
+func extractClientID(token jwt.Token) (string, error) {
 	clientID := ""
-	_ = token.Get("client_id", &clientID)
-	return clientID
+	if _ = token.Get("client_id", &clientID); clientID == "" {
+		return "", errors.New("token does not contain valid client_id")
+	}
+	return clientID, nil
 }
 
 // extractScopes extracts scopes from various claim formats
-func (v *TokenVerifier) extractScopes(token jwt.Token) []string {
+func extractScopes(token jwt.Token) ([]string, error) {
 	var scopes []string
 	var tempScopes interface{}
 	if err := token.Get("scope", &tempScopes); err != nil {
@@ -258,43 +272,36 @@ func (v *TokenVerifier) extractScopes(token jwt.Token) []string {
 		case string:
 			if s != "" {
 				scopes = strings.Split(s, " ")
+			} else {
+				return scopes, errors.New("token does not contain valid scope")
 			}
 		case []string:
-			scopes = s
+			if len(s) > 0 {
+				scopes = s
+			} else {
+				return scopes, errors.New("token does not contain valid scope")
+			}
 		}
 	}
-
-	return scopes
+	return scopes, nil
 }
 
 // extractResource extracts resource information
-func (v *TokenVerifier) extractResource(token jwt.Token) *url.URL {
-	// Try "resource" field first
-	var resourceStr string
-	var resource interface{}
-	if err := token.Get("resource", &resource); err == nil {
-		if rs, ok := resource.(string); ok {
-			resourceStr = rs
-		}
+func extractResource(token jwt.Token) (*url.URL, error) {
+	var aud []string
+	if aud, ok := token.Audience(); !ok || len(aud) == 0 {
+		return nil, fmt.Errorf("missing required 'aud' claim")
 	}
-
-	// Try second audience entry as resource (RFC 8707)
-	var audiences interface{}
-	if err := token.Get("aud", &audiences); err != nil {
-		if audArray, ok := audiences.([]string); ok && len(audArray) > 1 {
-			resourceStr = audArray[1]
-		}
-	}
-
-	if resourceURL, err := url.Parse(resourceStr); err != nil {
+	resourceStr := aud[0] //默认使用第一个 audience作为资源服务器标识符
+	if resourceURL, err := url.Parse(resourceStr); err == nil && resourceURL != nil {
 		resourceURL.Fragment = "" // 移除哈希片段（符合 RFC 8707）
-		return resourceURL
+		return resourceURL, nil
 	}
-	return nil
+	return nil, fmt.Errorf("invalid resource URL: %s", resourceStr)
 }
 
 // extractExtra extracts custom claims to Extra map
-func (v *TokenVerifier) extractExtra(token jwt.Token) map[string]interface{} {
+func extractExtra(token jwt.Token) map[string]interface{} {
 	extra := make(map[string]interface{})
 
 	for _, key := range token.Keys() {
@@ -313,7 +320,7 @@ func (v *TokenVerifier) extractExtra(token jwt.Token) map[string]interface{} {
 	return extra
 }
 
-// AddIssuerURL 动态添加或更新 issuer 到 JWKS URL 的映射
+// AddIssuerURL 动态添加或更新 issuer 到 JWKS URL 的映射,不提供动态删除功能
 func (v *TokenVerifier) AddIssuerURL(ctx context.Context, iss, url string, refreshInterval time.Duration) error {
 	if !v.isRemote {
 		return errors.New("cannot add issuer URL: remote JWKS support is disabled")
@@ -333,8 +340,15 @@ func (v *TokenVerifier) AddIssuerURL(ctx context.Context, iss, url string, refre
 	return nil
 }
 
+// ClearLocalKeys clears all locally cached keys.
+func (v *TokenVerifier) ClearLocalKeys() {
+	for _, set := range v.localKeySets {
+		_ = set.Clear()
+	}
+}
+
 // LoadLocalKey loads a JWK key for local verification.
-// fixme 本地JWKS应在创建时加载，不应有该方法
+// fixme 本地JWKS应在创建时随配置加载，不应有该方法
 func (v *JWKVerifier) LoadLocalKey(key jwk.Key) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -392,13 +406,6 @@ func (v *JWKVerifier) GetLocalKeys() []map[string]interface{} {
 	}
 
 	return keys
-}
-
-// ClearLocalKeys clears all locally cached keys.
-func (v *TokenVerifier) ClearLocalKeys() {
-	for _, set := range v.localKeySets {
-		_ = set.Clear()
-	}
 }
 
 // GetCacheStats returns cache statistics for monitoring
