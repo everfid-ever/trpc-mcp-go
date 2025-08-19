@@ -6,15 +6,43 @@ import (
 	"golang.org/x/time/rate"
 	"net/http"
 	"strings"
+	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
 type SecurityMiddlewareOption struct {
-	verifier server.TokenVerifier
+	verifier   server.TokenVerifier
+	OnDecision OnDecision
 }
 
-func AllowedMethods(methods []string) func(http.Handler) http.Handler {
+// Decision defines audit decision-making structure
+type Decision struct {
+	Allowed   bool
+	Reason    string
+	ClientID  string
+	Subject   string
+	Scopes    []string
+	Resource  string
+	Action    string
+	TraceID   string
+	Timestamp time.Time
+}
+
+// responseWriterWithStatus 包装 http.ResponseWriter 用于捕获状态码
+type responseWriterWithStatus struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriterWithStatus) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+type OnDecision func(Decision)
+
+func AllowedMethods(methods []string, onDecision OnDecision) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			for _, method := range methods {
@@ -37,6 +65,17 @@ func AllowedMethods(methods []string) func(http.Handler) http.Handler {
 
 			// 转换为响应结构并编码
 			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
+
+			if onDecision != nil {
+				onDecision(Decision{
+					Allowed:   false,
+					Reason:    "method not allowed",
+					Resource:  r.URL.Path,
+					Action:    r.Method,
+					TraceID:   r.Header.Get("X-Request-ID"),
+					Timestamp: time.Now(),
+				})
+			}
 		})
 	}
 }
@@ -69,7 +108,7 @@ func CorsMiddleware(next http.Handler) http.Handler {
 }
 
 // RateLimitMiddleware applies rate limiting
-func RateLimitMiddleware(limiter *rate.Limiter) func(http.Handler) http.Handler {
+func RateLimitMiddleware(limiter *rate.Limiter, onDecision OnDecision) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !limiter.Allow() {
@@ -82,6 +121,17 @@ func RateLimitMiddleware(limiter *rate.Limiter) func(http.Handler) http.Handler 
 					"",
 				)
 				json.NewEncoder(w).Encode(tooManyRequestsError.ToResponseStruct())
+
+				if onDecision != nil {
+					onDecision(Decision{
+						Allowed:   false,
+						Reason:    "rate limit exceeded",
+						Resource:  r.URL.Path,
+						Action:    r.Method,
+						TraceID:   r.Header.Get("X-Request-ID"),
+						Timestamp: time.Now(),
+					})
+				}
 				return
 			}
 
@@ -158,4 +208,32 @@ func URLEncodedValidationMiddleware(allowJSONFallback bool) func(http.Handler) h
 // This is a convenience wrapper for endpoints that only accept JSON (like client registration)
 func JSONValidationMiddleware() func(http.Handler) http.Handler {
 	return ContentTypeValidationMiddleware([]string{"application/json"}, false)
+}
+
+func AuditMiddleware(onDecision OnDecision) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 包装 ResponseWriter 以获取状态码
+			rw := &responseWriterWithStatus{ResponseWriter: w, statusCode: http.StatusOK}
+
+			start := time.Now()
+			next.ServeHTTP(rw, r)
+			duration := time.Since(start)
+
+			// 构建审计事件
+			if onDecision != nil {
+				onDecision(Decision{
+					Allowed:   rw.statusCode < 400, // 状态码 <400 认为成功
+					Reason:    http.StatusText(rw.statusCode),
+					Resource:  r.URL.Path,
+					Action:    r.Method,
+					TraceID:   r.Header.Get("X-Request-Id"), // 可选，追踪 ID
+					Timestamp: time.Now(),
+				})
+			}
+
+			// 可选：打印调试日志
+			fmt.Printf("[AUDIT] %s %s -> %d (%v)\n", r.Method, r.URL.Path, rw.statusCode, duration)
+		})
+	}
 }

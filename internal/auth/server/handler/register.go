@@ -193,14 +193,26 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 		limit := rate.Every(windowDuration / time.Duration(rateLimitConfig.Max))
 		limiter := rate.NewLimiter(limit, rateLimitConfig.Max)
 
-		handler = middleware.RateLimitMiddleware(limiter)(handler)
+		handler = middleware.RateLimitMiddleware(limiter, func(d middleware.Decision) {
+			fmt.Printf("[RATE LIMIT AUDIT] allowed=%v reason=%s path=%s\n",
+				d.Allowed, d.Reason, d.Resource)
+		})(handler)
 	}
 
 	handler = middleware.JSONValidationMiddleware()(handler)
 
-	handler = middleware.AllowedMethods([]string{"POST"})(handler)
+	handler = middleware.AllowedMethods([]string{"POST"}, func(d middleware.Decision) {
+		fmt.Printf("[METHOD AUDIT] allowed=%v reason=%s action=%s path=%s\n",
+			d.Allowed, d.Reason, d.Action, d.Resource)
+	})(handler)
 
 	handler = middleware.CorsMiddleware(handler)
+
+	// Apply Audit middleware (final decision log)
+	handler = middleware.AuditMiddleware(func(d middleware.Decision) {
+		fmt.Printf("[FINAL AUDIT] allowed=%v reason=%s resource=%s action=%s trace=%s\n",
+			d.Allowed, d.Reason, d.Resource, d.Action, d.TraceID)
+	})(handler)
 
 	return handler
 }

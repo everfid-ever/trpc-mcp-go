@@ -74,11 +74,23 @@ func AuthorizationHandler(options AuthorizationHandlerOptions) http.HandlerFunc 
 
 	// Apply rate limiting using standard middleware
 	if options.RateLimit != nil {
-		handler = middleware.RateLimitMiddleware(options.RateLimit)(handler)
+		handler = middleware.RateLimitMiddleware(options.RateLimit, func(d middleware.Decision) {
+			fmt.Printf("[RATE LIMIT AUDIT] allowed=%v reason=%s path=%s\n",
+				d.Allowed, d.Reason, d.Resource)
+		})(handler)
 	}
 
 	// Apply method restrictions (GET and POST allowed)
-	handler = middleware.AllowedMethods([]string{"GET", "POST"})(handler)
+	handler = middleware.AllowedMethods([]string{"GET", "POST"}, func(d middleware.Decision) {
+		fmt.Printf("[METHOD AUDIT] allowed=%v reason=%s action=%s path=%s\n",
+			d.Allowed, d.Reason, d.Action, d.Resource)
+	})(handler)
+
+	// Apply Audit middleware (final decision log)
+	handler = middleware.AuditMiddleware(func(d middleware.Decision) {
+		fmt.Printf("[FINAL AUDIT] allowed=%v reason=%s resource=%s action=%s trace=%s\n",
+			d.Allowed, d.Reason, d.Resource, d.Action, d.TraceID)
+	})(handler)
 
 	// Convert back to http.HandlerFunc
 	return func(w http.ResponseWriter, r *http.Request) {
