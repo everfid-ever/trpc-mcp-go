@@ -2,11 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
+	"golang.org/x/time/rate"
 	"net/http"
 	"strings"
 	"time"
-
-	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
@@ -168,7 +168,10 @@ func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 	// Apply client authentication middleware (innermost, like TS)
 	handler = middleware.AuthenticateClient(middleware.ClientAuthenticationMiddlewareOptions{
 		ClientsStore: opts.Provider.ClientsStore(),
-	})(handler)
+	},
+		func(d middleware.Decision) {
+			fmt.Printf("[AUTHENTICATE CLIENT AUDIT ] client=%s allowed=%v reason=%s\n", d.ClientID, d.Allowed, d.Reason)
+		})(handler)
 
 	// Apply rate limiting middleware only if explicitly configured
 	if opts.RateLimit != nil {
@@ -181,7 +184,10 @@ func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 		limit := rate.Every(windowDuration / time.Duration(opts.RateLimit.Max))
 		limiter := rate.NewLimiter(limit, opts.RateLimit.Max)
 
-		handler = middleware.RateLimitMiddleware(limiter)(handler)
+		handler = middleware.RateLimitMiddleware(limiter, func(d middleware.Decision) {
+			fmt.Printf("[RATE LIMIT AUDIT] allowed=%v reason=%s path=%s\n",
+				d.Allowed, d.Reason, d.Resource)
+		})(handler)
 	}
 	// Note: No default rate limiting applied when opts.RateLimit is nil
 	// This matches the TypeScript behavior where rateLimit: false disables it
@@ -190,10 +196,19 @@ func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 	handler = middleware.URLEncodedValidationMiddleware(opts.AllowJSONFallback)(handler)
 
 	// Apply method restriction middleware (only POST allowed per RFC 7009)
-	handler = middleware.AllowedMethods([]string{"POST"})(handler)
+	handler = middleware.AllowedMethods([]string{"POST"}, func(d middleware.Decision) {
+		fmt.Printf("[METHOD AUDIT] allowed=%v reason=%s action=%s path=%s\n",
+			d.Allowed, d.Reason, d.Action, d.Resource)
+	})(handler)
 
 	// Apply CORS middleware (outermost, like TS)
 	handler = middleware.CorsMiddleware(handler)
+
+	// Apply Audit middleware (final decision log)
+	handler = middleware.AuditMiddleware(func(d middleware.Decision) {
+		fmt.Printf("[FINAL AUDIT] allowed=%v reason=%s resource=%s action=%s trace=%s\n",
+			d.Allowed, d.Reason, d.Resource, d.Action, d.TraceID)
+	})(handler)
 
 	return handler
 }

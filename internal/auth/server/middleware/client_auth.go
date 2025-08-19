@@ -1,14 +1,9 @@
 package middleware
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
@@ -21,18 +16,13 @@ type ClientAuthenticationMiddlewareOptions struct {
 	ClientsStore server.OAuthClientsStoreInterface
 }
 
-// ClientAuthenticatedRequest represents the request schema for client authentication.
-// It is typically used when exchanging credentials at the token endpoint.
+// ClientAuthenticatedRequest represents the request schema for client authentication
 type ClientAuthenticatedRequest struct {
-	// ClientID is the unique identifier issued to the client during registration.
-	ClientID string `json:"client_id"`
-
-	// ClientSecret is the client’s secret credential.
-	// It may be omitted when using public clients or PKCE-only flows.
+	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret,omitempty"`
 }
 
-// clientInfoKeyType used to identify the context key storing OAuthClientInformationFull
+// clientInfoKeyType 用于标识存储OAuthClientInformationFull的上下文键
 type clientInfoKeyType struct{}
 
 // validateClientRequest validates the client authentication request
@@ -47,6 +37,21 @@ func validateClientRequest(req *ClientAuthenticatedRequest) error {
 func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecision OnDecision) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 审计辅助函数
+			audit := func(allowed bool, reason string, clientID string) {
+				if onDecision != nil {
+					onDecision(Decision{
+						Allowed:   allowed,
+						Reason:    reason,
+						ClientID:  clientID,
+						Resource:  r.URL.Path,
+						Action:    r.Method,
+						TraceID:   r.Header.Get("X-Request-ID"),
+						Timestamp: time.Now(),
+					})
+				}
+			}
+			// 处理错误并设置响应函数
 			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, clientID string) {
 				var statusCode int
 				switch err.ErrorCode {
@@ -59,92 +64,79 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 				default:
 					statusCode = http.StatusBadRequest
 				}
+
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(statusCode)
-				_ = json.NewEncoder(w).Encode(err.ToResponseStruct())
+				json.NewEncoder(w).Encode(err.ToResponseStruct())
+
+				//审计失败
+				audit(false, "invalid client credentials", clientID)
 			}
 
+			// Parse request body
 			var reqData ClientAuthenticatedRequest
-			var clientID string
-
-			// Priority: Basic Auth first
-			if authz := r.Header.Get("Authorization"); strings.HasPrefix(strings.ToLower(authz), "basic ") {
-				enc := strings.TrimSpace(authz[len("Basic "):])
-				raw, decErr := base64.StdEncoding.DecodeString(enc)
-				if decErr != nil {
-					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "malformed basic credentials", ""), "")
-					return
-				}
-				parts := strings.SplitN(string(raw), ":", 2)
-				if len(parts) != 2 {
-					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "malformed basic credentials", ""), "")
-					return
-				}
-				reqData.ClientID, reqData.ClientSecret = parts[0], parts[1]
-				clientID = reqData.ClientID
-			} else {
-				// Non-Basic: buffer and restore Body, support form or JSON
-				bodyBytes, _ := io.ReadAll(r.Body)
-				_ = r.Body.Close()
-				defer func() { r.Body = io.NopCloser(bytes.NewReader(bodyBytes)) }()
-
-				ct := strings.ToLower(r.Header.Get("Content-Type"))
-				switch {
-				case strings.HasPrefix(ct, "application/x-www-form-urlencoded"):
-					formVals, _ := url.ParseQuery(string(bodyBytes))
-					reqData.ClientID = formVals.Get("client_id")
-					reqData.ClientSecret = formVals.Get("client_secret")
-					clientID = reqData.ClientID
-				case strings.HasPrefix(ct, "application/json"):
-					if err := json.Unmarshal(bodyBytes, &reqData); err != nil {
-						setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid request body", ""), "")
-						return
-					}
-					clientID = reqData.ClientID
-				default:
-					// Unknown type: maintain compatibility behavior, treat as JSON decode error
-					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid request body", ""), "")
-					return
-				}
+			if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+				serverErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid request body", "")
+				setErrorResponse(w, serverErr, "")
+				return
 			}
 
-			// Validate client_id
+			// Validate request
 			if err := validateClientRequest(&reqData); err != nil {
 				if oauthErr, ok := err.(errors.OAuthError); ok {
-					setErrorResponse(w, oauthErr, clientID)
+					setErrorResponse(w, oauthErr, "")
 				} else {
-					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid client_id", ""), clientID)
+					invalidError := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid client_id", "")
+					setErrorResponse(w, invalidError, reqData.ClientID)
 				}
 				return
 			}
 
-			// Read client and validate secret/expiration
+			// Get client from store
 			client, err := options.ClientsStore.GetClient(reqData.ClientID)
 			if err != nil {
-				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "invalid client credentials", ""), clientID)
+				serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
+				setErrorResponse(w, serverError, reqData.ClientID)
 				return
 			}
+
 			if client == nil {
-				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "invalid client credentials", ""), clientID)
+				invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_id", "")
+				setErrorResponse(w, invalidClientError, reqData.ClientID)
 				return
 			}
+
+			// If client has a secret, validate it
 			if client.ClientSecret != "" {
+				// Check if client_secret is required but not provided
 				if reqData.ClientSecret == "" {
-					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "Client secret is required", ""), clientID)
+					invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Client secret is required", "")
+					setErrorResponse(w, invalidClientError, reqData.ClientID)
 					return
 				}
+
+				// Check if client_secret matches
 				if client.ClientSecret != reqData.ClientSecret {
-					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_secret", ""), clientID)
+					invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_secret", "")
+					setErrorResponse(w, invalidClientError, reqData.ClientID)
 					return
 				}
+
+				// Check if client_secret has expired
 				if client.ClientSecretExpiresAt != nil {
-					now := time.Now().Unix()
-					if *client.ClientSecretExpiresAt != 0 && *client.ClientSecretExpiresAt < now {
-						setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "Client secret has expired", ""), clientID)
+					currentTime := time.Now().Unix()
+					if *client.ClientSecretExpiresAt < currentTime {
+						invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Client secret has expired", "")
+						setErrorResponse(w, invalidClientError, reqData.ClientID)
 						return
 					}
 				}
 			}
+
+			// 审计成功
+			audit(true, "client authenticated", reqData.ClientID)
+
+			// Add authenticated client to request context
 			ctx := context.WithValue(r.Context(), clientInfoKeyType{}, client)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
