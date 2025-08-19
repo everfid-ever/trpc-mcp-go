@@ -55,7 +55,7 @@ func supportsClientRegistration(provider server.OAuthServerProvider) bool {
 		return false
 	}
 	// Use type assertion to check if the clients store implements SupportDynamicClientRegistration interface
-	_, ok := provider.(server.SupportTokenRevocation)
+	_, ok := provider.(server.SupportDynamicClientRegistration)
 	return ok
 }
 
@@ -209,15 +209,15 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 		} else {
 			// OAuth 2.1 recommended rate limiting for client registration
 			regOpts.RateLimit = &handler.RegisterRateLimitConfig{
-				WindowMs: 60000, // 1 minute window
-				Max:      10,    // Max 10 registrations per minute
+				WindowMs: 60000,
+				Max:      10,
 			}
 		}
 
 		mux.Handle("POST "+registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 	}
 
-	// 5) Token revocation endpoint (optional, POST only)
+	// Token revocation endpoint (optional, POST only)
 	if oauthMetadata.RevocationEndpoint != nil {
 		revocationURL, _ := url.Parse(*oauthMetadata.RevocationEndpoint)
 
@@ -280,12 +280,12 @@ func GetOAuthProtectedResourceMetadataUrl(serverUrl *url.URL) string {
 // InstallMCPAuthRoutes convenience function to simplify OAuth 2.1 compliant route installation
 func InstallMCPAuthRoutes(
 	mux *http.ServeMux,
-	issuerBaseURL string,                // OAuth metadata issuer (e.g. https://auth.example.com)
-	resourceServerURL string,            // Your MCP service URL (e.g. https://api.example.com/mcp)
-	provider server.OAuthServerProvider, // Your server provider interface
-	scopesSupported []string,            // Can be nil
-	resourceName *string,                // Can be nil
-	serviceDocURL *string,               // Can be nil
+	issuerBaseURL string,
+	resourceServerURL string,
+	provider server.OAuthServerProvider,
+	scopesSupported []string,
+	resourceName *string,
+	serviceDocURL *string,
 ) error {
 	issuerURL, err := url.Parse(issuerBaseURL)
 	if err != nil {
