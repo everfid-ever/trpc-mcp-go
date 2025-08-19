@@ -54,7 +54,7 @@ type TokenVerifier struct {
 	isRemote     bool               // 是否使用远程模式
 }
 
-// NewTokenVerifier 创建一个新的 TokenVerifier
+// NewLocalTokenVerifier 创建一个新的 TokenVerifier
 func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVerifier, error) {
 	verifier := &TokenVerifier{
 		localKeySets: make(map[string]jwk.Set),
@@ -110,9 +110,9 @@ func NewRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVe
 	}
 
 	// 注册远程 URLs
-	for _, url := range cfg.URLs {
-		if err := cache.Register(ctx, url, jwk.WithConstantInterval(refreshInterval)); err != nil {
-			return nil, fmt.Errorf("failed to register remote JWKS %s: %w", url, err)
+	for _, url_ := range cfg.URLs {
+		if err := cache.Register(ctx, url_, jwk.WithConstantInterval(refreshInterval)); err != nil {
+			return nil, fmt.Errorf("failed to register remote JWKS %s: %w", url_, err)
 		}
 	}
 
@@ -164,7 +164,7 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 	// 先解析 token（不验证签名）以获取 iss
 	unverifiedToken, err := jwt.ParseInsecure([]byte(tokenStr))
 	if err != nil {
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrServerError, fmt.Sprintf("failed to parse token: %w", err), "")
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrServerError, fmt.Sprintf("failed to parse token: %v", err.Error()), "")
 	}
 
 	iss, ok := unverifiedToken.Issuer()
@@ -344,77 +344,5 @@ func (v *TokenVerifier) AddIssuerURL(ctx context.Context, iss, url string, refre
 func (v *TokenVerifier) ClearLocalKeys() {
 	for _, set := range v.localKeySets {
 		_ = set.Clear()
-	}
-}
-
-// LoadLocalKey loads a JWK key for local verification.
-// fixme 本地JWKS应在创建时随配置加载，不应有该方法
-func (v *JWKVerifier) LoadLocalKey(key jwk.Key) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.localKeys == nil {
-		v.localKeys = jwk.NewSet()
-	}
-	return v.localKeys.AddKey(key)
-}
-
-// LoadLocalKeyFromBytes loads a key from raw bytes (PEM, etc.)
-// fixme 不符合应用场景，JWKS都是json格式
-func (v *JWKVerifier) LoadLocalKeyFromBytes(keyData []byte, keyID string) error {
-	key, err := jwk.ParseKey(keyData)
-	if err != nil {
-		return fmt.Errorf("failed to parse key: %v", err)
-	}
-
-	// Set key ID if provided
-	if keyID != "" {
-		if err := key.Set(jwk.KeyIDKey, keyID); err != nil {
-			return fmt.Errorf("failed to set key ID: %v", err)
-		}
-	}
-
-	return v.LoadLocalKey(key)
-}
-
-// GetLocalKeys returns information about currently loaded local keys.
-// fixme 源码底层就是根据use和kid来匹配JWKS，无需手动实现，应删除
-func (v *JWKVerifier) GetLocalKeys() []map[string]interface{} {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	var keys []map[string]interface{}
-
-	if v.localKeys == nil {
-		return keys
-	}
-
-	iter := v.localKeys.Keys(context.Background())
-	for iter.Next(context.Background()) {
-		pair := iter.Pair()
-		key := pair.Value.(jwk.Key)
-
-		keyInfo := map[string]interface{}{
-			"kty": key.KeyType().String(),
-			"use": "sig", // Default for signature verification
-		}
-
-		if keyID := key.KeyID(); keyID != "" {
-			keyInfo["kid"] = keyID
-		}
-
-		keys = append(keys, keyInfo)
-	}
-
-	return keys
-}
-
-// GetCacheStats returns cache statistics for monitoring
-// fixme 一般都是服务初始化时静态配置的，不需要监控吧?
-func (v *TokenVerifier) GetCacheStats() map[string]interface{} {
-
-	return map[string]interface{}{
-		"local_keys_count": v.localKeys.Len(),
-		"jwks_url":         v.jwksURL,
-		"remote_enabled":   v.remoteEnabled,
 	}
 }
