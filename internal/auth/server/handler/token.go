@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"github.com/go-playground/validator/v10"
 	"golang.org/x/time/rate"
 	"net/http"
@@ -52,7 +53,10 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 	// Apply client authentication middleware
 	handler = middleware.AuthenticateClient(middleware.ClientAuthenticationMiddlewareOptions{
 		ClientsStore: options.Provider.ClientsStore(),
-	})(handler)
+	},
+		func(d middleware.Decision) {
+			fmt.Printf("[AUTHENTICATE CLIENT AUDIT] client=%s allowed=%v reason=%s\n", d.ClientID, d.Allowed, d.Reason)
+		})(handler)
 
 	// Apply rate limiting middleware
 	limiter := options.RateLimit
@@ -60,13 +64,25 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 		// Default rate limiting: 60 requests per minute
 		limiter = rate.NewLimiter(rate.Every(time.Second), 60)
 	}
-	handler = middleware.RateLimitMiddleware(limiter)(handler)
+	handler = middleware.RateLimitMiddleware(limiter, func(d middleware.Decision) {
+		fmt.Printf("[RATE LIMIT AUDIT] allowed=%v reason=%s path=%s\n",
+			d.Allowed, d.Reason, d.Resource)
+	})(handler)
 
 	// Apply method restriction middleware (only POST allowed)
-	handler = middleware.AllowedMethods([]string{"POST"})(handler)
+	handler = middleware.AllowedMethods([]string{"POST"}, func(d middleware.Decision) {
+		fmt.Printf("[METHOD AUDIT] allowed=%v reason=%s action=%s path=%s\n",
+			d.Allowed, d.Reason, d.Action, d.Resource)
+	})(handler)
 
 	// Apply CORS middleware
 	handler = middleware.CorsMiddleware(handler)
+
+	// Apply Audit middleware (final decision log)
+	handler = middleware.AuditMiddleware(func(d middleware.Decision) {
+		fmt.Printf("[FINAL AUDIT] allowed=%v reason=%s resource=%s action=%s trace=%s\n",
+			d.Allowed, d.Reason, d.Resource, d.Action, d.TraceID)
+	})(handler)
 
 	// Convert http.Handler to http.HandlerFunc
 	return func(w http.ResponseWriter, r *http.Request) {
