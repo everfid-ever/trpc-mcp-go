@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"golang.org/x/time/rate"
@@ -14,6 +15,52 @@ import (
 type SecurityMiddlewareOption struct {
 	verifier   server.TokenVerifier
 	OnDecision OnDecision
+}
+
+// Authorizer define a unified authorization decision interface
+type Authorizer interface {
+	Authorize(authInfo *server.AuthInfo, resource string, action string) error
+}
+
+// ScopePermissionMapper is responsible for mapping scopes to internal permissions
+type ScopePermissionMapper interface {
+	MapScopes(scopes []string) []string
+}
+
+type DefaultScopeMapper struct {
+	Mapping map[string][]string
+}
+
+func (m *DefaultScopeMapper) MapScopes(scopes []string) []string {
+	var perms []string
+	for _, scope := range scopes {
+		if mapped, ok := m.Mapping[scope]; ok {
+			perms = append(perms, mapped...)
+		}
+	}
+	return perms
+}
+
+type PolicyAuthorizer struct {
+	ScopeMapper ScopePermissionMapper
+}
+
+func (a *PolicyAuthorizer) Authorize(authInfo server.AuthInfo, resource string, action string) error {
+	// 将 scope 转换为内部权限
+	perms := a.ScopeMapper.MapScopes(authInfo.Scopes)
+
+	// 构建所需的目标权限
+	required := fmt.Sprintf("%s:%s", resource, action) // e.g. urn:mcp:workspace:xyz:read
+
+	// 检查是否包含
+	for _, p := range perms {
+		if p == required {
+			return nil
+		}
+	}
+
+	return errors.NewOAuthError(errors.ErrInsufficientScope,
+		fmt.Sprintf("Missing permission %s", required), "")
 }
 
 // Decision defines audit decision-making structure
@@ -227,7 +274,7 @@ func AuditMiddleware(onDecision OnDecision) func(http.Handler) http.Handler {
 					Reason:    http.StatusText(rw.statusCode),
 					Resource:  r.URL.Path,
 					Action:    r.Method,
-					TraceID:   r.Header.Get("X-Request-Id"), // 可选，追踪 ID
+					TraceID:   r.Header.Get("X-Request-ID"), // 可选，追踪 ID
 					Timestamp: time.Now(),
 				})
 			}
@@ -236,4 +283,64 @@ func AuditMiddleware(onDecision OnDecision) func(http.Handler) http.Handler {
 			fmt.Printf("[AUDIT] %s %s -> %d (%v)\n", r.Method, r.URL.Path, rw.statusCode, duration)
 		})
 	}
+}
+
+func AuthorizationMiddleware(authorizer Authorizer, resource string, action string, onDecision OnDecision) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authInfo, ok := GetAuthInfo(r.Context())
+			if !ok {
+				w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token", error_description="No authentication info found"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			// 执行授权判定
+			err := authorizer.Authorize(authInfo, resource, action)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(err.(errors.OAuthError).ToResponseStruct())
+
+				if onDecision != nil {
+					onDecision(Decision{
+						Allowed:   false,
+						Reason:    err.Error(),
+						ClientID:  authInfo.ClientID,
+						Subject:   authInfo.Subject,
+						Scopes:    authInfo.Scopes,
+						Resource:  resource,
+						Action:    action,
+						TraceID:   r.Header.Get("X-Request-ID"),
+						Timestamp: time.Now(),
+					})
+				}
+				return
+			}
+
+			// 授权成功
+			if onDecision != nil {
+				onDecision(Decision{
+					Allowed:   true,
+					Reason:    "authorized",
+					ClientID:  authInfo.ClientID,
+					Subject:   authInfo.Subject,
+					Scopes:    authInfo.Scopes,
+					Resource:  resource,
+					Action:    action,
+					TraceID:   r.Header.Get("X-Request-ID"),
+					Timestamp: time.Now(),
+				})
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// GetAuthInfo 从请求上下文中提取 AuthInfo
+func GetAuthInfo(ctx context.Context) (*server.AuthInfo, bool) {
+	authInfo, ok := ctx.Value(authInfoKeyType{}).(*server.AuthInfo)
+	return authInfo, ok
 }
