@@ -39,6 +39,13 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions, onDecision OnDecisio
 				if onDecision != nil {
 					var clientID, subject string
 					var scopes []string
+
+					if info != nil {
+						clientID = info.ClientID
+						subject = info.Subject
+						scopes = info.Scopes
+					}
+
 					onDecision(Decision{
 						Allowed:   allowed,
 						Reason:    reason,
