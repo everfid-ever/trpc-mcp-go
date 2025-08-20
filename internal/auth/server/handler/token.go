@@ -61,8 +61,8 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 	// Apply rate limiting middleware
 	limiter := options.RateLimit
 	if limiter == nil {
-		// Default rate limiting: 60 requests per minute
-		limiter = rate.NewLimiter(rate.Every(time.Second), 60)
+		// Default rate limiting: 50 requests per 15 minutes
+		limiter = rate.NewLimiter(rate.Every(15*time.Minute/50), 50)
 	}
 	handler = middleware.RateLimitMiddleware(limiter, func(d middleware.Decision) {
 		fmt.Printf("[RATE LIMIT AUDIT] allowed=%v reason=%s path=%s\n",
@@ -199,7 +199,7 @@ func handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request, valida
 			return
 		}
 
-		if !pkce.VerifyPKCEChallenge(grant.Code, codeChallenge) {
+		if !pkce.VerifyPKCEChallenge(grant.CodeVerifier, codeChallenge) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 
