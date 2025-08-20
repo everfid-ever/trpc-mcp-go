@@ -34,11 +34,25 @@ func validateClientRequest(req *ClientAuthenticatedRequest) error {
 }
 
 // AuthenticateClient returns an HTTP middleware function for client authentication
-func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http.Handler) http.Handler {
+func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecision OnDecision) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 审计辅助函数
+			audit := func(allowed bool, reason string, clientID string) {
+				if onDecision != nil {
+					onDecision(Decision{
+						Allowed:   allowed,
+						Reason:    reason,
+						ClientID:  clientID,
+						Resource:  r.URL.Path,
+						Action:    r.Method,
+						TraceID:   r.Header.Get("X-Request-ID"),
+						Timestamp: time.Now(),
+					})
+				}
+			}
 			// 处理错误并设置响应函数
-			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError) {
+			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, clientID string) {
 				var statusCode int
 				switch err.ErrorCode {
 				case errors.ErrInvalidClient.Error():
@@ -54,23 +68,26 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(statusCode)
 				json.NewEncoder(w).Encode(err.ToResponseStruct())
+
+				//审计失败
+				audit(false, "invalid client credentials", clientID)
 			}
 
 			// Parse request body
 			var reqData ClientAuthenticatedRequest
 			if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
 				serverErr := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid request body", "")
-				setErrorResponse(w, serverErr)
+				setErrorResponse(w, serverErr, "")
 				return
 			}
 
 			// Validate request
 			if err := validateClientRequest(&reqData); err != nil {
 				if oauthErr, ok := err.(errors.OAuthError); ok {
-					setErrorResponse(w, oauthErr)
+					setErrorResponse(w, oauthErr, "")
 				} else {
 					invalidError := errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid client_id", "")
-					setErrorResponse(w, invalidError)
+					setErrorResponse(w, invalidError, reqData.ClientID)
 				}
 				return
 			}
@@ -79,13 +96,13 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 			client, err := options.ClientsStore.GetClient(reqData.ClientID)
 			if err != nil {
 				serverError := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-				setErrorResponse(w, serverError)
+				setErrorResponse(w, serverError, reqData.ClientID)
 				return
 			}
 
 			if client == nil {
 				invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_id", "")
-				setErrorResponse(w, invalidClientError)
+				setErrorResponse(w, invalidClientError, reqData.ClientID)
 				return
 			}
 
@@ -94,14 +111,14 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 				// Check if client_secret is required but not provided
 				if reqData.ClientSecret == "" {
 					invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Client secret is required", "")
-					setErrorResponse(w, invalidClientError)
+					setErrorResponse(w, invalidClientError, reqData.ClientID)
 					return
 				}
 
 				// Check if client_secret matches
 				if client.ClientSecret != reqData.ClientSecret {
 					invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_secret", "")
-					setErrorResponse(w, invalidClientError)
+					setErrorResponse(w, invalidClientError, reqData.ClientID)
 					return
 				}
 
@@ -110,11 +127,14 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 					currentTime := time.Now().Unix()
 					if *client.ClientSecretExpiresAt < currentTime {
 						invalidClientError := errors.NewOAuthError(errors.ErrInvalidClient, "Client secret has expired", "")
-						setErrorResponse(w, invalidClientError)
+						setErrorResponse(w, invalidClientError, reqData.ClientID)
 						return
 					}
 				}
 			}
+
+			// 审计成功
+			audit(true, "client authenticated", reqData.ClientID)
 
 			// Add authenticated client to request context
 			ctx := context.WithValue(r.Context(), clientInfoKeyType{}, client)
