@@ -17,13 +17,12 @@ import (
 
 // Standard JWT claims that should not be included in Extra
 var standardClaims = map[string]bool{
-	"iss": true, "sub": true, "aud": true, "exp": true, "nbf": true,
-	"iat": true, "jti": true, "client_id": true, "scope": true,
-	"scopes": true, "resource": true, "kid": true,
+	"iss": true, "sub": true, "aud": true, "exp": true, "iat": true,
+	"jti": true, "client_id": true, "scope": true, "kid": true,
 }
 
 type TokenVerifierInterface interface {
-	VerifyAccessToken(token string) (AuthInfo, error)
+	VerifyAccessToken(ctx context.Context, token string) (AuthInfo, error)
 }
 
 // LocalJWKSConfig 本地 JWKS 配置
@@ -301,7 +300,7 @@ func extractExtra(token jwt.Token) map[string]interface{} {
 	extra := make(map[string]interface{})
 
 	for _, key := range token.Keys() {
-		if !standardClaims[key] {
+		if standardClaims[key] {
 			continue // 跳过已处理的声明与标准声明
 		}
 		var value interface{}
