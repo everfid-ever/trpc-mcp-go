@@ -19,7 +19,7 @@ type SecurityMiddlewareOption struct {
 
 // Authorizer define a unified authorization decision interface
 type Authorizer interface {
-	Authorize(authInfo *server.AuthInfo, resource string, action string) error
+	Authorize(authInfo server.AuthInfo, resource string, action string) error
 }
 
 // ScopePermissionMapper is responsible for mapping scopes to internal permissions
@@ -303,12 +303,15 @@ func AuthorizationMiddleware(authorizer Authorizer, resource string, action stri
 				w.WriteHeader(http.StatusForbidden)
 				json.NewEncoder(w).Encode(err.(errors.OAuthError).ToResponseStruct())
 
+				// 提取 subject
+				subject := extractSubject(authInfo)
+
 				if onDecision != nil {
 					onDecision(Decision{
 						Allowed:   false,
 						Reason:    err.Error(),
 						ClientID:  authInfo.ClientID,
-						Subject:   authInfo.Subject,
+						Subject:   subject,
 						Scopes:    authInfo.Scopes,
 						Resource:  resource,
 						Action:    action,
@@ -319,13 +322,16 @@ func AuthorizationMiddleware(authorizer Authorizer, resource string, action stri
 				return
 			}
 
+			// 提取 subject
+			subject := extractSubject(authInfo)
+
 			// 授权成功
 			if onDecision != nil {
 				onDecision(Decision{
 					Allowed:   true,
 					Reason:    "authorized",
 					ClientID:  authInfo.ClientID,
-					Subject:   authInfo.Subject,
+					Subject:   subject,
 					Scopes:    authInfo.Scopes,
 					Resource:  resource,
 					Action:    action,
@@ -339,8 +345,20 @@ func AuthorizationMiddleware(authorizer Authorizer, resource string, action stri
 	}
 }
 
+// extractSubject 从 AuthInfo 中提取 subject
+func extractSubject(authInfo server.AuthInfo) string {
+	if authInfo.Extra != nil {
+		if sub, ok := authInfo.Extra["sub"].(string); ok {
+			return sub
+		}
+	}
+	return ""
+}
+
 // GetAuthInfo 从请求上下文中提取 AuthInfo
-func GetAuthInfo(ctx context.Context) (*server.AuthInfo, bool) {
-	authInfo, ok := ctx.Value(authInfoKeyType{}).(*server.AuthInfo)
-	return authInfo, ok
+func GetAuthInfo(ctx context.Context) (server.AuthInfo, bool) {
+	if authInfo, ok := ctx.Value(authInfoKeyType{}).(server.AuthInfo); ok {
+		return authInfo, true
+	}
+	return server.AuthInfo{}, false
 }
