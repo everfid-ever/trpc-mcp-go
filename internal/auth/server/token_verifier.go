@@ -17,13 +17,12 @@ import (
 
 // Standard JWT claims that should not be included in Extra
 var standardClaims = map[string]bool{
-	"iss": true, "sub": true, "aud": true, "exp": true, "nbf": true,
-	"iat": true, "jti": true, "client_id": true, "scope": true,
-	"scopes": true, "resource": true, "kid": true,
+	"iss": true, "sub": true, "aud": true, "exp": true, "iat": true,
+	"jti": true, "client_id": true, "scope": true, "kid": true,
 }
 
 type TokenVerifierInterface interface {
-	VerifyAccessToken(token string) (AuthInfo, error)
+	VerifyAccessToken(ctx context.Context, token string) (AuthInfo, error)
 }
 
 // LocalJWKSConfig 本地 JWKS 配置
@@ -301,7 +300,7 @@ func extractExtra(token jwt.Token) map[string]interface{} {
 	extra := make(map[string]interface{})
 
 	for _, key := range token.Keys() {
-		if !standardClaims[key] {
+		if standardClaims[key] {
 			continue // 跳过已处理的声明与标准声明
 		}
 		var value interface{}
@@ -339,76 +338,4 @@ func (v *TokenVerifier) AddIssuerURL(ctx context.Context, iss, url string, refre
 // ClearLocalKeys clears all locally cached keys.
 func (v *TokenVerifier) ClearLocalKeys() {
 	_ = v.localKeySet.Clear()
-}
-
-// LoadLocalKey loads a JWK key for local verification.
-// fixme 本地JWKS应在创建时加载，不应有该方法
-func (v *JWKVerifier) LoadLocalKey(key jwk.Key) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.localKeys == nil {
-		v.localKeys = jwk.NewSet()
-	}
-	return v.localKeys.AddKey(key)
-}
-
-// LoadLocalKeyFromBytes loads a key from raw bytes (PEM, etc.)
-// fixme 不符合应用场景，JWKS都是json格式
-func (v *JWKVerifier) LoadLocalKeyFromBytes(keyData []byte, keyID string) error {
-	key, err := jwk.ParseKey(keyData)
-	if err != nil {
-		return fmt.Errorf("failed to parse key: %v", err)
-	}
-
-	// Set key ID if provided
-	if keyID != "" {
-		if err := key.Set(jwk.KeyIDKey, keyID); err != nil {
-			return fmt.Errorf("failed to set key ID: %v", err)
-		}
-	}
-
-	return v.LoadLocalKey(key)
-}
-
-// GetLocalKeys returns information about currently loaded local keys.
-// fixme 源码底层就是根据use和kid来匹配JWKS，无需手动实现，应删除
-func (v *JWKVerifier) GetLocalKeys() []map[string]interface{} {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	var keys []map[string]interface{}
-
-	if v.localKeys == nil {
-		return keys
-	}
-
-	iter := v.localKeys.Keys(context.Background())
-	for iter.Next(context.Background()) {
-		pair := iter.Pair()
-		key := pair.Value.(jwk.Key)
-
-		keyInfo := map[string]interface{}{
-			"kty": key.KeyType().String(),
-			"use": "sig", // Default for signature verification
-		}
-
-		if keyID := key.KeyID(); keyID != "" {
-			keyInfo["kid"] = keyID
-		}
-
-		keys = append(keys, keyInfo)
-	}
-
-	return keys
-}
-
-// GetCacheStats returns cache statistics for monitoring
-// fixme 一般都是服务初始化时静态配置的，不需要监控吧?监控也没什么意义？
-func (v *TokenVerifier) GetCacheStats() map[string]interface{} {
-
-	return map[string]interface{}{
-		"local_keys_count": v.localKeys.Len(),
-		"jwks_url":         v.jwksURL,
-		"remote_enabled":   v.remoteEnabled,
-	}
 }
