@@ -9,12 +9,16 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/httputil"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/sseutil"
 )
@@ -88,6 +92,55 @@ type getSSEConnection struct {
 
 	// Event ID generator, reuses existing sseResponder
 	sseResponder *sseResponder
+}
+
+// ServerAuthConfig defines server authentication configuration
+type ServerAuthConfig struct {
+	Issuer         string   `json:"issuer"`
+	Audience       []string `json:"audience"`
+	RequiredScopes []string `json:"required_scopes"`
+}
+
+// NewAuthHTTPContextFunc creates an authenticated HTTPContextFunc
+func NewAuthHTTPContextFunc(verifier server.TokenVerifier, cfg ServerAuthConfig) HTTPContextFunc {
+	return func(ctx context.Context, r *http.Request) context.Context {
+		// Exact Authorization: Bearer <token>
+		raw, err := extractBearerFromHeader(r.Header.Get("Authorization"))
+		if err != nil {
+			return server.WithAuthErr(ctx, oauthErrors.ErrInvalidRequest)
+		}
+
+		// Verify token
+		info, verr := verifier.VerifyAccessToken(ctx, raw)
+		if verr != nil {
+			return server.WithAuthErr(ctx, fmt.Errorf("%w: %v", oauthErrors.ErrInvalidToken, verr))
+		}
+
+		// Issuer guarantee
+		if cfg.Issuer != "" {
+			if iss, _ := info.Extra["iss"].(string); iss != "" && iss != cfg.Issuer {
+				return server.WithAuthErr(ctx, oauthErrors.ErrInvalidToken)
+			}
+		}
+
+		// Check scope
+		if len(cfg.RequiredScopes) > 0 && !hasAll(info.Scopes, cfg.RequiredScopes) {
+			return server.WithAuthErr(ctx, oauthErrors.ErrInsufficientScope)
+		}
+
+		//  Check Audience/Resource
+		if len(cfg.Audience) > 0 && info.Resource != nil {
+			if !audienceMatch(info.Resource.String(), cfg.Audience) {
+				return server.WithAuthErr(ctx, oauthErrors.ErrInvalidToken)
+			}
+		}
+
+		// Avoid token transparent transmission
+		info.Token = ""
+
+		// Injecting authentication information
+		return server.WithAuthInfo(ctx, &info)
+	}
 }
 
 // newHTTPServerHandler creates an HTTP server handler
@@ -232,6 +285,21 @@ func (h *httpServerHandler) handlePost(ctx context.Context, w http.ResponseWrite
 	enrichedCtx := ctx
 	for _, fn := range h.httpContextFuncs {
 		enrichedCtx = fn(enrichedCtx, r)
+	}
+
+	// If there is an authentication error in the context,
+	// it is mapped to the HTTP status code and Bearer error code and a challenge response is returned.
+	if err := server.GetAuthErr(enrichedCtx); err != nil {
+		status, code, desc := server.DetermineAuthError(err)
+		server.WriteAuthChallenge(w, status, code, desc, "")
+		return
+	}
+
+	// If there is no error but no AuthInfo, return invalid_token as a fallback.
+	if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
+		status, code, desc := server.DetermineAuthError(oauthErrors.ErrInvalidToken)
+		server.WriteAuthChallenge(w, status, code, desc, "")
+		return
 	}
 
 	var rawMessage json.RawMessage
@@ -556,6 +624,27 @@ func (h *httpServerHandler) handleGet(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
+	// Perform authentication context checks,
+	enrichedCtx := ctx
+	for _, fn := range h.httpContextFuncs {
+		enrichedCtx = fn(enrichedCtx, r)
+	}
+
+	// If there is an authentication error in the context,
+	// it is mapped to the HTTP status code and Bearer error code and a challenge response is returned.
+	if err := server.GetAuthErr(enrichedCtx); err != nil {
+		status, code, desc := server.DetermineAuthError(err)
+		server.WriteAuthChallenge(w, status, code, desc, "")
+		return
+	}
+
+	// If there is no error but no AuthInfo, return invalid_token as a fallback.
+	if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
+		status, code, desc := server.DetermineAuthError(oauthErrors.ErrInvalidToken)
+		server.WriteAuthChallenge(w, status, code, desc, "")
+		return
+	}
+
 	// Check if streaming is supported
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -570,7 +659,7 @@ func (h *httpServerHandler) handleGet(ctx context.Context, w http.ResponseWriter
 	flusher.Flush()
 
 	// Create context, for canceling connection
-	connCtx, cancelConn := context.WithCancel(ctx)
+	connCtx, cancelConn := context.WithCancel(enrichedCtx)
 	localCancelFunc = cancelConn // Assign to the variable captured by defer
 
 	// Check if there's already a GET SSE connection
@@ -829,4 +918,48 @@ func (rm *responseManager) DeliverResponse(requestID string, response *json.RawM
 	default:
 		return false
 	}
+}
+
+// hasAll determines whether have contains all the elements of need
+func hasAll(have, need []string) bool {
+	if len(need) == 0 {
+		return true
+	}
+	set := make(map[string]struct{}, len(have))
+	for _, s := range have {
+		set[s] = struct{}{}
+	}
+	for _, n := range need {
+		if _, ok := set[n]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// audienceMatch matches the RFC8707 resource URL with the configured audience loosely
+func audienceMatch(resource string, allowed []string) bool {
+	resource = strings.TrimSuffix(strings.TrimSpace(resource), "#")
+	for _, a := range allowed {
+		if resource == strings.TrimSuffix(strings.TrimSpace(a), "#") {
+			return true
+		}
+	}
+	return false
+}
+
+// extractBearerFromHeader extracts the Bearer token from the Authorization header
+func extractBearerFromHeader(authz string) (string, error) {
+	if strings.TrimSpace(authz) == "" {
+		return "", errors.New("missing Authorization header")
+	}
+	val := strings.TrimSpace(authz)
+	if len(val) < 7 || !strings.EqualFold(val[:7], "Bearer ") {
+		return "", errors.New("authorization scheme must be Bearer")
+	}
+	tok := strings.TrimSpace(val[7:])
+	if tok == "" {
+		return "", errors.New("empty bearer token")
+	}
+	return tok, nil
 }
