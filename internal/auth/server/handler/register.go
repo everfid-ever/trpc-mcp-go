@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS = 30 * 24 * 60 * 60 // 30 days
-	DEFAULT_RATE_LIMIT_WINDOW_MS         = 60 * 60 * 1000    // 1 hour
-	DEFAULT_RATE_LIMIT_MAX               = 20                // 20 requests per hour
+	defaultClientSecretExpirySeconds = 30 * 24 * 60 * 60 // 30 days
+	defaultRateLimitWindowMs         = 60 * 60 * 1000    // 1 hour
+	DefaultRateLimitMax              = 20                // 20 requests per hour
 )
 
 // ClientRegistrationHandlerOptions configuration for client registration handler
@@ -52,8 +52,8 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 	rateLimitConfig := options.RateLimit
 	if rateLimitConfig == nil {
 		rateLimitConfig = &RegisterRateLimitConfig{
-			WindowMs: DEFAULT_RATE_LIMIT_WINDOW_MS,
-			Max:      DEFAULT_RATE_LIMIT_MAX,
+			WindowMs: defaultRateLimitWindowMs,
+			Max:      DefaultRateLimitMax,
 		}
 	}
 
@@ -72,7 +72,7 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 		})
 	}
 
-	clientSecretExpirySeconds := DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS
+	clientSecretExpirySeconds := defaultClientSecretExpirySeconds
 	if options.ClientSecretExpirySeconds != nil {
 		clientSecretExpirySeconds = *options.ClientSecretExpirySeconds
 	}
