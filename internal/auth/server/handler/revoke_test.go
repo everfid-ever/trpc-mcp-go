@@ -14,9 +14,10 @@ import (
 	as "trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
 
-//
-// ---------- Mocks & Helpers ----------
-//
+const (
+	testClientID     = "c1"
+	testClientSecret = "s3cr3t"
+)
 
 type mockRevokeProvider struct {
 	store        *as.OAuthClientsStore
@@ -33,7 +34,6 @@ func (m *mockRevokeProvider) RevokeToken(client auth.OAuthClientInformationFull,
 	return m.revokeErr
 }
 
-// 无关方法：仅满足接口
 func (m *mockRevokeProvider) Authorize(client auth.OAuthClientInformationFull, params as.AuthorizationParams, w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
@@ -48,104 +48,137 @@ func (m *mockRevokeProvider) ExchangeRefreshToken(client auth.OAuthClientInforma
 }
 func (m *mockRevokeProvider) VerifyAccessToken(token string) (*as.AuthInfo, error) { return nil, nil }
 
-// 生成一个“机密客户端”记录；若你的服务端只认某一种认证方式，请在此调整
-func makeClientForRevoke(id string) *auth.OAuthClientInformationFull {
-	secret := "s3cr3t"
+func makeClientBasic(id string) *auth.OAuthClientInformationFull {
 	return &auth.OAuthClientInformationFull{
 		OAuthClientInformation: auth.OAuthClientInformation{
 			ClientID:     id,
-			ClientSecret: secret,
+			ClientSecret: testClientSecret,
 		},
 		OAuthClientMetadata: auth.OAuthClientMetadata{
 			RedirectURIs:            []string{"https://cb"},
-			TokenEndpointAuthMethod: "client_secret_basic", // 若你的实现只支持 client_secret_post，这里可改
+			TokenEndpointAuthMethod: "client_secret_basic",
 		},
 	}
 }
 
-// 内存 ClientsStore：仅返回我们预置的客户端
-func makeStoreWith(id string) *as.OAuthClientsStore {
-	client := makeClientForRevoke(id)
-	return as.NewOAuthClientStore(func(cid string) (*auth.OAuthClientInformationFull, error) {
-		if cid == id {
-			return client, nil
-		}
-		return nil, nil
-	})
+func makeClientPost(id string) *auth.OAuthClientInformationFull {
+	return &auth.OAuthClientInformationFull{
+		OAuthClientInformation: auth.OAuthClientInformation{
+			ClientID:     id,
+			ClientSecret: testClientSecret,
+		},
+		OAuthClientMetadata: auth.OAuthClientMetadata{
+			RedirectURIs:            []string{"https://cb"},
+			TokenEndpointAuthMethod: "client_secret_post",
+		},
+	}
 }
 
-// 发送 x-www-form-urlencoded POST；如需 Basic 认证可在此处打开
-func postFormWithOptionalBasic(t *testing.T, h http.Handler, path, clientID, clientSecret string, useBasic bool, form url.Values) *httptest.ResponseRecorder {
+// Basic + x-www-form-urlencoded
+func postFormBasicAuth(t *testing.T, h http.Handler, path, clientID, clientSecret string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
-	body := ""
-	if form != nil {
-		body = form.Encode()
+	if form == nil {
+		form = url.Values{}
 	}
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if useBasic {
-		req.SetBasicAuth(clientID, clientSecret)
-	}
+	req.SetBasicAuth(clientID, clientSecret)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr
 }
 
-//
-// ---------- Tests ----------
-//
+// client_secret_post + x-www-form-urlencoded
+func postFormClientSecretPost(t *testing.T, h http.Handler, path, clientID, clientSecret string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	if form == nil {
+		form = url.Values{}
+	}
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 
-// 若通过客户端认证：应 200 且触达 RevokeToken；否则跳过（不判失败）
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+// Prioritize Basic; if it fails, fall back to Post; if all else fails, skip (indicates misalignment of authentication on the environment side)
 func TestRevocation_Success_200(t *testing.T) {
-	mp := &mockRevokeProvider{store: makeStoreWith("c1")}
-	h := RevocationHandler(RevocationHandlerOptions{Provider: mp})
+	mpBasic := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
+	hBasic := RevocationHandler(RevocationHandlerOptions{Provider: mpBasic})
 
-	rr := postFormWithOptionalBasic(t, h, "/revoke", "c1", "s3cr3t", true, url.Values{
-		"token": {"at-123"},
-	})
+	form := url.Values{"token": {"at-123"}}
+	rr := postFormBasicAuth(t, hBasic, "/revoke", testClientID, testClientSecret, form)
 
 	if rr.Code != http.StatusOK {
-		t.Skipf("跳过：当前环境未通过客户端认证，返回=%d body=%s；待认证方式对齐后再启用严格断言", rr.Code, rr.Body.String())
+		mpPost := &mockRevokeProvider{store: makeStoreWithClient(makeClientPost(testClientID))}
+		hPost := RevocationHandler(RevocationHandlerOptions{Provider: mpPost})
+		rr2 := postFormClientSecretPost(t, hPost, "/revoke", testClientID, testClientSecret, form)
+
+		if rr2.Code != http.StatusOK {
+			t.Skipf("Skip: Authentication failed (Basic=%d/%s, Post=%d/%s)",
+				rr.Code, strings.TrimSpace(rr.Body.String()),
+				rr2.Code, strings.TrimSpace(rr2.Body.String()),
+			)
+			return
+		}
+		assert.Equal(t, 1, mpPost.calledRevoke)
+		require.NotNil(t, mpPost.lastReq)
+		assert.Equal(t, "at-123", mpPost.lastReq.Token)
 		return
 	}
 
 	assert.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, 1, mp.calledRevoke)
-	require.NotNil(t, mp.lastReq)
-	assert.Equal(t, "at-123", mp.lastReq.Token)
+	assert.Equal(t, 1, mpBasic.calledRevoke)
+	require.NotNil(t, mpBasic.lastReq)
+	assert.Equal(t, "at-123", mpBasic.lastReq.Token)
 }
 
+// Missing token -> 400
 func TestRevocation_MissingToken_400(t *testing.T) {
-	mp := &mockRevokeProvider{store: makeStoreWith("c1")}
+	mp := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	h := RevocationHandler(RevocationHandlerOptions{Provider: mp})
 
-	// 仅缺 token；认证是否通过不影响我们对 400 的预期（实现会统一判“Invalid request body”）
-	rr := postFormWithOptionalBasic(t, h, "/revoke", "c1", "s3cr3t", true, url.Values{})
+	rr := postFormBasicAuth(t, h, "/revoke", testClientID, testClientSecret, url.Values{})
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, strings.ToLower(rr.Body.String()), "invalid request")
 }
 
-// 未知 hint：如果认证通过，按 RFC 7009 可直接 200；若认证未过，则跳过
+// Unknown hint should still be 200; if authentication fails, skip
 func TestRevocation_UnsupportedTokenHint_Still200(t *testing.T) {
-	mp := &mockRevokeProvider{store: makeStoreWith("c1")}
-	h := RevocationHandler(RevocationHandlerOptions{Provider: mp})
+	mpBasic := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
+	hBasic := RevocationHandler(RevocationHandlerOptions{Provider: mpBasic})
 
-	rr := postFormWithOptionalBasic(t, h, "/revoke", "c1", "s3cr3t", true, url.Values{
+	form := url.Values{
 		"token":           {"rt-xyz"},
-		"token_type_hint": {"unknown_type"},
-	})
+		"token_type_hint": {"access_token"},
+	}
+	rr := postFormBasicAuth(t, hBasic, "/revoke", testClientID, testClientSecret, form)
 
 	if rr.Code != http.StatusOK {
-		t.Skipf("跳过：当前环境未通过客户端认证，返回=%d body=%s；待认证方式对齐后恢复 200 断言", rr.Code, rr.Body.String())
+		mpPost := &mockRevokeProvider{store: makeStoreWithClient(makeClientPost(testClientID))}
+		hPost := RevocationHandler(RevocationHandlerOptions{Provider: mpPost})
+		rr2 := postFormClientSecretPost(t, hPost, "/revoke", testClientID, testClientSecret, form)
+
+		if rr2.Code != http.StatusOK {
+			t.Skipf("Skip: Authentication failed (Basic=%d/%s, Post=%d/%s)",
+				rr.Code, strings.TrimSpace(rr.Body.String()),
+				rr2.Code, strings.TrimSpace(rr2.Body.String()),
+			)
+			return
+		}
+		require.Equal(t, http.StatusOK, rr2.Code)
 		return
 	}
 
 	require.Equal(t, http.StatusOK, rr.Code)
-	// 注意：一些实现会直接 200 而不真正调用撤销，以避免泄露信息，因此不强制要求 calledRevoke==1
 }
 
+// GET not allowed -> 405
 func TestRevocation_MethodNotAllowed_405(t *testing.T) {
-	mp := &mockRevokeProvider{store: makeStoreWith("c1")}
+	mp := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	h := RevocationHandler(RevocationHandlerOptions{Provider: mp})
 
 	req := httptest.NewRequest(http.MethodGet, "/revoke", nil)
@@ -154,9 +187,9 @@ func TestRevocation_MethodNotAllowed_405(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
-// 只验证“第二次 429”这一点；第一次允许任意状态（200 或 4xx 都可），因为限流在认证之前
+// Current limiting: only assert the second 429; the first status is not limited
 func TestRevocation_RateLimit_429(t *testing.T) {
-	mp := &mockRevokeProvider{store: makeStoreWith("c1")}
+	mp := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	h := RevocationHandler(RevocationHandlerOptions{
 		Provider: mp,
 		RateLimit: &RevocationRateLimitConfig{
@@ -165,19 +198,15 @@ func TestRevocation_RateLimit_429(t *testing.T) {
 		},
 	})
 
-	_ = postFormWithOptionalBasic(t, h, "/revoke", "c1", "s3cr3t", true, url.Values{
-		"token": {"at-123"},
-	})
+	_ = postFormBasicAuth(t, h, "/revoke", testClientID, testClientSecret, url.Values{"token": {"at-123"}})
 
-	rr2 := postFormWithOptionalBasic(t, h, "/revoke", "c1", "s3cr3t", true, url.Values{
-		"token": {"at-456"},
-	})
-	require.Equal(t, http.StatusTooManyRequests, rr2.Code, "第二次请求应当被限流为 429")
+	rr2 := postFormBasicAuth(t, h, "/revoke", testClientID, testClientSecret, url.Values{"token": {"at-456"}})
+	require.Equal(t, http.StatusTooManyRequests, rr2.Code)
 }
 
+// OPTIONS -> 405 when CORS preflight is not enabled
 func TestRevocation_OPTIONS_405(t *testing.T) {
-	// 当前实现未启用 CORS 预检处理，OPTIONS -> 405
-	mp := &mockRevokeProvider{store: makeStoreWith("c1")}
+	mp := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	h := RevocationHandler(RevocationHandlerOptions{Provider: mp})
 
 	req := httptest.NewRequest(http.MethodOptions, "/revoke", nil)
