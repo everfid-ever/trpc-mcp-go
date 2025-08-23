@@ -27,7 +27,7 @@ type ClientAuthenticatedRequest struct {
 	ClientSecret string `json:"client_secret,omitempty"`
 }
 
-// clientInfoKeyType 用于标识存储OAuthClientInformationFull的上下文键
+// clientInfoKeyType used to identify the context key storing OAuthClientInformationFull
 type clientInfoKeyType struct{}
 
 // validateClientRequest validates the client authentication request
@@ -76,7 +76,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 			var reqData ClientAuthenticatedRequest
 			var clientID string
 
-			// 优先 Basic
+			// Priority: Basic Auth first
 			if authz := r.Header.Get("Authorization"); strings.HasPrefix(strings.ToLower(authz), "basic ") {
 				enc := strings.TrimSpace(authz[len("Basic "):])
 				raw, decErr := base64.StdEncoding.DecodeString(enc)
@@ -92,7 +92,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 				reqData.ClientID, reqData.ClientSecret = parts[0], parts[1]
 				clientID = reqData.ClientID
 			} else {
-				// 2) 非 Basic：缓冲并回填 Body，支持 form 或 JSON
+				// Non-Basic: buffer and restore Body, support form or JSON
 				bodyBytes, _ := io.ReadAll(r.Body)
 				_ = r.Body.Close()
 				defer func() { r.Body = io.NopCloser(bytes.NewReader(bodyBytes)) }()
@@ -111,13 +111,13 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 					}
 					clientID = reqData.ClientID
 				default:
-					// 未知类型：保留兼容行为，按原逻辑走 JSON 解码错误
+					// Unknown type: maintain compatibility behavior, treat as JSON decode error
 					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid request body", ""), "")
 					return
 				}
 			}
 
-			// 校验 client_id
+			// Validate client_id
 			if err := validateClientRequest(&reqData); err != nil {
 				if oauthErr, ok := err.(errors.OAuthError); ok {
 					setErrorResponse(w, oauthErr, clientID)
@@ -127,14 +127,14 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 				return
 			}
 
-			// 读取客户端并校验密钥/过期
+			// Read client and validate secret/expiration
 			client, err := options.ClientsStore.GetClient(reqData.ClientID)
 			if err != nil {
-				setErrorResponse(w, errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", ""), clientID)
+				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "invalid client credentials", ""), clientID)
 				return
 			}
 			if client == nil {
-				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "Invalid client_id", ""), clientID)
+				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidClient, "invalid client credentials", ""), clientID)
 				return
 			}
 			if client.ClientSecret != "" {
