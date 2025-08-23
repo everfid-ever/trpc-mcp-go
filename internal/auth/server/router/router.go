@@ -54,9 +54,8 @@ func supportsClientRegistration(provider server.OAuthServerProvider) bool {
 	if clientsStore == nil {
 		return false
 	}
-	// Use type assertion to check if the clients store implements SupportDynamicClientRegistration interface
-	_, ok := provider.(server.SupportDynamicClientRegistration)
-	return ok
+	// Check if the clients store supports registration
+	return clientsStore.SupportsRegistration()
 }
 
 // supportsTokenRevocation checks if the provider supports token revocation
@@ -196,25 +195,24 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 
 	// Dynamic client registration (optional, POST only)
 	if oauthMetadata.RegistrationEndpoint != nil {
-		registrationURL, _ := url.Parse(*oauthMetadata.RegistrationEndpoint)
-		clientsStore := options.Provider.ClientsStore()
-
-		regOpts := handler.ClientRegistrationHandlerOptions{
-			ClientsStore: clientsStore,
-		}
-
-		if options.ClientRegistrationOptions != nil {
-			regOpts = *options.ClientRegistrationOptions
-			regOpts.ClientsStore = clientsStore
-		} else {
-			// OAuth 2.1 recommended rate limiting for client registration
-			regOpts.RateLimit = &handler.RegisterRateLimitConfig{
-				WindowMs: 60000,
-				Max:      10,
+		// Ensure ClientsStore() is not nil before mounting /register
+		if clientsStore := options.Provider.ClientsStore(); clientsStore != nil {
+			registrationURL, _ := url.Parse(*oauthMetadata.RegistrationEndpoint)
+			regOpts := handler.ClientRegistrationHandlerOptions{
+				ClientsStore: clientsStore,
 			}
+			if options.ClientRegistrationOptions != nil {
+				regOpts = *options.ClientRegistrationOptions
+				regOpts.ClientsStore = clientsStore
+			} else {
+				// OAuth 2.1 recommended rate limiting for client registration
+				regOpts.RateLimit = &handler.RegisterRateLimitConfig{
+					WindowMs: 60000,
+					Max:      10,
+				}
+			}
+			mux.Handle("POST "+registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 		}
-
-		mux.Handle("POST "+registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 	}
 
 	// Token revocation endpoint (optional, POST only)
