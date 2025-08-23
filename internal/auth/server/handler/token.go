@@ -19,27 +19,27 @@ import (
 // TokenHandlerOptions defines configuration options for the token endpoint
 type TokenHandlerOptions struct {
 	Provider  server.OAuthServerProvider `json:"provider"`
-	RateLimit *rate.Limiter              `json:"rateLimit,omitempty"` // 使用标准的 rate.Limiter
+	RateLimit *rate.Limiter              `json:"rateLimit,omitempty"` // ä½¿ç"¨æ ‡å‡†çš„ rate.Limiter
 }
 
 // TokenRequest defines basic token request structure
 type TokenRequest struct {
-	GrantType string `json:"grant_type" validate:"required"`
+	GrantType string `form:"grant_type" json:"grant_type" validate:"required"`
 }
 
 // AuthorizationCodeGrant defines authorization code grant request
 type AuthorizationCodeGrant struct {
-	Code         string  `json:"code" validate:"required"`
-	CodeVerifier string  `json:"code_verifier" validate:"required"`
-	RedirectURI  *string `json:"redirect_uri,omitempty"`
-	Resource     *string `json:"resource,omitempty" validate:"omitempty,url"`
+	Code         string  `form:"code" json:"code" validate:"required"`
+	CodeVerifier string  `form:"code_verifier" json:"code_verifier" validate:"required"`
+	RedirectURI  *string `form:"redirect_uri" json:"redirect_uri,omitempty"`
+	Resource     *string `form:"resource" json:"resource,omitempty" validate:"omitempty,url"`
 }
 
 // RefreshTokenGrant defines refresh token grant request
 type RefreshTokenGrant struct {
-	RefreshToken string  `json:"refresh_token" validate:"required"`
-	Scope        *string `json:"scope,omitempty"`
-	Resource     *string `json:"resource,omitempty" validate:"omitempty,url"`
+	RefreshToken string  `form:"refresh_token" json:"refresh_token" validate:"required"`
+	Scope        *string `form:"scope" json:"scope,omitempty"`
+	Resource     *string `form:"resource" json:"resource,omitempty" validate:"omitempty,url"`
 }
 
 // TokenHandler creates a token endpoint handler with full middleware stack
@@ -109,9 +109,20 @@ func createTokenCoreHandler(options TokenHandlerOptions) http.HandlerFunc {
 			return
 		}
 
+		// Get grant_type from form
+		grantType := r.FormValue("grant_type")
+		if grantType == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+
+			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, "invalid client credentials", "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+			return
+		}
+
 		// Verify basic token request
 		tokenReq := TokenRequest{
-			GrantType: r.FormValue("grant_type"),
+			GrantType: grantType,
 		}
 
 		if err := validate.Struct(tokenReq); err != nil {
@@ -123,17 +134,18 @@ func createTokenCoreHandler(options TokenHandlerOptions) http.HandlerFunc {
 			return
 		}
 
-		// 使用 AuthenticateClient 中间件设置的客户端信息
+		// Check client authentication result
 		client, ok := middleware.GetAuthenticatedClient(r)
 		if !ok {
+			// NOW this code will actually execute because middleware didn't terminate
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			errResp := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
+			w.WriteHeader(http.StatusUnauthorized) // Proper OAuth error status
+			errResp := errors.NewOAuthError(errors.ErrInvalidClient, "invalid client credentials", "")
 			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
 			return
 		}
 
-		switch tokenReq.GrantType {
+		switch grantType {
 		case "authorization_code":
 			handleAuthorizationCodeGrant(w, r, validate, options.Provider, *client)
 		case "refresh_token":
@@ -171,6 +183,16 @@ func handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request, valida
 	if err := validate.Struct(grant); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
+
+		if verrs, ok := err.(validator.ValidationErrors); ok {
+			for _, fe := range verrs {
+				if fe.Field() == "Resource" && fe.Tag() == "url" {
+					errResp := errors.NewOAuthError(errors.ErrInvalidRequest, "resource must be a valid URL", "")
+					json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+					return
+				}
+			}
+		}
 
 		errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
 		json.NewEncoder(w).Encode(errResp.ToResponseStruct())
@@ -266,7 +288,6 @@ func handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request, valida
 
 // handleRefreshTokenGrant handles refresh token grant
 func handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request, validate *validator.Validate, provider server.OAuthServerProvider, client auth.OAuthClientInformationFull) {
-	// 解析刷新 token grant 请求
 	var scope *string
 	if s := r.FormValue("scope"); s != "" {
 		scope = &s
@@ -318,6 +339,13 @@ func handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request, validate *v
 
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
+
+		if strings.Contains(strings.ToLower(err.Error()), "invalid") {
+			w.WriteHeader(http.StatusInternalServerError)
+			errResp := errors.NewOAuthError(errors.ErrInvalidGrant, err.Error(), "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+			return
+		}
 
 		switch {
 		case err == errors.ErrInvalidParams || err == errors.ErrMissingParams:
