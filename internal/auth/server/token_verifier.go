@@ -318,13 +318,13 @@ func extractExtra(token jwt.Token) map[string]interface{} {
 // AddIssuerURL 动态添加或更新 issuer 到 JWKS URL 的映射,不提供动态删除功能
 func (v *TokenVerifier) AddIssuerURL(ctx context.Context, iss, url string, refreshInterval time.Duration) error {
 	if !v.isRemote {
-		return fmt.Errorf("cannot add issuer URL: remote JWKS support is disabled")
+		return errors.New("cannot add issuer URL: remote JWKS support is disabled")
 	}
 	if url == "" {
-		return fmt.Errorf("JWKS URL cannot be empty")
+		return errors.New("JWKS URL cannot be empty")
 	}
 	if !strings.HasPrefix(url, "https://") {
-		return fmt.Errorf("JWKS URL must use HTTPS")
+		return errors.New("JWKS URL must use HTTPS")
 	}
 
 	// 注册到 jwk.Cache

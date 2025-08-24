@@ -17,7 +17,7 @@ import (
 type BearerAuthMiddlewareOptions struct {
 	// Verifier 用于验证令牌的提供者。
 	// Token verifier provider.
-	Verifier server.TokenVerifierInterface
+	Verifier server.TokenVerifier
 
 	// RequiredScopes 可选的权限范围，验证令牌必须包含所有指定范围。
 	// Optional scopes that the token must have.

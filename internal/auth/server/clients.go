@@ -24,11 +24,10 @@ type OAuthClientsStoreInterface interface {
 	// NOTE: Implementations should NOT delete expired client secrets in-place. Auth middleware provided by this library will automatically check the `client_secret_expires_at` field and reject requests with expired secrets. Any custom logic for authenticating clients should check the `client_secret_expires_at` field as well.
 	// If unimplemented, dynamic client registration is unsupported.
 	// 可选方法 / Optional method
-	// 用于动态客户端注册 / Dynamic client registration
+	// 可选方法动态客户端注册 / Dynamic client registration
 	SupportDynamicClientRegistration
 }
 
-// SupportDynamicClientRegistration 包含动态客户端注册的子接口，可选实现
 type SupportDynamicClientRegistration interface {
 	RegisterClient(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error)
 }
@@ -43,7 +42,7 @@ func (s OAuthClientsStore) GetClient(clientID string) (*auth.OAuthClientInformat
 }
 
 func (s OAuthClientsStore) RegisterClient(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
-	if s.supportsRegistration() == false {
+	if s.registerClient == nil {
 		return nil, fmt.Errorf("dynamic client registration is not supported")
 	}
 	return s.registerClient(client)
@@ -62,6 +61,6 @@ func NewOAuthClientStore(getClient func(clientID string) (*auth.OAuthClientInfor
 }
 
 // SupportsRegistration checks if dynamic client registration is supported
-func (s OAuthClientsStore) supportsRegistration() bool {
+func (s OAuthClientsStore) SupportsRegistration() bool {
 	return s.registerClient != nil
 }

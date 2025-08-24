@@ -31,7 +31,7 @@ type RevocationRateLimitConfig struct {
 // RevocationHandler creates a handler for OAuth token revocation with client authentication middleware
 func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 	// Check if provider supports token revocation
-	if opts.Provider.RevokeToken == nil {
+	if opts.Provider == nil {
 		panic("Auth provider does not support revoking tokens")
 	}
 

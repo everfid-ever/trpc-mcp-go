@@ -9,10 +9,16 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/httputil"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/sseutil"
 )
@@ -68,6 +74,9 @@ type httpServerHandler struct {
 
 	// Server path.
 	serverPath string
+
+	// Response manager for server-to-client requests.
+	responseManager *responseManager
 }
 
 // getSSEConnection represents a GET SSE connection
@@ -85,6 +94,55 @@ type getSSEConnection struct {
 	sseResponder *sseResponder
 }
 
+// ServerAuthConfig defines server authentication configuration
+type ServerAuthConfig struct {
+	Issuer         string   `json:"issuer"`
+	Audience       []string `json:"audience"`
+	RequiredScopes []string `json:"required_scopes"`
+}
+
+// NewAuthHTTPContextFunc creates an authenticated HTTPContextFunc
+func NewAuthHTTPContextFunc(verifier server.TokenVerifier, cfg ServerAuthConfig) HTTPContextFunc {
+	return func(ctx context.Context, r *http.Request) context.Context {
+		// Exact Authorization: Bearer <token>
+		raw, err := extractBearerFromHeader(r.Header.Get("Authorization"))
+		if err != nil {
+			return server.WithAuthErr(ctx, oauthErrors.ErrInvalidRequest)
+		}
+
+		// Verify token
+		info, verr := verifier.VerifyAccessToken(ctx, raw)
+		if verr != nil {
+			return server.WithAuthErr(ctx, fmt.Errorf("%w: %v", oauthErrors.ErrInvalidToken, verr))
+		}
+
+		// Issuer guarantee
+		if cfg.Issuer != "" {
+			if iss, _ := info.Extra["iss"].(string); iss != "" && iss != cfg.Issuer {
+				return server.WithAuthErr(ctx, oauthErrors.ErrInvalidToken)
+			}
+		}
+
+		// Check scope
+		if len(cfg.RequiredScopes) > 0 && !hasAll(info.Scopes, cfg.RequiredScopes) {
+			return server.WithAuthErr(ctx, oauthErrors.ErrInsufficientScope)
+		}
+
+		//  Check Audience/Resource
+		if len(cfg.Audience) > 0 && info.Resource != nil {
+			if !audienceMatch(info.Resource.String(), cfg.Audience) {
+				return server.WithAuthErr(ctx, oauthErrors.ErrInvalidToken)
+			}
+		}
+
+		// Avoid token transparent transmission
+		info.Token = ""
+
+		// Injecting authentication information
+		return server.WithAuthInfo(ctx, &info)
+	}
+}
+
 // newHTTPServerHandler creates an HTTP server handler
 func newHTTPServerHandler(handler requestHandler, serverPath string, options ...func(*httpServerHandler)) *httpServerHandler {
 	h := &httpServerHandler{
@@ -97,6 +155,7 @@ func newHTTPServerHandler(handler requestHandler, serverPath string, options ...
 		enableGetSSE:           true, // Default: GET SSE enabled
 		getSSEConnections:      make(map[string]*getSSEConnection),
 		serverPath:             serverPath,
+		responseManager:        newResponseManager(),
 	}
 
 	// Apply options
@@ -228,6 +287,21 @@ func (h *httpServerHandler) handlePost(ctx context.Context, w http.ResponseWrite
 		enrichedCtx = fn(enrichedCtx, r)
 	}
 
+	// If there is an authentication error in the context,
+	// it is mapped to the HTTP status code and Bearer error code and a challenge response is returned.
+	if err := server.GetAuthErr(enrichedCtx); err != nil {
+		status, code, desc := server.DetermineAuthError(err)
+		server.WriteAuthChallenge(w, status, code, desc, "")
+		return
+	}
+
+	// If there is no error but no AuthInfo, return invalid_token as a fallback.
+	if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
+		status, code, desc := server.DetermineAuthError(oauthErrors.ErrInvalidToken)
+		server.WriteAuthChallenge(w, status, code, desc, "")
+		return
+	}
+
 	var rawMessage json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&rawMessage); err != nil {
 		http.Error(w, ErrInvalidRequestBody.Error(), http.StatusBadRequest)
@@ -286,6 +360,11 @@ func (h *httpServerHandler) handlePost(ctx context.Context, w http.ResponseWrite
 	}
 	if base.ID == nil && base.Method != "" {
 		h.handlePostNotification(enrichedCtx, w, r, rawMessage, base, session)
+		return
+	}
+	// Handle JSON-RPC responses (has ID but no method).
+	if base.ID != nil && base.Method == "" {
+		h.handlePostResponse(enrichedCtx, w, r, rawMessage, base, session)
 		return
 	}
 
@@ -389,13 +468,78 @@ func (h *httpServerHandler) handlePostNotification(ctx context.Context, w http.R
 	}
 	notificationCtx := ctx
 	if session != nil {
+		// Add session to context.
 		notificationCtx = setSessionToContext(ctx, session)
+		// Add client session to context so ServerNotificationHandler can use ClientSessionFromContext to get session.
+		notificationCtx = withClientSession(notificationCtx, session)
 	}
 	if err := h.requestHandler.handleNotification(notificationCtx, &notification, session); err != nil {
 		h.logger.Infof("Notification processing failed: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	h.sendNotificationResponse(w, session)
+}
+
+// handlePostResponse handles JSON-RPC responses.
+func (h *httpServerHandler) handlePostResponse(ctx context.Context, w http.ResponseWriter, r *http.Request, rawMessage json.RawMessage, base baseMessage, session Session) {
+	var response struct {
+		JSONRPC string      `json:"jsonrpc"`
+		ID      interface{} `json:"id"`
+		Result  interface{} `json:"result,omitempty"`
+		Error   interface{} `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(rawMessage, &response); err != nil {
+		http.Error(w, "Invalid JSON-RPC response format: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if session == nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+
+	sessionID := session.GetID()
+	h.logger.Debugf("Received JSON-RPC response for session %s, ID: %v", sessionID, response.ID)
+
+	// Prepare response data
+	requestIDStr := fmt.Sprintf("%v", response.ID)
+	var responseMessage *json.RawMessage
+
+	// Handle error response.
+	if response.Error != nil {
+		// Create error result.
+		errorBytes, _ := json.Marshal(map[string]interface{}{
+			"error": response.Error,
+		})
+		errorMsg := json.RawMessage(errorBytes)
+		responseMessage = &errorMsg
+	} else if response.Result != nil {
+		// Handle success response.
+		resultBytes, err := json.Marshal(response.Result)
+		if err != nil {
+			h.logger.Errorf("Failed to marshal response result: %v", err)
+			h.sendNotificationResponse(w, session)
+			return
+		}
+		resultMsg := json.RawMessage(resultBytes)
+		responseMessage = &resultMsg
+	} else {
+		// Invalid response - neither error nor result.
+		h.logger.Errorf("Invalid JSON-RPC response: missing both result and error for ID: %v", response.ID)
+		h.sendNotificationResponse(w, session)
+		return
+	}
+
+	// Deliver response using responseManager.
+	if h.responseManager.DeliverResponse(requestIDStr, responseMessage) {
+		h.logger.Debugf("Successfully delivered response for request ID: %v", response.ID)
+	} else {
+		h.logger.Debugf("Received response for unknown request ID: %v", response.ID)
+	}
+
+	// Send 202 Accepted response.
 	h.sendNotificationResponse(w, session)
 }
 
@@ -480,6 +624,27 @@ func (h *httpServerHandler) handleGet(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
+	// Perform authentication context checks,
+	enrichedCtx := ctx
+	for _, fn := range h.httpContextFuncs {
+		enrichedCtx = fn(enrichedCtx, r)
+	}
+
+	// If there is an authentication error in the context,
+	// it is mapped to the HTTP status code and Bearer error code and a challenge response is returned.
+	if err := server.GetAuthErr(enrichedCtx); err != nil {
+		status, code, desc := server.DetermineAuthError(err)
+		server.WriteAuthChallenge(w, status, code, desc, "")
+		return
+	}
+
+	// If there is no error but no AuthInfo, return invalid_token as a fallback.
+	if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
+		status, code, desc := server.DetermineAuthError(oauthErrors.ErrInvalidToken)
+		server.WriteAuthChallenge(w, status, code, desc, "")
+		return
+	}
+
 	// Check if streaming is supported
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -494,7 +659,7 @@ func (h *httpServerHandler) handleGet(ctx context.Context, w http.ResponseWriter
 	flusher.Flush()
 
 	// Create context, for canceling connection
-	connCtx, cancelConn := context.WithCancel(ctx)
+	connCtx, cancelConn := context.WithCancel(enrichedCtx)
 	localCancelFunc = cancelConn // Assign to the variable captured by defer
 
 	// Check if there's already a GET SSE connection
@@ -633,6 +798,48 @@ func (h *httpServerHandler) sendNotification(sessionID string, notification *JSO
 	return h.sendNotificationToGetSSE(sessionID, notification)
 }
 
+// SendRequest sends a JSON-RPC request to a client and waits for response.
+func (h *httpServerHandler) SendRequest(ctx context.Context, sessionID string, request *JSONRPCRequest) (*json.RawMessage, error) {
+	// Check if there's a GET SSE connection for this session.
+	h.getSSEConnectionsLock.RLock()
+	conn, ok := h.getSSEConnections[sessionID]
+	h.getSSEConnectionsLock.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("no GET SSE connection found for session: %s", sessionID)
+	}
+
+	// Generate unique request ID if not provided.
+	if request.ID == nil {
+		request.ID = h.responseManager.GenerateRequestID()
+	}
+
+	// Register request and get response channel.
+	requestIDStr := fmt.Sprintf("%v", request.ID)
+	responseChan := h.responseManager.RegisterRequest(requestIDStr)
+	defer h.responseManager.UnregisterRequest(requestIDStr)
+
+	// Send the request through GET SSE using the proper sendRequest method.
+	conn.writeLock.Lock()
+	eventID, err := conn.sseResponder.sendRequest(conn.writer, request)
+	if err != nil {
+		conn.writeLock.Unlock()
+		return nil, fmt.Errorf("failed to send request via SSE: %w", err)
+	}
+	conn.lastEventID = eventID
+	conn.writeLock.Unlock()
+
+	// Wait for response or timeout.
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case response := <-responseChan:
+		return response, nil
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("request timeout")
+	}
+}
+
 // getActiveSessions gets all active session IDs
 func (h *httpServerHandler) getActiveSessions() []string {
 	if h.sessionManager == nil {
@@ -658,4 +865,101 @@ func (h *httpServerHandler) isValidPath(requestPath string) bool {
 		return true
 	}
 	return requestPath == h.serverPath
+}
+
+// responseManager manages pending requests and their response channels.
+type responseManager struct {
+	pendingRequests map[string]chan *json.RawMessage
+	mutex           sync.RWMutex
+	requestIDGen    atomic.Int64
+}
+
+// newResponseManager creates a new response manager.
+func newResponseManager() *responseManager {
+	return &responseManager{
+		pendingRequests: make(map[string]chan *json.RawMessage),
+	}
+}
+
+// GenerateRequestID generates a unique request ID.
+func (rm *responseManager) GenerateRequestID() string {
+	return fmt.Sprintf("server_req_%d", rm.requestIDGen.Add(1))
+}
+
+// RegisterRequest registers a request and returns a response channel.
+func (rm *responseManager) RegisterRequest(requestID string) chan *json.RawMessage {
+	responseChan := make(chan *json.RawMessage, 1)
+	rm.mutex.Lock()
+	rm.pendingRequests[requestID] = responseChan
+	rm.mutex.Unlock()
+	return responseChan
+}
+
+// UnregisterRequest removes a request from tracking.
+func (rm *responseManager) UnregisterRequest(requestID string) {
+	rm.mutex.Lock()
+	delete(rm.pendingRequests, requestID)
+	rm.mutex.Unlock()
+}
+
+// DeliverResponse delivers a response to the waiting request.
+func (rm *responseManager) DeliverResponse(requestID string, response *json.RawMessage) bool {
+	rm.mutex.RLock()
+	responseChan, exists := rm.pendingRequests[requestID]
+	rm.mutex.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	select {
+	case responseChan <- response:
+		return true
+	default:
+		return false
+	}
+}
+
+// hasAll determines whether have contains all the elements of need
+func hasAll(have, need []string) bool {
+	if len(need) == 0 {
+		return true
+	}
+	set := make(map[string]struct{}, len(have))
+	for _, s := range have {
+		set[s] = struct{}{}
+	}
+	for _, n := range need {
+		if _, ok := set[n]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// audienceMatch matches the RFC8707 resource URL with the configured audience loosely
+func audienceMatch(resource string, allowed []string) bool {
+	resource = strings.TrimSuffix(strings.TrimSpace(resource), "#")
+	for _, a := range allowed {
+		if resource == strings.TrimSuffix(strings.TrimSpace(a), "#") {
+			return true
+		}
+	}
+	return false
+}
+
+// extractBearerFromHeader extracts the Bearer token from the Authorization header
+func extractBearerFromHeader(authz string) (string, error) {
+	if strings.TrimSpace(authz) == "" {
+		return "", errors.New("missing Authorization header")
+	}
+	val := strings.TrimSpace(authz)
+	if len(val) < 7 || !strings.EqualFold(val[:7], "Bearer ") {
+		return "", errors.New("authorization scheme must be Bearer")
+	}
+	tok := strings.TrimSpace(val[7:])
+	if tok == "" {
+		return "", errors.New("empty bearer token")
+	}
+	return tok, nil
 }
