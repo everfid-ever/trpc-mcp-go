@@ -1,16 +1,21 @@
 package client
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/utils"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 )
@@ -34,6 +39,75 @@ type metadataDiscoveryOptions struct {
 	ProtocolVersion   *string
 	MetadataUrl       *string
 	MetadataServerUrl *string
+}
+
+type RegisterClientOptions struct {
+	Metadata       auth.AuthorizationServerMetadata
+	ClientMetadata auth.OAuthClientMetadata
+	FetchFn        auth.FetchFunc
+}
+
+type discoveryUrlType string
+
+const (
+	discoveryTypeOAuth discoveryUrlType = "oauth"
+	discoveryTypeOIDC  discoveryUrlType = "oidc"
+)
+
+type discoveryUrl struct {
+	URL  *url.URL
+	Type discoveryUrlType
+}
+
+// PKCEChallenge holds PKCE code verifier and challenge
+type PKCEChallenge struct {
+	// CodeVerifier is the high-entropy cryptographic random string
+	CodeVerifier string
+	// CodeChallenge is the derived challenge from the code verifier
+	CodeChallenge string
+}
+
+// StartAuthorizationOptions configures OAuth authorization startup
+type StartAuthorizationOptions struct {
+	// Metadata contains authorization server configuration (optional)
+	Metadata auth.AuthorizationServerMetadata
+	// ClientInformation holds the OAuth client credentials
+	ClientInformation auth.OAuthClientInformation
+	// RedirectURL specifies where to redirect after authorization
+	RedirectURL string
+	// Scope defines the requested access permissions (optional)
+	Scope *string
+	// State provides CSRF protection (optional)
+	State *string
+	// Resource specifies the target resource URL (optional)
+	Resource *url.URL
+}
+
+// StartAuthorizationResult holds authorization startup results
+type StartAuthorizationResult struct {
+	// AuthorizationURL is where the user should be redirected for authorization
+	AuthorizationURL *url.URL
+	// CodeVerifier must be stored securely for the token exchange step
+	CodeVerifier string
+}
+type ExchangeAuthorizationOptions struct {
+	Metadata                    auth.AuthorizationServerMetadata // server config (optional)
+	ClientInformation          *auth.OAuthClientInformation      // client credentials
+	AuthorizationCode          string                            // auth code from server
+	CodeVerifier               string                            // PKCE verifier
+	RedirectURI                string                            // must match auth request
+	Resource                   *url.URL                          // target resource (optional)
+	AddClientAuthentication    func(http.Header, url.Values, string) error // custom auth (optional)
+	FetchFn                    auth.FetchFunc                    // custom HTTP client (optional)
+}
+
+type RefreshAuthorizationOptions struct {
+	Metadata                    auth.AuthorizationServerMetadata // server config (optional)
+	ClientInformation          *auth.OAuthClientInformation      // client credentials
+	RefreshToken               string                            // refresh token
+	Resource                   *url.URL                          // target resource (optional)
+	AddClientAuthentication    func(http.Header, url.Values, string) error // custom auth (optional)
+	FetchFn                    auth.FetchFunc                    // custom HTTP client (optional)
 }
 
 type UnauthorizedError struct {
@@ -125,31 +199,36 @@ func applyPublicAuth(clientID string, params url.Values) {
 	params.Set("client_id", clientID)
 }
 func parseErrorResponse(input interface{}) (*errors.OAuthError, error) {
-	//TODO 解析错误响应
+	// TODO parse error response
 	return nil, nil
 }
 func Auth(provider OAuthClientProvider, options auth.AuthOptions) (*AuthResult, error) {
-	result, err := authInternal(ptovider, options)
+	result, err := authInternal(provider, options)
 	if err != nil {
 		if stderrors.Is(err, errors.ErrInvalidClient) || stderrors.Is(err, errors.ErrUnauthorizedClient) {
-			if invalidareErr := provider.InvalidateCredentials("all"); invalidareErr != nil {
-				return nil, invalidareErr
+			if invalidator, ok := provider.(OAuthCredentialInvalidator); ok {
+				if invalidateErr := invalidator.InvalidateCredentials("all"); invalidateErr != nil {
+					return nil, invalidateErr
+				}
 			}
-			return authInternal(ptovider, options)
+			return authInternal(provider, options)
 		} else if stderrors.Is(err, errors.ErrInvalidGrant) {
-			if invalidareErr := provider.InvalidateCredentials("tokens"); invalidareErr != nil {
-				return nil, invalidareErr
+			if invalidator, ok := provider.(OAuthCredentialInvalidator); ok {
+				if invalidateErr := invalidator.InvalidateCredentials("tokens"); invalidateErr != nil {
+					return nil, invalidateErr
+				}
 			}
-			return authInternal(ptovider, options)
+			return authInternal(provider, options)
 		}
 		return nil, err
 	}
 	return result, err
 }
-func authInternalprovider(provider OAuthClientProvider, options auth.AuthOptions) (*AuthResult, error) {
+
+func authInternal(provider OAuthClientProvider, options auth.AuthOptions) (*AuthResult, error) {
 	var resourceMetadata *auth.OAuthProtectedResourceMetadata
 	var authorizationServerUrl string
-	metadata, err := discoverOauthProtectedResourceMetadata(options.ServerUrl, &auth.DiscoveryOptions{
+	metadata, err := DiscoverOAuthProtectedResourceMetadata(options.ServerUrl, &auth.DiscoveryOptions{
 		ResourceMetadataUrl: options.ResourceMetadataUrl,
 	}, options.FetchFn)
 	if err == nil {
@@ -162,38 +241,41 @@ func authInternalprovider(provider OAuthClientProvider, options auth.AuthOptions
 		authorizationServerUrl = options.ServerUrl
 	}
 
-	resource, err := selectResourceURL(options.ServerURL, provider, resourceMetadata)
+	resource, err := selectResourceURL(options.ServerUrl, provider, resourceMetadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to select resource URL: %w", err)
 	}
 
-	metadata, err := discoverAuthorizationServerMetadata(authorizationServerURL, options.FetchFn)
+	serverMetadata, err := DiscoverAuthorizationServerMetadata(context.Background(), authorizationServerUrl, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover authorization server metadata: %w", err)
 	}
-	clientInformation, err := provider.ClientInformation()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get client information: %w", err)
-	}
+	clientInformation := provider.ClientInformation()
 
 	if clientInformation == nil {
 		if options.AuthorizationCode != nil {
-			return nil, errors.New("existing OAuth client information is required when exchanging an authorization code")
+			return nil, stderrors.New("existing OAuth client information is required when exchanging an authorization code")
 		}
 
-		if provider.SaveClientInformation == nil {
-			return nil, errors.New("OAuth client information must be saveable for dynamic registration")
+		if _, ok := provider.(OAuthClientInfoProvider); !ok {
+			return nil, stderrors.New("OAuth client information must be saveable for dynamic registration")
 		}
 
-		fullInformation, err := registerClient(authorizationServerURL, provider.ClientMetadata(), metadata, options.FetchFn)
+		fullInformation, err := RegisterClient(context.Background(), authorizationServerUrl, RegisterClientOptions{
+			Metadata:       serverMetadata,
+			ClientMetadata: provider.ClientMetadata(),
+			FetchFn:        options.FetchFn,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to register client: %w", err)
 		}
 
-		if err := provider.SaveClientInformation(fullInformation); err != nil {
-			return nil, fmt.Errorf("failed to save client information: %w", err)
+		if clientInfoProvider, ok := provider.(OAuthClientInfoProvider); ok {
+			if err := clientInfoProvider.SaveClientInformation(*fullInformation); err != nil {
+				return nil, fmt.Errorf("failed to save client information: %w", err)
+			}
 		}
-		clientInformation = &OAuthClientInformation{
+		clientInformation = &auth.OAuthClientInformation{
 			ClientID:     fullInformation.ClientID,
 			ClientSecret: fullInformation.ClientSecret,
 		}
@@ -203,23 +285,29 @@ func authInternalprovider(provider OAuthClientProvider, options auth.AuthOptions
 		return nil, fmt.Errorf("failed to get tokens: %w", err)
 	}
 
-	if tokens != nil && tokens.RefreshToken != "" {
-		newTokens, err := refreshAuthorization(authorizationServerURL, RefreshAuthorizationOptions{
-			Metadata:                metadata,
+	if tokens != nil && tokens.RefreshToken != nil && *tokens.RefreshToken != "" {
+		var addClientAuth func(http.Header, url.Values, string) error
+		if authProvider, ok := provider.(OAuthClientAuthProvider); ok {
+			addClientAuth = authProvider.AddClientAuthentication
+		}
+
+		newTokens, err := refreshAuthorization(authorizationServerUrl, RefreshAuthorizationOptions{
+			Metadata:                serverMetadata,
 			ClientInformation:       clientInformation,
-			RefreshToken:            tokens.RefreshToken,
+			RefreshToken:            *tokens.RefreshToken,
 			Resource:                resource,
-			AddClientAuthentication: provider.AddClientAuthentication,
+			AddClientAuthentication: addClientAuth,
 			FetchFn:                 options.FetchFn,
 		})
 		if err != nil {
-			var oauthErr *OAuthError
-			if !errors.As(err, &oauthErr) || errors.Is(err, ErrServerError) {
+			var oauthErr *errors.OAuthError
+			if !stderrors.As(err, &oauthErr) {
+				// Network/non-OAuth errors, continue auth flow
 			} else {
 				return nil, err
 			}
 		} else {
-			if err := provider.SaveTokens(newTokens); err != nil {
+			if err := provider.SaveTokens(*newTokens); err != nil {
 				return nil, fmt.Errorf("failed to save refreshed tokens: %w", err)
 			}
 			result := AuthResultAuthorized
@@ -227,8 +315,8 @@ func authInternalprovider(provider OAuthClientProvider, options auth.AuthOptions
 		}
 	}
 	var state *string
-	if provider.State != nil {
-		stateValue, err := provider.State()
+	if stateProvider, ok := provider.(OAuthStateProvider); ok {
+		stateValue, err := stateProvider.State()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get state: %w", err)
 		}
@@ -242,9 +330,9 @@ func authInternalprovider(provider OAuthClientProvider, options auth.AuthOptions
 		}
 	}
 
-	authorizationResult, err := startAuthorization(authorizationServerURL, StartAuthorizationOptions{
-		Metadata:          metadata,
-		ClientInformation: clientInformation,
+	authorizationResult, err := startAuthorization(authorizationServerUrl, StartAuthorizationOptions{
+		Metadata:          serverMetadata,
+		ClientInformation: *clientInformation,
 		State:             state,
 		RedirectURL:       provider.RedirectURL(),
 		Scope:             scope,
@@ -265,6 +353,40 @@ func authInternalprovider(provider OAuthClientProvider, options auth.AuthOptions
 	result := AuthResultRedirect
 	return &result, nil
 }
+
+func selectResourceURL(serverUrl string, provider OAuthClientProvider, resourceMetadata *auth.OAuthProtectedResourceMetadata) (*url.URL, error) {
+	defaultResource, err := utils.ResourceURLFromServerURL(serverUrl)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use custom validator if available
+	if validator, ok := provider.(OAuthResourceValidator); ok {
+		return validator.ValidateResourceURL(defaultResource, resourceMetadata)
+	}
+
+	// Include resource param only when metadata exists
+	if resourceMetadata == nil {
+		return nil, nil // No resource param needed
+	}
+
+	// Check metadata resource compatibility
+	allowed, err := utils.CheckResourceAllowed(utils.CheckResourceAllowedParams{
+		RequestedResource:  defaultResource,
+		ConfiguredResource: resourceMetadata.Resource,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate resource: %w", err)
+	}
+	if !allowed {
+		return nil, fmt.Errorf("protected resource %s does not match expected %s",
+			resourceMetadata.Resource, defaultResource.String())
+	}
+
+	// Use metadata resource - server expects this
+	return url.Parse(resourceMetadata.Resource)
+}
+
 func DiscoverOAuthProtectedResourceMetadata(serverUrl string, opts *auth.DiscoveryOptions, fetchFn auth.FetchFunc) (*auth.OAuthProtectedResourceMetadata, error) {
 	if fetchFn == nil {
 		fetchFn = func(urlStr string, req *http.Request) (*http.Response, error) {
@@ -304,7 +426,7 @@ func DiscoverOAuthProtectedResourceMetadata(serverUrl string, opts *auth.Discove
 
 func discoverMetadataWithFallback(
 	serverUrl interface{},
-	wellKnownType string, // "oauth-authorization-server" 或 "oauth-protected-resource"
+	wellKnownType string, // "oauth-authorization-server" or "oauth-protected-resource"
 	fetchFn auth.FetchFunc,
 	opts *metadataDiscoveryOptions,
 ) (*http.Response, error) {
@@ -325,7 +447,7 @@ func discoverMetadataWithFallback(
 			return nil, fmt.Errorf("invalid metadata URL: %w", err)
 		}
 	} else {
-		// 尝试路径感知发现
+		// Try path-aware discovery
 		wellKnownPath := buildWellKnownPath(wellKnownType, issuer.Path)
 		baseUrl := issuer
 		if opts != nil && opts.MetadataServerUrl != nil {
@@ -344,7 +466,7 @@ func discoverMetadataWithFallback(
 		return nil, err
 	}
 
-	// 如果路径感知发现失败且返回404，并且我们不在根路径，尝试回退到根发现
+	// If path-aware discovery fails with 404 and we're not at root, try fallback to root discovery
 	if (opts == nil || opts.MetadataUrl == nil) && shouldAttemptFallback(response, issuer.Path) {
 		rootUrl, _ := url.Parse(fmt.Sprintf("/.well-known/%s", wellKnownType))
 		rootUrl = issuer.ResolveReference(rootUrl)
@@ -367,14 +489,14 @@ func tryMetadataDiscovery(targetUrl *url.URL, protocolVersion string, fetchFn au
 	return fetchWithCorsRetry(targetUrl, req.Header, fetchFn)
 }
 
-// fetchWithCorsRetry 处理CORS重试逻辑的辅助函数
+// fetchWithCorsRetry helper function to handle CORS retry logic
 func fetchWithCorsRetry(targetUrl *url.URL, headers http.Header, fetchFn auth.FetchFunc) (*http.Response, error) {
 	req, err := http.NewRequest("GET", targetUrl.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// 复制headers
+	// Copy headers
 	for key, values := range headers {
 		for _, value := range values {
 			req.Header.Add(key, value)
@@ -383,7 +505,7 @@ func fetchWithCorsRetry(targetUrl *url.URL, headers http.Header, fetchFn auth.Fe
 
 	response, err := fetchFn(targetUrl.String(), req)
 	if err != nil {
-		// 如果是网络错误（类似TypeScript中的TypeError），尝试不带headers重试
+		// If it's a network error (similar to TypeError in TypeScript), try retry without headers
 		if isNetworkError(err) && len(headers) > 0 {
 			return fetchWithCorsRetry(targetUrl, http.Header{}, fetchFn)
 		}
@@ -396,9 +518,9 @@ func shouldAttemptFallback(response *http.Response, pathname string) bool {
 	return response == nil || (response.StatusCode == 404 && pathname != "/")
 }
 
-// buildWellKnownPath 构建well-known路径用于认证相关的元数据发现
+// buildWellKnownPath builds well-known path for authentication-related metadata discovery
 func buildWellKnownPath(wellKnownPrefix, pathname string) string {
-	// 去除pathname末尾的斜杠以避免双斜杠
+	// Remove trailing slash from pathname to avoid double slashes
 	if strings.HasSuffix(pathname, "/") {
 		pathname = strings.TrimSuffix(pathname, "/")
 	}
@@ -406,7 +528,7 @@ func buildWellKnownPath(wellKnownPrefix, pathname string) string {
 	return fmt.Sprintf("/.well-known/%s%s", wellKnownPrefix, pathname)
 }
 
-// 辅助函数
+// Helper functions
 func parseURL(u interface{}) (*url.URL, error) {
 	switch v := u.(type) {
 	case string:
@@ -432,12 +554,643 @@ func getResourceMetadataUrl(opts *auth.DiscoveryOptions) *string {
 	return nil
 }
 
-// isNetworkError 判断是否为网络错误（模拟TypeScript中的TypeError检查）
+// isNetworkError determines if it's a network error (simulating TypeError check in TypeScript)
 func isNetworkError(err error) bool {
-	// 在Go中，网络错误通常包含这些关键词
+	// In Go, network errors usually contain these keywords
 	errorStr := strings.ToLower(err.Error())
 	return strings.Contains(errorStr, "network") ||
 		strings.Contains(errorStr, "connection") ||
 		strings.Contains(errorStr, "timeout") ||
 		strings.Contains(errorStr, "refused")
+}
+func buildDiscoveryUrls(authorizationServerURL string) ([]discoveryUrl, error) {
+	parsedURL, err := url.Parse(authorizationServerURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid authorization server URL: %w", err)
+	}
+
+	hasPath := parsedURL.Path != "/" && parsedURL.Path != ""
+	var urlsToTry []discoveryUrl
+
+	if !hasPath {
+		// Root path: https://example.com/.well-known/oauth-authorization-server
+		oauthURL, _ := url.Parse(parsedURL.Scheme + "://" + parsedURL.Host + "/.well-known/oauth-authorization-server")
+		urlsToTry = append(urlsToTry, discoveryUrl{URL: oauthURL, Type: discoveryTypeOAuth})
+
+		// OIDC: https://example.com/.well-known/openid-configuration
+		oidcURL, _ := url.Parse(parsedURL.Scheme + "://" + parsedURL.Host + "/.well-known/openid-configuration")
+		urlsToTry = append(urlsToTry, discoveryUrl{URL: oidcURL, Type: discoveryTypeOIDC})
+
+		return urlsToTry, nil
+	}
+
+	// Strip trailing slash from pathname to avoid double slashes
+	pathname := parsedURL.Path
+	if strings.HasSuffix(pathname, "/") {
+		pathname = pathname[:len(pathname)-1]
+	}
+
+	// 1. OAuth metadata at the given URL
+	// Insert well-known before the path: https://example.com/.well-known/oauth-authorization-server/tenant1
+	oauthWithPath, _ := url.Parse(parsedURL.Scheme + "://" + parsedURL.Host + "/.well-known/oauth-authorization-server" + pathname)
+	urlsToTry = append(urlsToTry, discoveryUrl{URL: oauthWithPath, Type: discoveryTypeOAuth})
+
+	// Root path: https://example.com/.well-known/oauth-authorization-server
+	oauthRoot, _ := url.Parse(parsedURL.Scheme + "://" + parsedURL.Host + "/.well-known/oauth-authorization-server")
+	urlsToTry = append(urlsToTry, discoveryUrl{URL: oauthRoot, Type: discoveryTypeOAuth})
+
+	// 3. OIDC metadata endpoints
+	// RFC 8414 style: Insert /.well-known/openid-configuration before the path
+	oidcWithPath, _ := url.Parse(parsedURL.Scheme + "://" + parsedURL.Host + "/.well-known/openid-configuration" + pathname)
+	urlsToTry = append(urlsToTry, discoveryUrl{URL: oidcWithPath, Type: discoveryTypeOIDC})
+
+	// OIDC Discovery 1.0 style: Append /.well-known/openid-configuration after the path
+	oidcAfterPath, _ := url.Parse(parsedURL.Scheme + "://" + parsedURL.Host + pathname + "/.well-known/openid-configuration")
+	urlsToTry = append(urlsToTry, discoveryUrl{URL: oidcAfterPath, Type: discoveryTypeOIDC})
+
+	return urlsToTry, nil
+}
+
+// DiscoveryURL represents a metadata endpoint
+type DiscoveryURL struct {
+	URL  *url.URL
+	Type string // "oauth" or "oidc"
+}
+
+func DiscoverAuthorizationServerMetadata(ctx context.Context, authServerUrl string, options *auth.DiscoveryOptions) (auth.AuthorizationServerMetadata, error) {
+	// Build discovery URLs
+	discoveryUrls, err := buildDiscoveryUrls(authServerUrl)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create default fetch function
+	fetchFunc := func(urlStr string, req *http.Request) (*http.Response, error) {
+		return http.DefaultClient.Do(req)
+	}
+
+	// Try each discovery URL
+	for _, discoveryUrl := range discoveryUrls {
+		// Create headers
+		headers := http.Header{
+			"Accept": []string{"application/json"},
+		}
+
+		// Try to fetch metadata
+		resp, err := fetchWithCorsRetry(discoveryUrl.URL, headers, fetchFunc)
+		if err != nil {
+			if isNetworkError(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to fetch metadata from %s: %w", discoveryUrl.URL.String(), err)
+		}
+		defer resp.Body.Close()
+
+		// Check status code
+		if resp.StatusCode == 404 {
+			continue
+		}
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, discoveryUrl.URL.String())
+		}
+
+		// Read response body
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		// Parse metadata based on type
+		if discoveryUrl.Type == "oidc" {
+			// Try to parse as OpenID Connect metadata
+			var metadata auth.OpenIdProviderDiscoveryMetadata
+			if err := json.Unmarshal(body, &metadata); err != nil {
+				continue // Try next URL
+			}
+
+			// Validate required fields for OIDC
+			if metadata.Issuer == "" || metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
+				continue // Try next URL
+			}
+
+			// Check if S256 PKCE is supported for OIDC
+			supportsS256 := false
+			for _, method := range metadata.CodeChallengeMethodsSupported {
+				if method == "S256" {
+					supportsS256 = true
+					break
+				}
+			}
+			if !supportsS256 {
+				return nil, fmt.Errorf("OIDC provider does not support S256 PKCE")
+			}
+
+			return &metadata, nil
+		} else {
+			// Try to parse as OAuth 2.0 metadata
+			var metadata auth.OAuthMetadata
+			if err := json.Unmarshal(body, &metadata); err != nil {
+				continue // Try next URL
+			}
+
+			// Validate required fields for OAuth 2.0
+			if metadata.Issuer == "" || metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
+				continue // Try next URL
+			}
+
+			return &metadata, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to discover authorization server metadata from %s", authServerUrl)
+}
+func RegisterClient(
+	ctx context.Context,
+	authorizationServerUrl string,
+	options RegisterClientOptions,
+) (*auth.OAuthClientInformationFull, error) {
+	var registrationUrl *url.URL
+	var err error
+
+	// Determine registration endpoint URL
+	if options.Metadata != nil {
+		// Check if dynamic client registration is supported
+		var registrationEndpoint string
+
+		// Get registration endpoint based on metadata type
+		switch metadata := options.Metadata.(type) {
+		case *auth.OAuthMetadata:
+			if metadata.RegistrationEndpoint == nil {
+				return nil, fmt.Errorf("incompatible auth server: does not support dynamic client registration")
+			}
+			registrationEndpoint = *metadata.RegistrationEndpoint
+		case *auth.OpenIdProviderMetadata:
+			if metadata.RegistrationEndpoint == nil {
+				return nil, fmt.Errorf("incompatible auth server: does not support dynamic client registration")
+			}
+			registrationEndpoint = *metadata.RegistrationEndpoint
+		case *auth.OpenIdProviderDiscoveryMetadata:
+			if metadata.RegistrationEndpoint == nil {
+				return nil, fmt.Errorf("incompatible auth server: does not support dynamic client registration")
+			}
+			registrationEndpoint = *metadata.RegistrationEndpoint
+		default:
+			return nil, fmt.Errorf("unsupported metadata type")
+		}
+
+		registrationUrl, err = url.Parse(registrationEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("invalid registration endpoint URL: %w", err)
+		}
+	} else {
+		// Use default registration path
+		baseUrl, err := url.Parse(authorizationServerUrl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid authorization server URL: %w", err)
+		}
+		registrationUrl, err = baseUrl.Parse("/register")
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct registration URL: %w", err)
+		}
+	}
+
+	// Serialize client metadata
+	requestBody, err := json.Marshal(options.ClientMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal client metadata: %w", err)
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, "POST", registrationUrl.String(), strings.NewReader(string(requestBody)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Select fetch function
+	fetchFn := options.FetchFn
+	if fetchFn == nil {
+		fetchFn = func(url string, req *http.Request) (*http.Response, error) {
+			return http.DefaultClient.Do(req)
+		}
+	}
+
+	// Send request
+	resp, err := fetchFn(registrationUrl.String(), req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send registration request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Check response status
+	if !isSuccessStatusCode(resp.StatusCode) {
+		// Try to parse OAuth error response
+		var oauthError errors.OAuthError
+		if err := json.Unmarshal(responseBody, &oauthError); err == nil {
+			return nil, &oauthError
+		}
+		return nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	// Parse success response
+	var clientInfo auth.OAuthClientInformationFull
+	if err := json.Unmarshal(responseBody, &clientInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse registration response: %w", err)
+	}
+
+	return &clientInfo, nil
+}
+
+// isSuccessStatusCode checks if HTTP status code indicates success
+func isSuccessStatusCode(statusCode int) bool {
+	return statusCode >= 200 && statusCode < 300
+}
+func generatePKCEChallenge() (*PKCEChallenge, error) {
+	// Generate 43-128 character code_verifier (RFC 7636)
+	verifierBytes := make([]byte, 32) // 32 bytes = 43 chars in base64url
+	if _, err := rand.Read(verifierBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate code verifier: %w", err)
+	}
+
+	codeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
+
+	// Generate code_challenge using S256 method
+	hash := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
+
+	return &PKCEChallenge{
+		CodeVerifier:  codeVerifier,
+		CodeChallenge: codeChallenge,
+	}, nil
+}
+
+// startAuthorization starts OAuth 2.0 authorization flow
+// Generates PKCE challenge and builds authorization URL
+func startAuthorization(
+	authorizationServerUrl string,
+	options StartAuthorizationOptions,
+) (*StartAuthorizationResult, error) {
+	const responseType = "code"
+	const codeChallengeMethod = "S256"
+
+	var authorizationURL *url.URL
+	var err error
+
+	// Determine authorization endpoint URL
+	if options.Metadata != nil {
+		authorizationURL, err = url.Parse(options.Metadata.GetAuthorizationEndpoint())
+		if err != nil {
+			return nil, fmt.Errorf("invalid authorization endpoint: %w", err)
+		}
+
+		// Verify server supports "code" response type
+		responseTypesSupported := options.Metadata.GetResponseTypesSupported()
+		supportsCode := false
+		for _, rt := range responseTypesSupported {
+			if rt == responseType {
+				supportsCode = true
+				break
+			}
+		}
+		if !supportsCode {
+			return nil, fmt.Errorf(
+				"incompatible auth server: does not support response type %s",
+				responseType,
+			)
+		}
+
+		// Verify server supports S256 PKCE method
+		var codeChallengeMethodsSupported []string
+
+		// Check different types of metadata
+		switch metadata := options.Metadata.(type) {
+		case *auth.OAuthMetadata:
+			codeChallengeMethodsSupported = metadata.CodeChallengeMethodsSupported
+		case *auth.OpenIdProviderDiscoveryMetadata:
+			codeChallengeMethodsSupported = metadata.CodeChallengeMethodsSupported
+		}
+
+		if len(codeChallengeMethodsSupported) > 0 {
+			supportsS256 := false
+			for _, method := range codeChallengeMethodsSupported {
+				if method == codeChallengeMethod {
+					supportsS256 = true
+					break
+				}
+			}
+			if !supportsS256 {
+				return nil, fmt.Errorf(
+					"incompatible auth server: does not support code challenge method %s",
+					codeChallengeMethod,
+				)
+			}
+		}
+	} else {
+		// If no metadata, use default /authorize endpoint
+		baseURL, err := url.Parse(authorizationServerUrl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid authorization server URL: %w", err)
+		}
+		authorizationURL = baseURL.ResolveReference(&url.URL{Path: "/authorize"})
+	}
+
+	// Generate PKCE challenge
+	challenge, err := generatePKCEChallenge()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate PKCE challenge: %w", err)
+	}
+
+	// Build query parameters
+	params := url.Values{}
+	params.Set("response_type", responseType)
+	params.Set("client_id", options.ClientInformation.ClientID)
+	params.Set("redirect_uri", options.RedirectURL)
+	params.Set("code_challenge", challenge.CodeChallenge)
+	params.Set("code_challenge_method", codeChallengeMethod)
+
+	// Add optional parameters
+	if options.Scope != nil && *options.Scope != "" {
+		params.Set("scope", *options.Scope)
+
+		// OpenID Connect requirement: if scope contains 'offline_access', need to add consent prompt
+		if strings.Contains(*options.Scope, "offline_access") {
+			params.Set("prompt", "consent")
+		}
+	}
+
+	if options.State != nil && *options.State != "" {
+		params.Set("state", *options.State)
+	}
+
+	if options.Resource != nil {
+		params.Set("resource", options.Resource.String())
+	}
+
+	// Set query parameters
+	authorizationURL.RawQuery = params.Encode()
+
+	return &StartAuthorizationResult{
+		AuthorizationURL: authorizationURL,
+		CodeVerifier:     challenge.CodeVerifier,
+	}, nil
+}
+func exchangeAuthorization(
+	authorizationServerUrl string,
+	options ExchangeAuthorizationOptions,
+) (*auth.OAuthTokens, error) {
+	const grantType = "authorization_code"
+
+	// Determine token endpoint URL
+	var tokenURL *url.URL
+	var err error
+
+	if options.Metadata != nil {
+		tokenEndpoint := options.Metadata.GetTokenEndpoint()
+		if tokenEndpoint == "" {
+			return nil, fmt.Errorf("token endpoint not found in metadata")
+		}
+		tokenURL, err = url.Parse(tokenEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("invalid token endpoint: %w", err)
+		}
+
+		// Verify server supports authorization_code grant type
+		grantTypesSupported := options.Metadata.GetGrantTypesSupported()
+		if len(grantTypesSupported) > 0 {
+			supportsAuthCode := false
+			for _, gt := range grantTypesSupported {
+				if gt == grantType {
+					supportsAuthCode = true
+					break
+				}
+			}
+			if !supportsAuthCode {
+				return nil, fmt.Errorf(
+					"incompatible auth server: does not support grant type %s",
+					grantType,
+				)
+			}
+		}
+	} else {
+		// Use default /token endpoint
+		baseURL, err := url.Parse(authorizationServerUrl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid authorization server URL: %w", err)
+		}
+		tokenURL = baseURL.ResolveReference(&url.URL{Path: "/token"})
+	}
+
+	// Prepare request headers and parameters
+	headers := http.Header{
+		"Content-Type": []string{"application/x-www-form-urlencoded"},
+	}
+	params := url.Values{
+		"grant_type":    []string{grantType},
+		"code":          []string{options.AuthorizationCode},
+		"redirect_uri":  []string{options.RedirectURI},
+		"code_verifier": []string{options.CodeVerifier},
+	}
+
+	// Apply client authentication
+	if options.AddClientAuthentication != nil {
+		if err := options.AddClientAuthentication(headers, params, authorizationServerUrl); err != nil {
+			return nil, fmt.Errorf("failed to apply client authentication: %w", err)
+		}
+	} else {
+		// Determine and apply client authentication method
+		var supportedMethods []string
+		if options.Metadata != nil {
+			supportedMethods = options.Metadata.GetTokenEndpointAuthMethodsSupported()
+		}
+		authMethod := selectClientAuthMethod(*options.ClientInformation, supportedMethods)
+		if err := applyClientAuthentication(authMethod, *options.ClientInformation, headers, params); err != nil {
+			return nil, fmt.Errorf("failed to apply client authentication: %w", err)
+		}
+	}
+
+	// Add resource parameter (if provided)
+	if options.Resource != nil {
+		params.Set("resource", options.Resource.String())
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequest("POST", tokenURL.String(), strings.NewReader(params.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header = headers
+
+	// Select fetch function
+	fetchFn := options.FetchFn
+	if fetchFn == nil {
+		fetchFn = func(url string, req *http.Request) (*http.Response, error) {
+			return http.DefaultClient.Do(req)
+		}
+	}
+
+	// Send request
+	resp, err := fetchFn(tokenURL.String(), req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send token request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Check response status
+	if !isSuccessStatusCode(resp.StatusCode) {
+		// Try to parse OAuth error response
+		var oauthError errors.OAuthError
+		if err := json.Unmarshal(responseBody, &oauthError); err == nil {
+			return nil, &oauthError
+		}
+		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	// Parse success response
+	var tokens auth.OAuthTokens
+	if err := json.Unmarshal(responseBody, &tokens); err != nil {
+		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	}
+
+	return &tokens, nil
+}
+func refreshAuthorization(
+	authorizationServerUrl string,
+	options RefreshAuthorizationOptions,
+) (*auth.OAuthTokens, error) {
+	const grantType = "refresh_token"
+
+	// Determine token endpoint URL
+	var tokenURL *url.URL
+	var err error
+
+	if options.Metadata != nil {
+		tokenEndpoint := options.Metadata.GetTokenEndpoint()
+		if tokenEndpoint == "" {
+			return nil, fmt.Errorf("token endpoint not found in metadata")
+		}
+		tokenURL, err = url.Parse(tokenEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("invalid token endpoint: %w", err)
+		}
+
+		// Verify server supports refresh_token grant type
+		grantTypesSupported := options.Metadata.GetGrantTypesSupported()
+		if len(grantTypesSupported) > 0 {
+			supportsRefreshToken := false
+			for _, gt := range grantTypesSupported {
+				if gt == grantType {
+					supportsRefreshToken = true
+					break
+				}
+			}
+			if !supportsRefreshToken {
+				return nil, fmt.Errorf(
+					"incompatible auth server: does not support grant type %s",
+					grantType,
+				)
+			}
+		}
+	} else {
+		// Use default /token endpoint
+		baseURL, err := url.Parse(authorizationServerUrl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid authorization server URL: %w", err)
+		}
+		tokenURL = baseURL.ResolveReference(&url.URL{Path: "/token"})
+	}
+
+	// Prepare request headers and parameters
+	headers := http.Header{
+		"Content-Type": []string{"application/x-www-form-urlencoded"},
+	}
+	params := url.Values{
+		"grant_type":    []string{grantType},
+		"refresh_token": []string{options.RefreshToken},
+	}
+
+	// Apply client authentication
+	if options.AddClientAuthentication != nil {
+		if err := options.AddClientAuthentication(headers, params, authorizationServerUrl); err != nil {
+			return nil, fmt.Errorf("failed to apply client authentication: %w", err)
+		}
+	} else {
+		// Determine and apply client authentication method
+		var supportedMethods []string
+		if options.Metadata != nil {
+			supportedMethods = options.Metadata.GetTokenEndpointAuthMethodsSupported()
+		}
+		authMethod := selectClientAuthMethod(*options.ClientInformation, supportedMethods)
+		if err := applyClientAuthentication(authMethod, *options.ClientInformation, headers, params); err != nil {
+			return nil, fmt.Errorf("failed to apply client authentication: %w", err)
+		}
+	}
+
+	// Add resource parameter (if provided)
+	if options.Resource != nil {
+		params.Set("resource", options.Resource.String())
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequest("POST", tokenURL.String(), strings.NewReader(params.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header = headers
+
+	// Select fetch function
+	fetchFn := options.FetchFn
+	if fetchFn == nil {
+		fetchFn = func(url string, req *http.Request) (*http.Response, error) {
+			return http.DefaultClient.Do(req)
+		}
+	}
+
+	// Send request
+	resp, err := fetchFn(tokenURL.String(), req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send refresh request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Check response status
+	if !isSuccessStatusCode(resp.StatusCode) {
+		// Try to parse OAuth error response
+		var oauthError errors.OAuthError
+		if err := json.Unmarshal(responseBody, &oauthError); err == nil {
+			return nil, &oauthError
+		}
+		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	// Parse success response
+	var tokens auth.OAuthTokens
+	if err := json.Unmarshal(responseBody, &tokens); err != nil {
+		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	}
+
+	// If response doesn't contain new refresh token, keep the original one
+	if tokens.RefreshToken == nil || *tokens.RefreshToken == "" {
+		tokens.RefreshToken = &options.RefreshToken
+	}
+
+	return &tokens, nil
 }

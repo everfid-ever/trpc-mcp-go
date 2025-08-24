@@ -86,7 +86,8 @@ func (p *InMemoryOAuthClientProvider) SaveCodeVerifier(codeVerifier string) {
 
 // 可选方法的默认实现
 func (p *InMemoryOAuthClientProvider) State() (string, error) {
-	// 返回空字符串表示不使用 state
+	// Default implementation: no state parameter generated
+	// For state validation, implement a custom OAuthStateProvider
 	return "", nil
 }
 
