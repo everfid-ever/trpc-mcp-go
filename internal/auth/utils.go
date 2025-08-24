@@ -1,3 +1,9 @@
+// Tencent is pleased to support the open source community by making trpc-mcp-go available.
+//
+// Copyright (C) 2025 Tencent.  All rights reserved.
+//
+// trpc-mcp-go is licensed under the Apache License Version 2.0.
+
 package auth
 
 import (
@@ -9,8 +15,6 @@ import (
 // Utilities for handling OAuth resource URIs.
 
 // ResourceURLFromServerURL converts a server URL to a resource URL by removing the fragment.
-// RFC 8707 section 2 states that resource URIs "MUST NOT include a fragment component".
-// Keeps everything else unchanged (scheme, domain, port, path, query).
 func ResourceURLFromServerURL(u interface{}) (*url.URL, error) {
 	var resourceURL *url.URL
 	var err error
@@ -42,14 +46,6 @@ type CheckResourceAllowedParams struct {
 }
 
 // CheckResourceAllowed checks if a requested resource URL matches a configured resource URL.
-// A requested resource matches if it has the same scheme, domain, port,
-// and its path starts with the configured resource's path.
-//
-// Parameters:
-//   - params.RequestedResource: The resource URL being requested
-//   - params.ConfiguredResource: The resource URL that has been configured
-//
-// Returns true if the requested resource matches the configured resource, false otherwise
 func CheckResourceAllowed(params CheckResourceAllowedParams) (bool, error) {
 	requested, err := parseURL(params.RequestedResource)
 	if err != nil {
@@ -72,12 +68,6 @@ func CheckResourceAllowed(params CheckResourceAllowedParams) (bool, error) {
 		return false, nil
 	}
 
-	// Check if the requested path starts with the configured path
-	// Ensure both paths end with / for proper comparison
-	// This ensures that if we have paths like "/api" and "/api/users",
-	// we properly detect that "/api/users" is a subpath of "/api"
-	// By adding a trailing slash if missing, we avoid false positives
-	// where paths like "/api123" would incorrectly match "/api"
 	requestedPath := requested.Path
 	if !strings.HasSuffix(requestedPath, "/") {
 		requestedPath = requestedPath + "/"
