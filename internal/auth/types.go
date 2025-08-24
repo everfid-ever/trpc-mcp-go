@@ -119,6 +119,14 @@ type AuthorizationServerMetadata interface {
 	// GetResponseTypesSupported 返回服务器支持的响应类型。
 	// Returns the response types supported by the server.
 	GetResponseTypesSupported() []string
+
+	// GetGrantTypesSupported 返回服务器支持的授权类型。
+	// Returns the grant types supported by the server.
+	GetGrantTypesSupported() []string
+
+	// GetTokenEndpointAuthMethodsSupported 返回令牌端点支持的客户端认证方法。
+	// Returns the client authentication methods supported by the token endpoint.
+	GetTokenEndpointAuthMethodsSupported() []string
 }
 
 // OAuthMetadata 定义OAuth 2.0授权服务器元数据，符合RFC 8414。
@@ -157,6 +165,14 @@ func (m OAuthMetadata) GetTokenEndpoint() string {
 
 func (m OAuthMetadata) GetResponseTypesSupported() []string {
 	return m.ResponseTypesSupported
+}
+
+func (m OAuthMetadata) GetGrantTypesSupported() []string {
+	return m.GrantTypesSupported
+}
+
+func (m OAuthMetadata) GetTokenEndpointAuthMethodsSupported() []string {
+	return m.TokenEndpointAuthMethodsSupported
 }
 
 // OpenIdProviderMetadata 定义OpenID Connect Discovery 1.0提供者元数据。
@@ -214,6 +230,14 @@ func (m OpenIdProviderMetadata) GetResponseTypesSupported() []string {
 	return m.ResponseTypesSupported
 }
 
+func (m OpenIdProviderMetadata) GetGrantTypesSupported() []string {
+	return m.GrantTypesSupported
+}
+
+func (m OpenIdProviderMetadata) GetTokenEndpointAuthMethodsSupported() []string {
+	return m.TokenEndpointAuthMethodsSupported
+}
+
 // OpenIdProviderDiscoveryMetadata 定义OpenID Connect发现元数据，合并OAuth 2.0字段。
 type OpenIdProviderDiscoveryMetadata struct {
 	OpenIdProviderMetadata                 // 嵌入OpenID Connect元数据
@@ -234,6 +258,14 @@ func (m OpenIdProviderDiscoveryMetadata) GetTokenEndpoint() string {
 
 func (m OpenIdProviderDiscoveryMetadata) GetResponseTypesSupported() []string {
 	return m.OpenIdProviderMetadata.ResponseTypesSupported
+}
+
+func (m OpenIdProviderDiscoveryMetadata) GetGrantTypesSupported() []string {
+	return m.OpenIdProviderMetadata.GrantTypesSupported
+}
+
+func (m OpenIdProviderDiscoveryMetadata) GetTokenEndpointAuthMethodsSupported() []string {
+	return m.OpenIdProviderMetadata.TokenEndpointAuthMethodsSupported
 }
 
 type FetchFunc func(url string, req *http.Request) (*http.Response, error)
