@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/time/rate"
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
@@ -89,7 +90,44 @@ func (rw *responseWriterWithStatus) WriteHeader(code int) {
 
 type OnDecision func(Decision)
 
-func AllowedMethods(methods []string, onDecision OnDecision) func(http.Handler) http.Handler {
+//	func AllowedMethods(methods []string, onDecision OnDecision) func(http.Handler) http.Handler {
+//		return func(next http.Handler) http.Handler {
+//			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//				for _, method := range methods {
+//					if r.Method == method {
+//						next.ServeHTTP(w, r)
+//						return
+//					}
+//				}
+//
+//				w.Header().Set("Allow", strings.Join(methods, ", "))
+//				w.Header().Set("Content-Type", "application/json")
+//				w.WriteHeader(http.StatusMethodNotAllowed)
+//
+//				// 创建OAuth错误
+//				oauthErr := errors.NewOAuthError(
+//					errors.ErrMethodNotAllowed,
+//					fmt.Sprintf("HTTP method %s not allowed", r.Method),
+//					"", // 可选的错误URI
+//				)
+//
+//				// 转换为响应结构并编码
+//				_ = json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
+//
+//				if onDecision != nil {
+//					onDecision(Decision{
+//						Allowed:   false,
+//						Reason:    "method not allowed",
+//						Resource:  r.URL.Path,
+//						Action:    r.Method,
+//						TraceID:   r.Header.Get("X-Request-ID"),
+//						Timestamp: time.Now(),
+//					})
+//				}
+//			})
+//		}
+//	}
+func AllowedMethods(methods []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			for _, method := range methods {
@@ -106,27 +144,15 @@ func AllowedMethods(methods []string, onDecision OnDecision) func(http.Handler) 
 			// 创建OAuth错误
 			oauthErr := errors.NewOAuthError(
 				errors.ErrMethodNotAllowed,
-				fmt.Sprintf("HTTP method %s not allowed", r.Method),
+				fmt.Sprintf("The method %s is not allowed for this endpoint", r.Method),
 				"", // 可选的错误URI
 			)
 
 			// 转换为响应结构并编码
-			json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
-
-			if onDecision != nil {
-				onDecision(Decision{
-					Allowed:   false,
-					Reason:    "method not allowed",
-					Resource:  r.URL.Path,
-					Action:    r.Method,
-					TraceID:   r.Header.Get("X-Request-ID"),
-					Timestamp: time.Now(),
-				})
-			}
+			_ = json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
 		})
 	}
 }
-
 func CorsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 获取请求的 Origin
