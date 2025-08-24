@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/pkce"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/pkce"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
