@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
