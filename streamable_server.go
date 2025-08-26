@@ -125,7 +125,8 @@ func NewAuthHTTPContextFunc(verifier server.TokenVerifier, cfg ServerAuthConfig)
 
 		// Check scope
 		if len(cfg.RequiredScopes) > 0 && !hasAll(info.Scopes, cfg.RequiredScopes) {
-			return server.WithAuthErr(ctx, oauthErrors.ErrInsufficientScope)
+			ctx = server.WithAuthErr(ctx, oauthErrors.ErrInsufficientScope)
+			return server.WithRequiredScope(ctx, strings.Join(cfg.RequiredScopes, " "))
 		}
 
 		//  Check Audience/Resource
@@ -287,18 +288,26 @@ func (h *httpServerHandler) handlePost(ctx context.Context, w http.ResponseWrite
 		enrichedCtx = fn(enrichedCtx, r)
 	}
 
-	// If there is an authentication error in the context,
-	// it is mapped to the HTTP status code and Bearer error code and a challenge response is returned.
+	// Authentication error: write challenge header and return
 	if err := server.GetAuthErr(enrichedCtx); err != nil {
 		status, code, desc := server.DetermineAuthError(err)
-		server.WriteAuthChallenge(w, status, code, desc, "")
+		if scope, ok := server.GetRequiredScope(enrichedCtx); ok {
+			server.WriteAuthChallenge(w, status, code, desc, scope)
+		} else {
+			server.WriteAuthChallenge(w, status, code, desc, "")
+		}
 		return
 	}
 
-	// If there is no error but no AuthInfo, return invalid_token as a fallback.
+	// No error, but no AuthInfo either: returns 401 + invalid_token as per RFC
 	if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
-		status, code, desc := server.DetermineAuthError(oauthErrors.ErrInvalidToken)
-		server.WriteAuthChallenge(w, status, code, desc, "")
+		server.WriteAuthChallenge(
+			w,
+			http.StatusUnauthorized,
+			"invalid_token",
+			"The access token is invalid or expired",
+			"",
+		)
 		return
 	}
 
@@ -630,18 +639,26 @@ func (h *httpServerHandler) handleGet(ctx context.Context, w http.ResponseWriter
 		enrichedCtx = fn(enrichedCtx, r)
 	}
 
-	// If there is an authentication error in the context,
-	// it is mapped to the HTTP status code and Bearer error code and a challenge response is returned.
+	// Authentication error: write challenge header and return
 	if err := server.GetAuthErr(enrichedCtx); err != nil {
 		status, code, desc := server.DetermineAuthError(err)
-		server.WriteAuthChallenge(w, status, code, desc, "")
+		if scope, ok := server.GetRequiredScope(enrichedCtx); ok {
+			server.WriteAuthChallenge(w, status, code, desc, scope)
+		} else {
+			server.WriteAuthChallenge(w, status, code, desc, "")
+		}
 		return
 	}
 
-	// If there is no error but no AuthInfo, return invalid_token as a fallback.
+	// No error, but no AuthInfo either: returns 401 + invalid_token as per RFC
 	if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
-		status, code, desc := server.DetermineAuthError(oauthErrors.ErrInvalidToken)
-		server.WriteAuthChallenge(w, status, code, desc, "")
+		server.WriteAuthChallenge(
+			w,
+			http.StatusUnauthorized,
+			"invalid_token",
+			"The access token is invalid or expired",
+			"",
+		)
 		return
 	}
 

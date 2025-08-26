@@ -10,10 +10,12 @@ import (
 )
 
 type ctxKey int
+type ctxKeyScope int
 
 const (
 	ctxKeyAuthInfo ctxKey = iota
 	ctxKeyAuthErr
+	ctxKeyRequiredScope ctxKeyScope = 1
 )
 
 // WithAuthInfo 将鉴权信息写入 context
@@ -81,4 +83,16 @@ func DetermineAuthError(err error) (int, string, string) {
 		// 兜底仍可保留字符串判断或直接归为 invalid_token
 		return http.StatusUnauthorized, "invalid_token", "Token verification failed"
 	}
+}
+
+func WithRequiredScope(ctx context.Context, scope string) context.Context {
+	if scope == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyRequiredScope, scope)
+}
+func GetRequiredScope(ctx context.Context) (string, bool) {
+	v := ctx.Value(ctxKeyRequiredScope)
+	s, ok := v.(string)
+	return s, ok && s != ""
 }
