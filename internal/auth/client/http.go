@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -48,18 +47,6 @@ func WithAuthErr(ctx context.Context, err error) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, ctxKeyClientAuthErr, err)
-}
-
-// GetAuthErr 读取认证错误
-func GetAuthErr(ctx context.Context) error {
-	v := ctx.Value(ctxKeyClientAuthErr)
-	if v == nil {
-		return nil
-	}
-	if err, ok := v.(error); ok {
-		return err
-	}
-	return errors.New("client auth error")
 }
 
 // ConvertTokensToAuthInfo 转换token为认证信息
