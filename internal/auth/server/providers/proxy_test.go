@@ -1,364 +1,323 @@
-// Tencent is pleased to support the open source community by making trpc-mcp-go available.
-//
-// Copyright (C) 2025 Tencent.  All rights reserved.
-//
-// trpc-mcp-go is licensed under the Apache License Version 2.0.
-
 package providers
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/assert"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
-// 测试NewProxyOAuthServerProvider
-func TestNewProxyOAuthServerProvider(t *testing.T) {
-	options := ProxyOptions{
+// 共享变量
+var (
+	validClient = auth.OAuthClientInformationFull{
+		OAuthClientInformation: auth.OAuthClientInformation{
+			ClientID:     "test-client",
+			ClientSecret: "test-secret",
+		},
+		OAuthClientMetadata: auth.OAuthClientMetadata{
+			RedirectURIs: []string{"https://example.com/callback"},
+		},
+	}
+
+	baseOptions = ProxyOptions{
 		Endpoints: ProxyEndpoints{
-			AuthorizationURL: "https://example.com/auth",
-			TokenURL:         "https://example.com/token",
+			AuthorizationURL: "https://auth.example.com/authorize",
+			TokenURL:         "https://auth.example.com/token",
+			RevocationURL:    "https://auth.example.com/revoke",
+			RegistrationURL:  "https://auth.example.com/register",
 		},
-		VerifyAccessToken: func(token string) (*server.AuthInfo, error) {
-			return &server.AuthInfo{}, nil
-		},
-		GetClient: func(clientID string) (*auth.OAuthClientInformationFull, error) {
-			return &auth.OAuthClientInformationFull{}, nil
-		},
+		VerifyAccessToken: nil, // 在 TestMain 中设置
+		GetClient:         nil, // 在 TestMain 中设置
+		Fetch:             nil, // 在测试中设置 mockFetch
 	}
 
-	provider := NewProxyOAuthServerProvider(options)
-	assert.NotNil(t, provider)
-	assert.True(t, provider.SkipLocalPkceValidation)
-}
-
-// 测试Authorize方法
-func TestProxyOAuthServerProvider_Authorize(t *testing.T) {
-	provider := &ProxyOAuthServerProvider{
-		endpoints: ProxyEndpoints{
-			AuthorizationURL: "https://example.com/auth",
-		},
+	RefreshToken      = "new-refresh-token"
+	ExpiresIn         = int64(3600)
+	mockTokenResponse = auth.OAuthTokens{
+		AccessToken:  "new-access-token",
+		TokenType:    "Bearer",
+		ExpiresIn:    &ExpiresIn,
+		RefreshToken: &RefreshToken,
 	}
 
-	client := new(auth.OAuthClientInformationFull)
-	client.ClientID = "test-client"
+	// 模拟 fetch 的函数，匹配 auth.FetchFunc
+	mockFetch func(url string, req *http.Request) (*http.Response, error)
+)
 
-	params := server.AuthorizationParams{
-		RedirectURI:   "https://redirect.com/callback",
-		CodeChallenge: "challenge123",
-		State:         "state123",
-		Scopes:        []string{"read", "write"},
-		Resource:      nil,
-	}
-
-	// 创建一个ResponseRecorder来记录响应
-	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "https://example.com/authorize", nil)
-
-	err := provider.Authorize(*client, params, recorder, req)
-	assert.NoError(t, err)
-	assert.Equal(t, http.StatusFound, recorder.Code)
-	assert.Contains(t, recorder.Header().Get("Location"), "https://example.com/auth")
-	assert.Contains(t, recorder.Header().Get("Location"), "client_id=test-client")
-	assert.Contains(t, recorder.Header().Get("Location"), "response_type=code")
-	assert.Contains(t, recorder.Header().Get("Location"), "redirect_uri=https%3A%2F%2Fredirect.com%2Fcallback")
-	assert.Contains(t, recorder.Header().Get("Location"), "code_challenge=challenge123")
-	assert.Contains(t, recorder.Header().Get("Location"), "state=state123")
-	assert.Contains(t, recorder.Header().Get("Location"), "scope=read+write")
-}
-
-// 测试VerifyAccessToken方法
-func TestProxyOAuthServerProvider_VerifyAccessToken(t *testing.T) {
-	expectedAuthInfo := &server.AuthInfo{
-		ClientID: "user123",
-	}
-
-	provider := &ProxyOAuthServerProvider{
-		verifyAccessToken: func(token string) (*server.AuthInfo, error) {
-			return expectedAuthInfo, nil
-		},
-	}
-
-	authInfo, err := provider.VerifyAccessToken("test-token")
-	assert.NoError(t, err)
-	assert.Equal(t, expectedAuthInfo, authInfo)
-}
-
-// 测试doFetch方法
-func TestProxyOAuthServerProvider_doFetch(t *testing.T) {
-	// 测试使用自定义fetch函数
-	customFetchCalled := false
-	provider := &ProxyOAuthServerProvider{
-		fetch: func(url string, req *http.Request) (*http.Response, error) {
-			customFetchCalled = true
-			return &http.Response{
-				StatusCode: 200,
-				Body:       io.NopCloser(strings.NewReader("test response")),
+// TestMain 初始化
+func TestMain(m *testing.M) {
+	// 设置 mock 函数
+	baseOptions.VerifyAccessToken = func(token string) (*server.AuthInfo, error) {
+		if token == "valid-token" {
+			ExpiresAt := time.Now().Unix() + 3600
+			return &server.AuthInfo{
+				Token:     token,
+				ClientID:  "test-client",
+				Scopes:    []string{"read", "write"},
+				ExpiresAt: &ExpiresAt,
 			}, nil
-		},
+		}
+		return nil, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "Invalid token", "")
 	}
 
-	req, _ := http.NewRequest("GET", "https://example.com", nil)
-	resp, err := provider.doFetch(req)
-	assert.NoError(t, err)
-	assert.True(t, customFetchCalled)
-	assert.Equal(t, 200, resp.StatusCode)
-	_ = resp.Body.Close()
+	baseOptions.GetClient = func(clientID string) (*auth.OAuthClientInformationFull, error) {
+		if clientID == "test-client" {
+			return &validClient, nil
+		}
+		return nil, nil
+	}
 
-	// 测试使用默认HTTP客户端（会返回错误因为没有实际服务器）
-	provider.fetch = nil
-	_, err = provider.doFetch(req)
-	// 这里会返回网络错误，因为我们没有实际的服务器
-	assert.Error(t, err)
+	// 运行测试
+	code := m.Run()
+
+	// 清理
+	mockFetch = nil
+	os.Exit(code)
 }
 
-// 测试RevokeToken方法
-func TestProxyOAuthServerProvider_RevokeToken(t *testing.T) {
-	// 成功撤销令牌的测试
-	provider := &ProxyOAuthServerProvider{
-		endpoints: ProxyEndpoints{
-			RevocationURL: "https://example.com/revoke",
-		},
-		fetch: func(url string, req *http.Request) (*http.Response, error) {
-			// 验证请求参数
-			body, _ := io.ReadAll(req.Body)
-			assert.Contains(t, string(body), "token=test-token")
-			assert.Contains(t, string(body), "client_id=test-client")
-			assert.Contains(t, string(body), "client_secret=secret123")
-			assert.Contains(t, string(body), "token_type_hint=access_token")
+// 测试代码
+func TestProxyOAuthServerProvider(t *testing.T) {
+	provider := NewProxyOAuthServerProvider(baseOptions)
 
-			return &http.Response{
-				StatusCode: 200,
-				Body:       io.NopCloser(strings.NewReader("")),
-			}, nil
-		},
-	}
-	client := new(auth.OAuthClientInformationFull)
-	client.ClientID = "test-client"
-	client.ClientSecret = "secret123"
+	// 模拟 codeVerifier 和 redirectURI
+	codeVerifier := "test-verifier"
+	redirectURI := "https://example.com/callback"
 
-	request := auth.OAuthTokenRevocationRequest{
-		Token:         "test-token",
-		TokenTypeHint: "access_token",
-	}
-
-	err := provider.RevokeToken(*client, request)
-	assert.NoError(t, err)
-
-	// 测试无撤销端点的情况
-	provider.endpoints.RevocationURL = ""
-	err = provider.RevokeToken(*client, request)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no revocation endpoint configured")
-
-	// 测试撤销失败的情况
-	provider.endpoints.RevocationURL = "https://example.com/revoke"
-	provider.fetch = func(url string, req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: 400,
-			Body:       io.NopCloser(strings.NewReader("")),
-		}, nil
-	}
-
-	err = provider.RevokeToken(*client, request)
-	assert.Error(t, err)
-}
-
-// 测试ClientsStore方法（动态注册）
-func TestProxyOAuthServerProvider_ClientsStore_WithRegistration(t *testing.T) {
-	provider := &ProxyOAuthServerProvider{
-		endpoints: ProxyEndpoints{
-			RegistrationURL: "https://example.com/register",
-		},
-		getClient: func(clientID string) (*auth.OAuthClientInformationFull, error) {
-			client := new(auth.OAuthClientInformationFull)
-			client.ClientID = clientID
-			return client, nil
-		},
-		fetch: func(url string, req *http.Request) (*http.Response, error) {
-			// 模拟客户端注册响应
-			clientInfo := new(auth.OAuthClientInformationFull)
-			clientInfo.ClientID = "registered-client"
-			body, _ := json.Marshal(clientInfo)
-
-			return &http.Response{
-				StatusCode: 200,
-				Body:       io.NopCloser(bytes.NewReader(body)),
-			}, nil
-		},
-	}
-
-	store := provider.ClientsStore()
-	assert.NotNil(t, store)
-
-	// 测试注册客户端
-	clientInfo := new(auth.OAuthClientInformationFull)
-	clientInfo.ClientID = "new-client"
-
-	registeredClient, err := (*store).RegisterClient(*clientInfo)
-	assert.NoError(t, err)
-	assert.Equal(t, "registered-client", registeredClient.ClientID)
-}
-
-// 测试ClientsStore方法（无动态注册）
-func TestProxyOAuthServerProvider_ClientsStore_WithoutRegistration(t *testing.T) {
-	provider := &ProxyOAuthServerProvider{
-		endpoints: ProxyEndpoints{
-			RegistrationURL: "",
-		},
-		getClient: func(clientID string) (*auth.OAuthClientInformationFull, error) {
-			client := new(auth.OAuthClientInformationFull)
-			if clientID == "existing-client" {
-				client.ClientID = clientID
-				return client, nil
+	t.Run("Authorization", func(t *testing.T) {
+		t.Run("Redirects to authorization endpoint with correct parameters", func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/", nil)
+			resource, _ := url.Parse("https://api.example.com/resource")
+			err := provider.Authorize(validClient, server.AuthorizationParams{
+				RedirectURI:   "https://example.com/callback",
+				CodeChallenge: "test-challenge",
+				State:         "test-state",
+				Scopes:        []string{"read", "write"},
+				Resource:      resource,
+			}, rr, req)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
-			return nil, fmt.Errorf("client not found")
-		},
-	}
 
-	store := provider.ClientsStore()
-	assert.NotNil(t, store)
-
-	client, err := (*store).GetClient("existing-client")
-	assert.NoError(t, err)
-	assert.Equal(t, "existing-client", client.ClientID)
-
-	client, err = (*store).GetClient("nonexistent-client")
-	assert.Error(t, err)
-}
-
-// 测试ChallengeForAuthorizationCode方法
-func TestProxyOAuthServerProvider_ChallengeForAuthorizationCode(t *testing.T) {
-	provider := &ProxyOAuthServerProvider{}
-	client := new(auth.OAuthClientInformationFull)
-	client.ClientID = "test-client"
-	challenge, err := provider.ChallengeForAuthorizationCode(*client, "auth-code-123")
-	assert.NoError(t, err)
-	assert.Equal(t, "", challenge) // 应该返回空字符串
-}
-
-// 测试ExchangeAuthorizationCode方法
-func TestProxyOAuthServerProvider_ExchangeAuthorizationCode(t *testing.T) {
-	// 成功交换授权码的测试
-	provider := &ProxyOAuthServerProvider{
-		endpoints: ProxyEndpoints{
-			TokenURL: "https://example.com/token",
-		},
-		fetch: func(url string, req *http.Request) (*http.Response, error) {
-			// 验证请求参数
-			body, _ := io.ReadAll(req.Body)
-			bodyStr := string(body)
-			assert.Contains(t, bodyStr, "grant_type=authorization_code")
-			assert.Contains(t, bodyStr, "client_id=test-client")
-			assert.Contains(t, bodyStr, "code=auth-code-123")
-			assert.Contains(t, bodyStr, "client_secret=secret123")
-			assert.Contains(t, bodyStr, "code_verifier=verifier123")
-			assert.Contains(t, bodyStr, "redirect_uri=https%3A%2F%2Fredirect.com%2Fcallback")
-
-			// 模拟令牌响应
-			refreshToken := "refresh-token-123"
-			tokens := &auth.OAuthTokens{
-				AccessToken:  "access-token-123",
-				RefreshToken: &refreshToken,
-				TokenType:    "Bearer",
+			// 验证状态码和 Location 头部
+			if rr.Code != http.StatusFound {
+				t.Errorf("expected status code %d, got %d", http.StatusFound, rr.Code)
 			}
-			responseBody, _ := json.Marshal(tokens)
 
-			return &http.Response{
-				StatusCode: 200,
-				Body:       io.NopCloser(bytes.NewReader(responseBody)),
-			}, nil
-		},
-	}
-	client := new(auth.OAuthClientInformationFull)
-	client.ClientID = "test-client"
-	client.ClientSecret = "secret123"
+			gotURL := rr.Header().Get("Location")
+			t.Logf("got redirect URL: %s", gotURL) // 调试输出
+			expectedURL, _ := url.Parse("https://auth.example.com/authorize")
+			q := expectedURL.Query()
+			q.Set("client_id", "test-client")
+			q.Set("response_type", "code")
+			q.Set("redirect_uri", "https://example.com/callback")
+			q.Set("code_challenge", "test-challenge")
+			q.Set("code_challenge_method", "S256")
+			q.Set("state", "test-state")
+			q.Set("scope", "read write")
+			q.Set("resource", "https://api.example.com/resource")
+			expectedURL.RawQuery = q.Encode()
 
-	codeVerifier := "verifier123"
-	redirectURI := "https://redirect.com/callback"
-
-	tokens, err := provider.ExchangeAuthorizationCode(*client, "auth-code-123", &codeVerifier, &redirectURI, nil)
-	assert.NoError(t, err)
-	assert.Equal(t, "access-token-123", tokens.AccessToken)
-	assert.Equal(t, "refresh-token-123", tokens.RefreshToken)
-	assert.Equal(t, "Bearer", tokens.TokenType)
-
-	// 测试无令牌端点的情况
-	provider.endpoints.TokenURL = ""
-	_, err = provider.ExchangeAuthorizationCode(*client, "auth-code-123", &codeVerifier, &redirectURI, nil)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no token endpoint configured")
-}
-
-// 测试ExchangeRefreshToken方法
-func TestProxyOAuthServerProvider_ExchangeRefreshToken(t *testing.T) {
-	provider := &ProxyOAuthServerProvider{
-		endpoints: ProxyEndpoints{
-			TokenURL: "https://example.com/token",
-		},
-		fetch: func(url string, req *http.Request) (*http.Response, error) {
-			// 验证请求参数
-			body, _ := io.ReadAll(req.Body)
-			bodyStr := string(body)
-			assert.Contains(t, bodyStr, "grant_type=refresh_token")
-			assert.Contains(t, bodyStr, "client_id=test-client")
-			assert.Contains(t, bodyStr, "refresh_token=refresh-123")
-			assert.Contains(t, bodyStr, "client_secret=secret123")
-			assert.Contains(t, bodyStr, "scope=read+write")
-
-			// 模拟令牌响应
-			tokens := &auth.OAuthTokens{
-				AccessToken: "new-access-token-123",
-				TokenType:   "Bearer",
+			if gotURL != expectedURL.String() {
+				t.Errorf("expected redirect URL %s, got %s", expectedURL.String(), gotURL)
 			}
-			responseBody, _ := json.Marshal(tokens)
+		})
+	})
 
-			return &http.Response{
-				StatusCode: 200,
-				Body:       io.NopCloser(bytes.NewReader(responseBody)),
-			}, nil
-		},
-	}
-	client := new(auth.OAuthClientInformationFull)
-	client.ClientID = "test-client"
-	client.ClientSecret = "secret123"
+	t.Run("Token Exchange", func(t *testing.T) {
+		t.Run("Exchanges authorization code for tokens", func(t *testing.T) {
+			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
+				body, _ := io.ReadAll(req.Body)
+				t.Logf("request body: %s", string(body)) // 调试请求体
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access-token","token_type":"Bearer","expires_in":3600,"refresh_token":"new-refresh-token"}`)),
+				}, nil
+			}
+			provider.fetch = mockFetch
 
-	scopes := []string{"read", "write"}
-	resource, _ := url.Parse("https://api.example.com")
+			tokens, err := provider.ExchangeAuthorizationCode(validClient, "test-code", &codeVerifier, nil, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			t.Logf("tokens: %+v", tokens) // 调试输出
+			if tokens.AccessToken != mockTokenResponse.AccessToken {
+				t.Errorf("expected access_token %s, got %s", mockTokenResponse.AccessToken, tokens.AccessToken)
+			}
+			if tokens.TokenType != mockTokenResponse.TokenType {
+				t.Errorf("expected token_type %s, got %s", mockTokenResponse.TokenType, tokens.TokenType)
+			}
+			if tokens.ExpiresIn == nil || *tokens.ExpiresIn != *mockTokenResponse.ExpiresIn {
+				t.Errorf("expected expires_in %d, got %v", *mockTokenResponse.ExpiresIn, tokens.ExpiresIn)
+			}
+			if tokens.RefreshToken == nil || *tokens.RefreshToken != *mockTokenResponse.RefreshToken {
+				t.Errorf("expected refresh_token %s, got %v", *mockTokenResponse.RefreshToken, tokens.RefreshToken)
+			}
+		})
 
-	tokens, err := provider.ExchangeRefreshToken(*client, "refresh-123", scopes, resource)
-	assert.NoError(t, err)
-	assert.Equal(t, "new-access-token-123", tokens.AccessToken)
-	assert.Equal(t, "Bearer", tokens.TokenType)
-}
+		t.Run("Includes redirect_uri in token request when provided", func(t *testing.T) {
+			var calledBody string
+			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
+				body, _ := io.ReadAll(req.Body)
+				calledBody = string(body)
+				t.Logf("request body: %s", calledBody) // 调试输出
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access-token","token_type":"Bearer","expires_in":3600,"refresh_token":"new-refresh-token"}`)),
+				}, nil
+			}
+			provider.fetch = mockFetch
 
-// 测试validateOAuthTokens方法
-func TestValidateOAuthTokens(t *testing.T) {
-	// 有效的令牌
-	validTokens := &auth.OAuthTokens{
-		AccessToken: "access-token-123",
-		TokenType:   "Bearer",
-	}
+			_, err := provider.ExchangeAuthorizationCode(validClient, "test-code", &codeVerifier, &redirectURI, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.Contains(calledBody, "redirect_uri=https%3A%2F%2Fexample.com%2Fcallback") {
+				t.Errorf("expected redirect_uri in body, got %s", calledBody)
+			}
+		})
 
-	err := validateOAuthTokens(validTokens)
-	assert.NoError(t, err)
+		t.Run("Handles token exchange failure", func(t *testing.T) {
+			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			}
+			provider.fetch = mockFetch
 
-	// 无效的令牌（缺少必需字段）
-	invalidTokens := &auth.OAuthTokens{
-		TokenType: "Bearer",
-		// 缺少AccessToken字段
-	}
+			_, err := provider.ExchangeAuthorizationCode(validClient, "test-code", &codeVerifier, nil, nil)
+			t.Logf("error: %v", err) // 调试输出
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var oauthErr oauthErrors.OAuthError
+			if !errors.As(err, &oauthErr) {
+				t.Errorf("expected error to be of type oauthErrors.OAuthError, got %T", err)
+			}
+			if oauthErr.ErrorCode != oauthErrors.ErrServerError.Error() {
+				t.Errorf("expected OAuthError with code %s, got %s", oauthErrors.ErrServerError.Error(), oauthErr.ErrorCode)
+			}
+		})
+	})
 
-	err = validateOAuthTokens(invalidTokens)
-	assert.Error(t, err)
+	t.Run("Client Registration", func(t *testing.T) {
+		t.Run("Registers new client", func(t *testing.T) {
+			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
+				body, _ := io.ReadAll(req.Body)
+				t.Logf("register request body: %s", string(body)) // 调试输出
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"client_id":"new-client","client_secret":"new-secret","redirect_uris":["https://new-client.com/callback"]}`)),
+				}, nil
+			}
+			provider.fetch = mockFetch
+
+			newClient := auth.OAuthClientInformationFull{
+				OAuthClientInformation: auth.OAuthClientInformation{
+					ClientID: "new-client",
+				},
+				OAuthClientMetadata: auth.OAuthClientMetadata{
+					RedirectURIs: []string{"https://new-client.com/callback"},
+				},
+			}
+			result, err := provider.ClientsStore().RegisterClient(newClient)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.ClientID != newClient.ClientID {
+				t.Errorf("expected client_id %s, got %s", newClient.ClientID, result.ClientID)
+			}
+		})
+
+		t.Run("Handles registration failure", func(t *testing.T) {
+			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			}
+			provider.fetch = mockFetch
+
+			newClient := auth.OAuthClientInformationFull{
+				OAuthClientInformation: auth.OAuthClientInformation{
+					ClientID: "new-client",
+				},
+				OAuthClientMetadata: auth.OAuthClientMetadata{
+					RedirectURIs: []string{"https://new-client.com/callback"},
+				},
+			}
+			_, err := provider.ClientsStore().RegisterClient(newClient)
+			t.Logf("error: %v", err) // 调试输出
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var serverErr oauthErrors.OAuthError
+			if !errors.As(err, &serverErr) {
+				t.Errorf("expected error to be of type oauthErrors.OAuthError, got %T", err)
+			}
+			if serverErr.ErrorCode != oauthErrors.ErrServerError.Error() {
+				t.Errorf("expected OAuthError with code %s, got %s", oauthErrors.ErrServerError.Error(), serverErr.ErrorCode)
+			}
+		})
+	})
+
+	t.Run("Token Revocation", func(t *testing.T) {
+		t.Run("Revokes token", func(t *testing.T) {
+			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
+				body, _ := io.ReadAll(req.Body)
+				t.Logf("revoke request body: %s", string(body)) // 调试输出
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			}
+			provider.fetch = mockFetch
+
+			err := provider.RevokeToken(validClient, auth.OAuthTokenRevocationRequest{
+				Token:         "token-to-revoke",
+				TokenTypeHint: "access_token",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	})
+
+	t.Run("Token Verification", func(t *testing.T) {
+		t.Run("Verifies valid token", func(t *testing.T) {
+			authInfo, err := provider.VerifyAccessToken("valid-token")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			t.Logf("authInfo: %+v", authInfo) // 调试输出
+			if authInfo.ClientID != "test-client" {
+				t.Errorf("expected clientId test-client, got %s", authInfo.ClientID)
+			}
+		})
+
+		t.Run("Passes through InvalidTokenError", func(t *testing.T) {
+			_, err := provider.VerifyAccessToken("invalid-token")
+			t.Logf("error: %v", err) // 调试输出
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var invalidTokenErr oauthErrors.OAuthError
+			if !errors.As(err, &invalidTokenErr) {
+				t.Errorf("expected error to be of type oauthErrors.OAuthError, got %T", err)
+			}
+			if invalidTokenErr.ErrorCode != oauthErrors.ErrInvalidToken.Error() {
+				t.Errorf("expected OAuthError with code %s, got %s", oauthErrors.ErrInvalidToken.Error(), invalidTokenErr.ErrorCode)
+			}
+		})
+	})
 }

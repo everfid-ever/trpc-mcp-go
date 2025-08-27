@@ -309,7 +309,7 @@ func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthCl
 	// Perform HTTP request
 	resp, err := p.doFetch(req)
 	if err != nil {
-		return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("token exchange failed: %v", resp.StatusCode), "")
+		return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("token exchange failed: %v", err), "")
 	}
 	defer resp.Body.Close()
 
