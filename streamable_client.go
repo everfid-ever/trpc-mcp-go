@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/httputil"
 )
@@ -81,6 +83,8 @@ type streamableHTTPClientTransport struct {
 
 	// Client reference for accessing rootsProvider.
 	client *Client
+
+	oauthProvider client.OAuthClientProvider
 }
 
 // NotificationHandler is a handler for notifications.
@@ -187,6 +191,12 @@ func withTransportHTTPReqHandlerOption(option HTTPReqHandlerOption) transportOpt
 	}
 }
 
+func withTransportOAuthProvider(p client.OAuthClientProvider) transportOption {
+	return func(t *streamableHTTPClientTransport) {
+		t.oauthProvider = p
+	}
+}
+
 // start is a no-op for streamableHTTPClientTransport.
 func (t *streamableHTTPClientTransport) start(ctx context.Context) error {
 	return nil
@@ -212,6 +222,10 @@ func (t *streamableHTTPClientTransport) send(
 		return nil, fmt.Errorf("%w: %v", ErrRequestSerialization, err)
 	}
 
+	if _, err := t.ensureAuth(ctx); err != nil {
+		t.logger.Debugf("ensureAuth failed (cintinue anyway): %v", err)
+	}
+
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, t.serverURL.String(), bytes.NewReader(reqBytes))
 	if err != nil {
@@ -235,6 +249,10 @@ func (t *streamableHTTPClientTransport) send(
 		httpReq.Header.Set(httputil.LastEventIDHeader, t.lastEventID)
 	}
 
+	if authInfo, ok := client.GetAuthInfo(ctx); ok && authInfo != nil && authInfo.AccessToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+authInfo.AccessToken)
+	}
+
 	// Add custom headers
 	for key, values := range t.httpHeaders {
 		for _, value := range values {
@@ -246,6 +264,30 @@ func (t *streamableHTTPClientTransport) send(
 	httpResp, err := t.httpReqHandler.Handle(ctx, t.httpClient, httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrHTTPRequestFailed, err)
+	}
+
+	if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+		httpResp.Body.Close()
+
+		if _, err := t.ensureAuth(ctx); err != nil {
+			httpReq2, err := http.NewRequestWithContext(ctx, http.MethodPost, t.serverURL.String(), bytes.NewReader(reqBytes))
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrHTTPRequestCreation, err)
+			}
+			if len(t.path) != 0 {
+				httpReq2.URL.Path = t.path
+			}
+			for k, values := range t.httpHeaders {
+				for _, value := range values {
+					httpReq2.Header.Add(k, value)
+				}
+
+				httpResp, err = t.httpReqHandler.Handle(ctx, t.httpClient, httpReq2)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %v", ErrHTTPRequestFailed, err)
+				}
+			}
+		}
 	}
 
 	// Handle session ID
@@ -605,6 +647,10 @@ func (t *streamableHTTPClientTransport) connectGetSSE(ctx context.Context) error
 		return fmt.Errorf("cannot establish GET SSE connection: session ID is empty")
 	}
 
+	if _, err := t.ensureAuth(ctx); err != nil {
+		t.logger.Debugf("ensureAuth for GET SSE failed (continue anyway): %v", err)
+	}
+
 	// Build GET request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.serverURL.String(), nil)
 	if err != nil {
@@ -619,6 +665,10 @@ func (t *streamableHTTPClientTransport) connectGetSSE(ctx context.Context) error
 	req.Header.Set(httputil.SessionIDHeader, t.sessionID)
 	if t.lastEventID != "" {
 		req.Header.Set(httputil.LastEventIDHeader, t.lastEventID)
+	}
+
+	if authInfo, ok := client.GetAuthInfo(ctx); ok && authInfo != nil && authInfo.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authInfo.AccessToken)
 	}
 
 	// Add custom headers
@@ -838,6 +888,10 @@ func (t *streamableHTTPClientTransport) sendResponseToServer(response interface{
 		}
 	}
 
+	if authInfo, ok := client.GetAuthInfo(ctx); ok && authInfo != nil && authInfo.AccessToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+authInfo.AccessToken)
+	}
+
 	// Add session ID if available
 	if t.sessionID != "" {
 		httpReq.Header.Set(httputil.SessionIDHeader, t.sessionID) // Use correct MCP protocol header: Mcp-Session-Id.
@@ -942,4 +996,31 @@ func (t *streamableHTTPClientTransport) establishGetSSEConnection() {
 	}
 
 	t.establishGetSSE()
+}
+
+func (t *streamableHTTPClientTransport) ensureAuth(ctx context.Context) (context.Context, error) {
+	if t.oauthProvider == nil {
+		return ctx, nil
+	}
+
+	if info, ok := client.GetAuthInfo(ctx); ok && info != nil && !client.IsTokenExpired(info) {
+		return ctx, nil
+	}
+
+	_, err := client.Auth(t.oauthProvider, auth.AuthOptions{
+		ServerUrl: t.serverURL.String(),
+	})
+	if err != nil {
+		return client.WithAuthErr(ctx, err), err
+	}
+
+	tokens, terr := t.oauthProvider.Tokens()
+	if terr != nil {
+		return client.WithAuthErr(ctx, err), terr
+	}
+	if tokens == nil {
+		return client.WithAuthErr(ctx, fmt.Errorf("no tokens after auth")), fmt.Errorf("no tokens")
+	}
+	info := client.ConvertTokensToAuthInfo(tokens)
+	return client.WithAuthInfo(ctx, info), nil
 }

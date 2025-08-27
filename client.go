@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
@@ -653,4 +654,10 @@ func (c *Client) SendRootsListChangedNotification(ctx context.Context) error {
 
 func isZeroStruct(x interface{}) bool {
 	return reflect.ValueOf(x).IsZero()
+}
+
+func WithOAuthProvider(p client.OAuthClientProvider) ClientOption {
+	return func(c *Client) {
+		c.transportOptions = append(c.transportOptions, withTransportOAuthProvider(p))
+	}
 }
