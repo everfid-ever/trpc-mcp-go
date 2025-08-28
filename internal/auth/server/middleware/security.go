@@ -193,7 +193,7 @@ func RateLimitMiddleware(limiter *rate.Limiter, onDecision OnDecision) func(http
 					"You have exceeded the rate limit for token revocation requests",
 					"",
 				)
-				json.NewEncoder(w).Encode(tooManyRequestsError.ToResponseStruct())
+				_ = json.NewEncoder(w).Encode(tooManyRequestsError.ToResponseStruct())
 
 				if onDecision != nil {
 					onDecision(Decision{
@@ -230,7 +230,7 @@ func ContentTypeValidationMiddleware(allowedTypes []string, allowJSONFallback bo
 					"Content-Type header is required",
 					"",
 				)
-				json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
+				_ = json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
 				return
 			}
 
@@ -262,7 +262,7 @@ func ContentTypeValidationMiddleware(allowedTypes []string, allowJSONFallback bo
 					errorMsg,
 					"",
 				)
-				json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
+				_ = json.NewEncoder(w).Encode(invalidReqError.ToResponseStruct())
 				return
 			}
 
@@ -283,33 +283,33 @@ func JSONValidationMiddleware() func(http.Handler) http.Handler {
 	return ContentTypeValidationMiddleware([]string{"application/json"}, false)
 }
 
-func AuditMiddleware(onDecision OnDecision) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// 包装 ResponseWriter 以获取状态码
-			rw := &responseWriterWithStatus{ResponseWriter: w, statusCode: http.StatusOK}
-
-			start := time.Now()
-			next.ServeHTTP(rw, r)
-			duration := time.Since(start)
-
-			// 构建审计事件
-			if onDecision != nil {
-				onDecision(Decision{
-					Allowed:   rw.statusCode < 400, // 状态码 <400 认为成功
-					Reason:    http.StatusText(rw.statusCode),
-					Resource:  r.URL.Path,
-					Action:    r.Method,
-					TraceID:   r.Header.Get("X-Request-ID"), // 可选，追踪 ID
-					Timestamp: time.Now(),
-				})
-			}
-
-			// 可选：打印调试日志
-			fmt.Printf("[AUDIT] %s %s -> %d (%v)\n", r.Method, r.URL.Path, rw.statusCode, duration)
-		})
-	}
-}
+//func AuditMiddleware(onDecision OnDecision) func(http.Handler) http.Handler {
+//	return func(next http.Handler) http.Handler {
+//		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//			// 包装 ResponseWriter 以获取状态码
+//			rw := &responseWriterWithStatus{ResponseWriter: w, statusCode: http.StatusOK}
+//
+//			start := time.Now()
+//			next.ServeHTTP(rw, r)
+//			duration := time.Since(start)
+//
+//			// 构建审计事件
+//			if onDecision != nil {
+//				onDecision(Decision{
+//					Allowed:   rw.statusCode < 400, // 状态码 <400 认为成功
+//					Reason:    http.StatusText(rw.statusCode),
+//					Resource:  r.URL.Path,
+//					Action:    r.Method,
+//					TraceID:   r.Header.Get("X-Request-ID"), // 可选，追踪 ID
+//					Timestamp: time.Now(),
+//				})
+//			}
+//
+//			// 可选：打印调试日志
+//			fmt.Printf("[AUDIT] %s %s -> %d (%v)\n", r.Method, r.URL.Path, rw.statusCode, duration)
+//		})
+//	}
+//}
 
 func AuthorizationMiddleware(authorizer Authorizer, resource string, action string, onDecision OnDecision) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -327,7 +327,7 @@ func AuthorizationMiddleware(authorizer Authorizer, resource string, action stri
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
 				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(err.(errors.OAuthError).ToResponseStruct())
+				_ = json.NewEncoder(w).Encode(err.(errors.OAuthError).ToResponseStruct())
 
 				// 提取 subject
 				subject := extractSubject(authInfo)

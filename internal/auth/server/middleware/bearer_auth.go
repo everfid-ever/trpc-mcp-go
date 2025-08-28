@@ -30,38 +30,9 @@ type BearerAuthMiddlewareOptions struct {
 
 // RequireBearerAuth 返回一个HTTP中间件，验证请求中的Bearer令牌。
 // Returns an HTTP middleware that validates Bearer tokens in the request.
-func RequireBearerAuth(options BearerAuthMiddlewareOptions, onDecision OnDecision) func(handler http.Handler) http.Handler {
+func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-
-			// 审计辅助函数
-			audit := func(allowed bool, reason string, info server.AuthInfo) {
-				if onDecision != nil {
-					var clientID, subject string
-					var scopes []string
-
-					clientID = info.ClientID
-					scopes = info.Scopes
-					// 从 JWT token 中提取 subject
-					if info.Extra != nil {
-						if sub, ok := info.Extra["sub"].(string); ok {
-							subject = sub
-						}
-					}
-
-					onDecision(Decision{
-						Allowed:   allowed,
-						Reason:    reason,
-						ClientID:  clientID,
-						Subject:   subject,
-						Scopes:    scopes,
-						Resource:  req.URL.Path,
-						Action:    req.Method,
-						TraceID:   req.Header.Get("X-Request-ID"),
-						Timestamp: time.Now(),
-					})
-				}
-			}
 			// 处理错误并设置响应函数
 			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, statusCode int) {
 				wwwAuthValue := fmt.Sprintf(`Bearer error="%s", error_description="%s"`, err.ErrorCode, err.Message)
@@ -71,8 +42,7 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions, onDecision OnDecisio
 				w.Header().Set("WWW-Authenticate", wwwAuthValue)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(statusCode)
-				json.NewEncoder(w).Encode(err.ToResponseStruct())
-				audit(false, err.Message, server.AuthInfo{})
+				_ = json.NewEncoder(w).Encode(err.ToResponseStruct())
 			}
 
 			// 获取Authorization头
@@ -141,8 +111,6 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions, onDecision OnDecisio
 			// 将authInfo添加到请求上下文,对应的key为authInfoKeyType{}
 			ctx := context.WithValue(req.Context(), authInfoKeyType{}, authInfo)
 			req = req.WithContext(ctx)
-
-			audit(true, "token verified", authInfo)
 
 			next.ServeHTTP(w, req)
 		})
