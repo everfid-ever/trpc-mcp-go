@@ -64,7 +64,7 @@ func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVeri
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse local JWKS: %w", err)
 		}
-		for i := range set.Len() {
+		for i := 0; i < set.Len(); i++ {
 			key, _ := set.Key(i)
 			_ = defaultSet.AddKey(key)
 		}
@@ -76,13 +76,13 @@ func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVeri
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse local JWKS file: %w", err)
 		}
-		for i := range set.Len() {
+		for i := 0; i < set.Len(); i++ {
 			key, _ := set.Key(i)
 			_ = defaultSet.AddKey(key)
 		}
 	}
 
-	if len(defaultSet.Keys()) == 0 {
+	if defaultSet.Len() == 0 {
 		return nil, fmt.Errorf("must provide JWKS or File")
 	}
 
@@ -209,8 +209,10 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 
 func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (jwk.Set, error) {
 	// 优先尝试本地 JWKS
-	if _, ok := v.localKeySet.LookupKeyID(kid); ok {
-		return v.localKeySet, nil
+	if v.localKeySet != nil {
+		if _, ok := v.localKeySet.LookupKeyID(kid); ok {
+			return v.localKeySet, nil
+		}
 	}
 
 	// 如果是远程模式，尝试远程 JWKS
@@ -260,39 +262,66 @@ func extractClientID(token jwt.Token) (string, error) {
 
 // extractScopes extracts scopes from various claim formats
 func extractScopes(token jwt.Token) ([]string, error) {
-	var scopes []string
 	var tempScopes interface{}
 	if err := token.Get("scope", &tempScopes); err != nil {
-		switch s := tempScopes.(type) {
-		case string:
-			if s != "" {
-				scopes = strings.Split(s, " ")
-			} else {
-				return scopes, errors.New("token does not contain valid scope")
-			}
-		case []string:
-			if len(s) > 0 {
-				scopes = s
-			} else {
-				return scopes, errors.New("token does not contain valid scope")
+		return nil, errors.New("token does not contain scope claim")
+	}
+
+	switch s := tempScopes.(type) {
+	case string:
+		if s == "" {
+			return nil, errors.New("token does not contain valid scope")
+		}
+		return strings.Split(s, " "), nil
+	case []string:
+		if len(s) == 0 {
+			return nil, errors.New("token does not contain valid scope")
+		}
+		return s, nil
+	case []interface{}:
+		// Handle case where JSON unmarshaling creates []interface{}
+		if len(s) == 0 {
+			return nil, errors.New("token does not contain valid scope")
+		}
+		var scopes []string
+		for _, v := range s {
+			if str, ok := v.(string); ok {
+				scopes = append(scopes, str)
 			}
 		}
+		if len(scopes) == 0 {
+			return nil, errors.New("token does not contain valid scope")
+		}
+		return scopes, nil
+	default:
+		return nil, errors.New("token scope claim has invalid type")
 	}
-	return scopes, nil
 }
 
 // extractResource extracts resource information
 func extractResource(token jwt.Token) (*url.URL, error) {
-	var aud []string
-	if aud, ok := token.Audience(); !ok || len(aud) == 0 {
+	aud, ok := token.Audience()
+	if !ok || len(aud) == 0 {
 		return nil, fmt.Errorf("missing required 'aud' claim")
 	}
-	resourceStr := aud[0] //默认使用第一个 audience作为资源服务器标识符
-	if resourceURL, err := url.Parse(resourceStr); err == nil && resourceURL != nil {
-		resourceURL.Fragment = "" // 移除哈希片段（符合 RFC 8707）
-		return resourceURL, nil
+
+	resourceStr := aud[0] // 默认使用第一个audience作为资源服务器标识符
+	resourceURL, err := url.Parse(resourceStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid resource URL: %s", resourceStr)
 	}
-	return nil, fmt.Errorf("invalid resource URL: %s", resourceStr)
+
+	if resourceURL == nil {
+		return nil, fmt.Errorf("invalid resource URL: %s", resourceStr)
+	}
+
+	// Validate that it's a proper HTTP(S) URL with scheme and host
+	if resourceURL.Scheme == "" || resourceURL.Host == "" {
+		return nil, fmt.Errorf("invalid resource URL: %s", resourceStr)
+	}
+
+	resourceURL.Fragment = "" // 移除哈希片段（符合 RFC 8707）
+	return resourceURL, nil
 }
 
 // extractExtra extracts custom claims to Extra map
