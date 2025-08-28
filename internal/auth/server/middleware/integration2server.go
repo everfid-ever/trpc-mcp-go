@@ -1,4 +1,5 @@
 
+
 // WithAuditMiddleware applies AuditMiddleware to the server handler with specified options.
 func WithAuditMiddleware(options ...middleware.Option) ServerOption {
 	return func(s *http.Server) {
@@ -12,5 +13,3 @@ func WithAuditMiddleware(options ...middleware.Option) ServerOption {
 		s.Handler = auditMiddleware.Wrap(s.Handler)
 	}
 }
-
-
