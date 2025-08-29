@@ -21,9 +21,14 @@ type ClientAuthenticationMiddlewareOptions struct {
 	ClientsStore server.OAuthClientsStoreInterface
 }
 
-// ClientAuthenticatedRequest represents the request schema for client authentication
+// ClientAuthenticatedRequest represents the request schema for client authentication.
+// It is typically used when exchanging credentials at the token endpoint.
 type ClientAuthenticatedRequest struct {
-	ClientID     string `json:"client_id"`
+	// ClientID is the unique identifier issued to the client during registration.
+	ClientID string `json:"client_id"`
+
+	// ClientSecret is the client’s secret credential.
+	// It may be omitted when using public clients or PKCE-only flows.
 	ClientSecret string `json:"client_secret,omitempty"`
 }
 
@@ -42,19 +47,6 @@ func validateClientRequest(req *ClientAuthenticatedRequest) error {
 func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecision OnDecision) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			audit := func(allowed bool, reason string, clientID string) {
-				if onDecision != nil {
-					onDecision(Decision{
-						Allowed:   allowed,
-						Reason:    reason,
-						ClientID:  clientID,
-						Resource:  r.URL.Path,
-						Action:    r.Method,
-						TraceID:   r.Header.Get("X-Request-ID"),
-						Timestamp: time.Now(),
-					})
-				}
-			}
 			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, clientID string) {
 				var statusCode int
 				switch err.ErrorCode {
@@ -70,7 +62,6 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(statusCode)
 				_ = json.NewEncoder(w).Encode(err.ToResponseStruct())
-				audit(false, "invalid client credentials", clientID)
 			}
 
 			var reqData ClientAuthenticatedRequest
@@ -154,8 +145,6 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 					}
 				}
 			}
-
-			audit(true, "client authenticated", clientID)
 			ctx := context.WithValue(r.Context(), clientInfoKeyType{}, client)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

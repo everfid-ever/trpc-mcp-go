@@ -22,24 +22,41 @@ type TokenHandlerOptions struct {
 	RateLimit *rate.Limiter              `json:"rateLimit,omitempty"` // ä½¿ç"¨æ ‡å‡†çš„ rate.Limiter
 }
 
-// TokenRequest defines basic token request structure
+// TokenRequest defines the base structure of a token request.
+// Every token request must specify a grant_type to indicate which flow is being used.
 type TokenRequest struct {
+	// GrantType is the type of OAuth grant being requested.
+	// Common values include "authorization_code" and "refresh_token".
 	GrantType string `form:"grant_type" json:"grant_type" validate:"required"`
 }
 
-// AuthorizationCodeGrant defines authorization code grant request
+// AuthorizationCodeGrant represents a token request using the Authorization Code flow.
 type AuthorizationCodeGrant struct {
-	Code         string  `form:"code" json:"code" validate:"required"`
-	CodeVerifier string  `form:"code_verifier" json:"code_verifier" validate:"required"`
-	RedirectURI  *string `form:"redirect_uri" json:"redirect_uri,omitempty"`
-	Resource     *string `form:"resource" json:"resource,omitempty" validate:"omitempty,url"`
+	// Code is the authorization code previously issued to the client.
+	Code string `form:"code" json:"code" validate:"required"`
+
+	// CodeVerifier is the PKCE verifier string that matches the original code_challenge.
+	CodeVerifier string `form:"code_verifier" json:"code_verifier" validate:"required"`
+
+	// RedirectURI must match the redirect_uri used in the authorization request,
+	// if one was included there.
+	RedirectURI *string `form:"redirect_uri" json:"redirect_uri,omitempty"`
+
+	// Resource is an optional absolute URL indicating the target resource server.
+	Resource *string `form:"resource" json:"resource,omitempty" validate:"omitempty,url"`
 }
 
-// RefreshTokenGrant defines refresh token grant request
+// RefreshTokenGrant represents a token request using the Refresh Token flow.
 type RefreshTokenGrant struct {
-	RefreshToken string  `form:"refresh_token" json:"refresh_token" validate:"required"`
-	Scope        *string `form:"scope" json:"scope,omitempty"`
-	Resource     *string `form:"resource" json:"resource,omitempty" validate:"omitempty,url"`
+	// RefreshToken is the refresh token previously issued to the client.
+	RefreshToken string `form:"refresh_token" json:"refresh_token" validate:"required"`
+
+	// Scope is an optional space-delimited list of scopes being requested.
+	// If omitted, the scope is assumed to be identical to the scope originally granted.
+	Scope *string `form:"scope" json:"scope,omitempty"`
+
+	// Resource is an optional absolute URL indicating the target resource server.
+	Resource *string `form:"resource" json:"resource,omitempty" validate:"omitempty,url"`
 }
 
 // TokenHandler creates a token endpoint handler with full middleware stack

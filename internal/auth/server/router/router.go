@@ -10,26 +10,63 @@ import (
 )
 
 // AuthRouterOptions holds configuration options for the MCP authentication router.
+// It configures how OAuth 2.1 endpoints (/authorize, /token, /revoke, /register) are exposed.
 type AuthRouterOptions struct {
-	Provider                  server.OAuthServerProvider
-	IssuerUrl                 *url.URL
-	BaseUrl                   *url.URL
-	ServiceDocumentationUrl   *url.URL
-	ScopesSupported           []string
-	ResourceName              *string
-	AuthorizationOptions      *handler.AuthorizationHandlerOptions
+	// Provider is the OAuth server implementation.
+	// It manages client registration, authorization codes, tokens, and verification.
+	Provider server.OAuthServerProvider
+
+	// IssuerUrl is the OAuth issuer identifier (RFC 8414).
+	// Typically something like "https://auth.example.com".
+	IssuerUrl *url.URL
+
+	// BaseUrl is the base URL of this service, used to construct endpoint URLs
+	// such as /authorize, /token, etc.
+	BaseUrl *url.URL
+
+	// ServiceDocumentationUrl points to human-readable documentation about the service,
+	// usually an API docs page.
+	ServiceDocumentationUrl *url.URL
+
+	// ScopesSupported lists all scopes supported by this authorization server,
+	// for example: ["read", "write"].
+	ScopesSupported []string
+
+	// ResourceName is an optional logical name for the protected resource/API.
+	ResourceName *string
+
+	// AuthorizationOptions configures the /authorize endpoint (validation, rate limiting, etc.).
+	AuthorizationOptions *handler.AuthorizationHandlerOptions
+
+	// ClientRegistrationOptions configures the /register endpoint for dynamic client registration (RFC 7591).
 	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions
-	RevocationOptions         *handler.RevocationHandlerOptions
-	TokenOptions              *handler.TokenHandlerOptions
+
+	// RevocationOptions configures the /revoke endpoint for token revocation (RFC 7009).
+	RevocationOptions *handler.RevocationHandlerOptions
+
+	// TokenOptions configures the /token endpoint for issuing tokens (supports auth code flow, PKCE, etc.).
+	TokenOptions *handler.TokenHandlerOptions
 }
 
 // AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
+// It controls what is published via OAuth 2.1 Authorization Server Metadata (RFC 8414).
 type AuthMetadataOptions struct {
-	OAuthMetadata           auth.OAuthMetadata
-	ResourceServerUrl       *url.URL
+	// OAuthMetadata contains the full OAuth 2.1 Authorization Server Metadata,
+	// including authorization_endpoint, token_endpoint, scopes_supported, etc.
+	OAuthMetadata auth.OAuthMetadata
+
+	// ResourceServerUrl points to the protected resource server,
+	// used by clients to discover where to send API requests.
+	ResourceServerUrl *url.URL
+
+	// ServiceDocumentationUrl points to human-readable documentation about the service.
 	ServiceDocumentationUrl *url.URL
-	ScopesSupported         []string
-	ResourceName            *string
+
+	// ScopesSupported lists the scopes supported by this resource server.
+	ScopesSupported []string
+
+	// ResourceName is an optional logical name for the resource server.
+	ResourceName *string
 }
 
 // checkIssuerUrl validates the issuer URL according to RFC 8414.
