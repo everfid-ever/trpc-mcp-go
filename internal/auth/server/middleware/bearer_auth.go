@@ -35,11 +35,14 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			// 处理错误并设置响应函数
 			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, statusCode int) {
-				wwwAuthValue := fmt.Sprintf(`Bearer error="%s", error_description="%s"`, err.ErrorCode, err.Message)
-				if options.ResourceMetadataURL != nil {
-					wwwAuthValue += fmt.Sprintf(`, resource_metadata="%s"`, *options.ResourceMetadataURL)
+				// 只在 401 或 403 时设置 WWW-Authenticate 头，以匹配 TypeScript 版本
+				if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+					wwwAuthValue := fmt.Sprintf(`Bearer error="%s", error_description="%s"`, err.ErrorCode, err.Message)
+					if options.ResourceMetadataURL != nil {
+						wwwAuthValue += fmt.Sprintf(`, resource_metadata="%s"`, *options.ResourceMetadataURL)
+					}
+					w.Header().Set("WWW-Authenticate", wwwAuthValue)
 				}
-				w.Header().Set("WWW-Authenticate", wwwAuthValue)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(statusCode)
 				_ = json.NewEncoder(w).Encode(err.ToResponseStruct())
@@ -103,7 +106,7 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidToken, "Token has no expiration time", ""), http.StatusUnauthorized)
 				return
 			}
-			if *authInfo.ExpiresAt < time.Now().Unix() {
+			if *authInfo.ExpiresAt <= time.Now().Unix() {
 				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidToken, "Token has expired", ""), http.StatusUnauthorized)
 				return
 			}
