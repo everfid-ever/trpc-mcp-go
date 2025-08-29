@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
@@ -42,24 +43,11 @@ func validateClientRequest(req *ClientAuthenticatedRequest) error {
 func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecision OnDecision) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			audit := func(allowed bool, reason string, clientID string) {
-				if onDecision != nil {
-					onDecision(Decision{
-						Allowed:   allowed,
-						Reason:    reason,
-						ClientID:  clientID,
-						Resource:  r.URL.Path,
-						Action:    r.Method,
-						TraceID:   r.Header.Get("X-Request-ID"),
-						Timestamp: time.Now(),
-					})
-				}
-			}
 			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, clientID string) {
 				var statusCode int
 				switch err.ErrorCode {
 				case errors.ErrInvalidClient.Error():
-					statusCode = http.StatusUnauthorized
+					statusCode = http.StatusBadRequest
 				case errors.ErrInvalidRequest.Error():
 					statusCode = http.StatusBadRequest
 				case errors.ErrServerError.Error():
@@ -70,7 +58,6 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(statusCode)
 				_ = json.NewEncoder(w).Encode(err.ToResponseStruct())
-				audit(false, "invalid client credentials", clientID)
 			}
 
 			var reqData ClientAuthenticatedRequest
@@ -155,7 +142,6 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 				}
 			}
 
-			audit(true, "client authenticated", clientID)
 			ctx := context.WithValue(r.Context(), clientInfoKeyType{}, client)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
