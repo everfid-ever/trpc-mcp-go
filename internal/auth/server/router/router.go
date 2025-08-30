@@ -88,6 +88,10 @@ func checkIssuerUrl(issuer *url.URL) error {
 
 // supportsClientRegistration checks if the provider supports dynamic client registration
 func supportsClientRegistration(provider server.OAuthServerProvider) bool {
+	if provider == nil {
+		return false
+	}
+
 	clientsStore := provider.ClientsStore()
 	if clientsStore == nil {
 		return false
@@ -98,6 +102,9 @@ func supportsClientRegistration(provider server.OAuthServerProvider) bool {
 
 // supportsTokenRevocation checks if the provider supports token revocation
 func supportsTokenRevocation(provider server.OAuthServerProvider) bool {
+	if provider == nil {
+		return false
+	}
 	// Use type assertion to check if the provider implements SupportTokenRevocation interface
 	_, ok := provider.(server.SupportTokenRevocation)
 	return ok
@@ -111,6 +118,10 @@ func CreateOAuthMetadata(options struct {
 	ServiceDocumentationUrl *url.URL
 	ScopesSupported         []string
 }) (auth.OAuthMetadata, error) {
+	if options.Provider == nil {
+		return auth.OAuthMetadata{}, fmt.Errorf("provider is required")
+	}
+
 	issuer := options.IssuerUrl
 	baseUrl := options.BaseUrl
 
