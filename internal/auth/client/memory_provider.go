@@ -46,7 +46,7 @@ func (p *InMemoryOAuthClientProvider) ClientInformation() *auth.OAuthClientInfor
 	defer p.mutex.RUnlock()
 	return p.clientInfo
 }
-func (p *InMemoryOAuthClientProvider) SaveClientInformation(clientInformation auth.OAuthClientInformationFull) {
+func (p *InMemoryOAuthClientProvider) SaveClientInformation(clientInformation auth.OAuthClientInformationFull) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.clientInfo = &auth.OAuthClientInformation{
@@ -55,16 +55,18 @@ func (p *InMemoryOAuthClientProvider) SaveClientInformation(clientInformation au
 		ClientIDIssuedAt:      clientInformation.ClientIDIssuedAt,
 		ClientSecretExpiresAt: clientInformation.ClientSecretExpiresAt,
 	}
+	return nil
 }
-func (p *InMemoryOAuthClientProvider) Tokens() *auth.OAuthTokens {
+func (p *InMemoryOAuthClientProvider) Tokens() (*auth.OAuthTokens, error) {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
-	return p.tokens
+	return p.tokens, nil
 }
-func (p *InMemoryOAuthClientProvider) SaveTokens(tokens auth.OAuthTokens) {
+func (p *InMemoryOAuthClientProvider) SaveTokens(tokens auth.OAuthTokens) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.tokens = &tokens
+	return nil
 }
 func (p *InMemoryOAuthClientProvider) RedirectToAuthorization(authorizationUrl *url.URL) error {
 	return p.onRedirect(authorizationUrl)
@@ -78,10 +80,11 @@ func (p *InMemoryOAuthClientProvider) CodeVerifier() (string, error) {
 	return p.codeVerifier, nil
 }
 
-func (p *InMemoryOAuthClientProvider) SaveCodeVerifier(codeVerifier string) {
+func (p *InMemoryOAuthClientProvider) SaveCodeVerifier(codeVerifier string) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.codeVerifier = codeVerifier
+	return nil
 }
 
 // 可选方法的默认实现
