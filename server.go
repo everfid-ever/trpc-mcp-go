@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/router"
 )
 
 // Common errors
@@ -79,6 +81,9 @@ type serverConfig struct {
 
 	// Method name modifier for external customization.
 	methodNameModifier MethodNameModifier
+
+	// Route installers for adding extra endpoints (e.g. OAuth, metadata).
+	routerInstallers []func(*http.ServeMux) error
 }
 
 // ServerNotificationHandler defines a function that handles notifications on the server side.
@@ -100,6 +105,7 @@ type Server struct {
 	requestID            atomic.Int64                         // Request ID counter for generating unique request IDs.
 	notificationHandlers map[string]ServerNotificationHandler // Map of notification handlers by method name.
 	notificationMu       sync.RWMutex                         // Mutex for notification handlers map.
+	rootHandler          http.Handler                         // Server's top-level HTTP handler including the core MCP endpoint and any extra routes.
 }
 
 // NewServer creates a new MCP server
@@ -213,6 +219,26 @@ func (s *Server) initComponents() {
 
 	// Create HTTP handler.
 	s.httpHandler = newHTTPServerHandler(s.mcpHandler, s.config.path, httpOptions...)
+
+	// By default, the server only exposes the core MCP handler.
+	// If additional route installers were provided via ServerOptions
+	// (e.g. WithOAuthRoutes, WithOAuthMetadata, or WithHTTPRoutes),
+	// build a new mux that mounts the MCP endpoint under the configured
+	// path (e.g. /mcp/) and then installs the extra routes.
+	// The mux becomes the rootHandler exposed by Handler().
+	s.rootHandler = s.httpHandler
+
+	if len(s.config.routerInstallers) > 0 {
+		mux := http.NewServeMux()
+		// Mount the MCP core handler under the configured path (e.g. /mcp/).
+		mux.Handle(s.config.path+"/", s.httpHandler)
+		// Apply each user-provided installer to add extra endpoints
+		// such as /authorize, /token, /revoke, /register, or .well-known.
+		for _, install := range s.config.routerInstallers {
+			_ = install(mux) // consider logging errors in production
+		}
+		s.rootHandler = mux
+	}
 }
 
 // ServerOption server option function.
@@ -311,6 +337,33 @@ func WithServerAddress(addr string) ServerOption {
 	return func(s *Server) {
 		s.config.addr = addr
 	}
+}
+
+// WithHTTPRoutes registers a custom installer function that can
+// attach additional HTTP routes to the server's root mux.
+func WithHTTPRoutes(install func(*http.ServeMux) error) ServerOption {
+	return func(s *Server) {
+		s.config.routerInstallers = append(s.config.routerInstallers, install)
+	}
+}
+
+// WithOAuthRoutes installs standard OAuth 2.1 endpoints into the server,
+// such as /authorize, /token, /revoke, and /register, depending on the
+// provided AuthRouterOptions and the provider's capabilities.
+func WithOAuthRoutes(opts router.AuthRouterOptions) ServerOption {
+	return WithHTTPRoutes(func(mux *http.ServeMux) error {
+		return router.McpAuthRouter(mux, opts)
+	})
+}
+
+// WithOAuthMetadata installs the .well-known OAuth metadata endpoints
+// (e.g. /.well-known/oauth-authorization-server and
+// /.well-known/oauth-protected-resource) into the server.
+// The returned metadata is constructed from the given AuthMetadataOptions.
+func WithOAuthMetadata(opts router.AuthMetadataOptions) ServerOption {
+	return WithHTTPRoutes(func(mux *http.ServeMux) error {
+		return router.McpAuthMetadataRouter(mux, opts)
+	})
 }
 
 // Start starts the server
@@ -542,10 +595,16 @@ func (s *Server) GetActiveSessions() ([]string, error) {
 	return s.getActiveSessions()
 }
 
-// Handler  returns the http.Handler for the server.
-// This can be used to integrate the MCP server into existing HTTP servers.
+// Handler returns the top-level http.Handler exposed by the server.
+// This handler always includes the core MCP endpoint (e.g., /mcp).
+// Depending on the configured ServerOptions, it may also include
+// additional routes such as OAuth endpoints and .well-known metadata.
+//
+// You can pass this directly to an http.Server, or mount it into
+// an existing HTTP mux as the unified entry point for MCP and
+// any configured auxiliary endpoints.
 func (s *Server) Handler() http.Handler {
-	return s.httpHandler
+	return s.rootHandler
 }
 
 func (s *Server) Path() string {
