@@ -14,8 +14,8 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
 
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/retry"
 )
@@ -118,6 +118,12 @@ type Client struct {
 	state            State                  // State.
 	transportOptions []transportOption
 
+	// OAuth provider
+	oauthProvider client.OAuthClientProvider
+	// OAuth token management
+	accessToken  string
+	refreshToken string
+
 	// transport configuration.
 	transportConfig *transportConfig
 
@@ -167,6 +173,16 @@ func NewClient(serverURL string, clientInfo Implementation, options ...ClientOpt
 		// Set client reference in transport for roots handling.
 		if streamableTransport, ok := client.transport.(*streamableHTTPClientTransport); ok {
 			streamableTransport.client = client
+		}
+	}
+
+	// Handle OAuth authentication if configured
+	if client.oauthProvider == nil {
+		// Retrieve and store tokens
+		tokens, err := client.oauthProvider.Tokens()
+		if err == nil && tokens != nil {
+			client.accessToken = tokens.AccessToken
+			client.refreshToken = *tokens.RefreshToken
 		}
 	}
 
@@ -665,8 +681,18 @@ func isZeroStruct(x interface{}) bool {
 	return reflect.ValueOf(x).IsZero()
 }
 
-func WithOAuthProvider(p client.OAuthClientProvider) ClientOption {
+// WithClientOAuthProvider configures the OAuth client provider for the Client.
+func WithClientOAuthProvider(p client.OAuthClientProvider) ClientOption {
 	return func(c *Client) {
 		c.transportOptions = append(c.transportOptions, withTransportOAuthProvider(p))
+	}
+}
+
+// WithClientOAuth sets up OAuth client authentication
+func WithClientOAuth(oauthProvider client.OAuthClientProvider) ClientOption {
+	return func(c *Client) {
+		if transport, ok := c.transport.(*streamableHTTPClientTransport); ok {
+			transport.oauthProvider = oauthProvider
+		}
 	}
 }
