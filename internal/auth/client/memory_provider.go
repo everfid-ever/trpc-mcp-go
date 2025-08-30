@@ -15,6 +15,7 @@ type InMemoryOAuthClientProvider struct {
 	clientInfo     *auth.OAuthClientInformation
 	tokens         *auth.OAuthTokens
 	codeVerifier   string
+	state          string
 	onRedirect     func(*url.URL) error
 	mutex          sync.RWMutex
 }
@@ -46,7 +47,7 @@ func (p *InMemoryOAuthClientProvider) ClientInformation() *auth.OAuthClientInfor
 	defer p.mutex.RUnlock()
 	return p.clientInfo
 }
-func (p *InMemoryOAuthClientProvider) SaveClientInformation(clientInformation auth.OAuthClientInformationFull) {
+func (p *InMemoryOAuthClientProvider) SaveClientInformation(clientInformation auth.OAuthClientInformationFull) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.clientInfo = &auth.OAuthClientInformation{
@@ -55,16 +56,18 @@ func (p *InMemoryOAuthClientProvider) SaveClientInformation(clientInformation au
 		ClientIDIssuedAt:      clientInformation.ClientIDIssuedAt,
 		ClientSecretExpiresAt: clientInformation.ClientSecretExpiresAt,
 	}
+	return nil
 }
-func (p *InMemoryOAuthClientProvider) Tokens() *auth.OAuthTokens {
+func (p *InMemoryOAuthClientProvider) Tokens() (*auth.OAuthTokens, error) {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
-	return p.tokens
+	return p.tokens, nil
 }
-func (p *InMemoryOAuthClientProvider) SaveTokens(tokens auth.OAuthTokens) {
+func (p *InMemoryOAuthClientProvider) SaveTokens(tokens auth.OAuthTokens) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.tokens = &tokens
+	return nil
 }
 func (p *InMemoryOAuthClientProvider) RedirectToAuthorization(authorizationUrl *url.URL) error {
 	return p.onRedirect(authorizationUrl)
@@ -78,42 +81,64 @@ func (p *InMemoryOAuthClientProvider) CodeVerifier() (string, error) {
 	return p.codeVerifier, nil
 }
 
-func (p *InMemoryOAuthClientProvider) SaveCodeVerifier(codeVerifier string) {
+func (p *InMemoryOAuthClientProvider) SaveCodeVerifier(codeVerifier string) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.codeVerifier = codeVerifier
-}
-
-// 可选方法的默认实现
-func (p *InMemoryOAuthClientProvider) State() (string, error) {
-	// Default implementation: no state parameter generated
-	// For state validation, implement a custom OAuthStateProvider
-	return "", nil
-}
-
-func (p *InMemoryOAuthClientProvider) AddClientAuthentication(headers http.Header, params url.Values, tokenUrl string) error {
-	// 默认不添加自定义认证
 	return nil
 }
 
-func (p *InMemoryOAuthClientProvider) ValidateResourceURL(serverUrl, resource string) (*url.URL, error) {
-	// 默认不进行额外验证
-	return nil, nil
+// OAuthStateProvider implementation
+func (p *InMemoryOAuthClientProvider) State() (string, error) {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	if p.state == "" {
+		return "", fmt.Errorf("no state parameter saved")
+	}
+	return p.state, nil
+}
+
+// Helper method to save state (not part of interface but useful)
+func (p *InMemoryOAuthClientProvider) SaveState(state string) error {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.state = state
+	return nil
+}
+
+func (p *InMemoryOAuthClientProvider) AddClientAuthentication(headers http.Header, params url.Values, tokenUrl string) error {
+	// Default implementation: no custom authentication
+	// Subclasses can override this for custom auth methods
+	return nil
+}
+
+func (p *InMemoryOAuthClientProvider) ValidateResourceURL(serverUrl *url.URL, resourceMetadata *auth.OAuthProtectedResourceMetadata) (*url.URL, error) {
+	// Default implementation: return the server URL as-is
+	// Subclasses can override this for custom validation logic
+	return serverUrl, nil
 }
 
 func (p *InMemoryOAuthClientProvider) InvalidateCredentials(scope string) error {
-	// 根据 scope 清除相应凭据
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	
+	// Clear credentials based on scope
 	switch scope {
 	case "all":
 		p.clientInfo = nil
 		p.tokens = nil
 		p.codeVerifier = ""
+		p.state = ""
 	case "client":
 		p.clientInfo = nil
 	case "tokens":
 		p.tokens = nil
 	case "verifier":
 		p.codeVerifier = ""
+	case "state":
+		p.state = ""
+	default:
+		return fmt.Errorf("unknown invalidation scope: %s", scope)
 	}
 	return nil
 }

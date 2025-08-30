@@ -91,23 +91,23 @@ type StartAuthorizationResult struct {
 	CodeVerifier string
 }
 type ExchangeAuthorizationOptions struct {
-	Metadata                    auth.AuthorizationServerMetadata // server config (optional)
-	ClientInformation          *auth.OAuthClientInformation      // client credentials
-	AuthorizationCode          string                            // auth code from server
-	CodeVerifier               string                            // PKCE verifier
-	RedirectURI                string                            // must match auth request
-	Resource                   *url.URL                          // target resource (optional)
-	AddClientAuthentication    func(http.Header, url.Values, string) error // custom auth (optional)
-	FetchFn                    auth.FetchFunc                    // custom HTTP client (optional)
+	Metadata                auth.AuthorizationServerMetadata            // server config (optional)
+	ClientInformation       *auth.OAuthClientInformation                // client credentials
+	AuthorizationCode       string                                      // auth code from server
+	CodeVerifier            string                                      // PKCE verifier
+	RedirectURI             string                                      // must match auth request
+	Resource                *url.URL                                    // target resource (optional)
+	AddClientAuthentication func(http.Header, url.Values, string) error // custom auth (optional)
+	FetchFn                 auth.FetchFunc                              // custom HTTP client (optional)
 }
 
 type RefreshAuthorizationOptions struct {
-	Metadata                    auth.AuthorizationServerMetadata // server config (optional)
-	ClientInformation          *auth.OAuthClientInformation      // client credentials
-	RefreshToken               string                            // refresh token
-	Resource                   *url.URL                          // target resource (optional)
-	AddClientAuthentication    func(http.Header, url.Values, string) error // custom auth (optional)
-	FetchFn                    auth.FetchFunc                    // custom HTTP client (optional)
+	Metadata                auth.AuthorizationServerMetadata            // server config (optional)
+	ClientInformation       *auth.OAuthClientInformation                // client credentials
+	RefreshToken            string                                      // refresh token
+	Resource                *url.URL                                    // target resource (optional)
+	AddClientAuthentication func(http.Header, url.Values, string) error // custom auth (optional)
+	FetchFn                 auth.FetchFunc                              // custom HTTP client (optional)
 }
 
 type UnauthorizedError struct {
@@ -198,9 +198,57 @@ func applyPostAuth(clientID, clientSecret string, params url.Values) {
 func applyPublicAuth(clientID string, params url.Values) {
 	params.Set("client_id", clientID)
 }
+
+// parseErrorResponse parses an OAuth error response from a Response object or string.
+//
+// If the input is a standard OAuth 2.0 error response, it will be parsed according to the spec
+// and an instance of the appropriate OAuthError will be returned.
+// If parsing fails, it falls back to a generic ServerError that includes
+// the response status (if available) and original content.
+//
+// This implementation mirrors the TypeScript parseErrorResponse function for consistency.
 func parseErrorResponse(input interface{}) (*errors.OAuthError, error) {
-	// TODO parse error response
-	return nil, nil
+	var statusCode *int
+	var body string
+
+	// Extract status code and body from different input types
+	switch v := input.(type) {
+	case *http.Response:
+		statusCode = &v.StatusCode
+		bodyBytes, err := io.ReadAll(v.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+		body = string(bodyBytes)
+	case string:
+		body = v
+	case []byte:
+		body = string(v)
+	default:
+		return nil, fmt.Errorf("unsupported input type: %T", input)
+	}
+
+	// Try to parse as standard OAuth error response
+	var errorResp errors.OAuthErrorResponse
+	if err := json.Unmarshal([]byte(body), &errorResp); err != nil {
+		// Not a valid OAuth error response, but try to inform the user of the raw data anyway
+		errorMessage := fmt.Sprintf("Invalid OAuth error response: %v. Raw body: %s", err, body)
+		if statusCode != nil {
+			errorMessage = fmt.Sprintf("HTTP %d: %s", *statusCode, errorMessage)
+		}
+		oauthErr := errors.NewOAuthError(errors.ErrServerError, errorMessage, "")
+		return &oauthErr, nil
+	}
+
+	// Use the error mapping for cleaner code, similar to TypeScript's OAUTH_ERRORS
+	errorCode, exists := errors.OAuthErrors[errorResp.Error]
+	if !exists {
+		// For unknown error codes, use server_error as fallback
+		errorCode = errors.ErrServerError
+	}
+
+	oauthErr := errors.NewOAuthError(errorCode, errorResp.ErrorDescription, errorResp.ErrorURI)
+	return &oauthErr, nil
 }
 func Auth(provider OAuthClientProvider, options auth.AuthOptions) (*AuthResult, error) {
 	result, err := authInternal(provider, options)
@@ -491,6 +539,14 @@ func tryMetadataDiscovery(targetUrl *url.URL, protocolVersion string, fetchFn au
 
 // fetchWithCorsRetry helper function to handle CORS retry logic
 func fetchWithCorsRetry(targetUrl *url.URL, headers http.Header, fetchFn auth.FetchFunc) (*http.Response, error) {
+	// Validate inputs
+	if targetUrl == nil {
+		return nil, fmt.Errorf("target URL cannot be nil")
+	}
+	if fetchFn == nil {
+		return nil, fmt.Errorf("fetch function cannot be nil")
+	}
+
 	req, err := http.NewRequest("GET", targetUrl.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -505,11 +561,22 @@ func fetchWithCorsRetry(targetUrl *url.URL, headers http.Header, fetchFn auth.Fe
 
 	response, err := fetchFn(targetUrl.String(), req)
 	if err != nil {
-		// If it's a network error (similar to TypeError in TypeScript), try retry without headers
-		if isNetworkError(err) && len(headers) > 0 {
+		// Check if this is a CORS-related error that might be resolved by removing headers
+		if isCorsRelatedError(err) && len(headers) > 0 {
+			// Retry without custom headers to avoid CORS preflight
 			return fetchWithCorsRetry(targetUrl, http.Header{}, fetchFn)
 		}
-		return nil, err
+		return nil, fmt.Errorf("fetch failed: %w", err)
+	}
+
+	// Check for CORS-related HTTP status codes
+	if response != nil && isCorsRelatedStatusCode(response.StatusCode) && len(headers) > 0 {
+		// Close the response body to avoid resource leak
+		if response.Body != nil {
+			response.Body.Close()
+		}
+		// Retry without custom headers
+		return fetchWithCorsRetry(targetUrl, http.Header{}, fetchFn)
 	}
 
 	return response, nil
@@ -563,6 +630,30 @@ func isNetworkError(err error) bool {
 		strings.Contains(errorStr, "timeout") ||
 		strings.Contains(errorStr, "refused")
 }
+
+// isCorsRelatedError checks if an error might be CORS-related
+func isCorsRelatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errorStr := strings.ToLower(err.Error())
+	return strings.Contains(errorStr, "cors") ||
+		strings.Contains(errorStr, "cross-origin") ||
+		strings.Contains(errorStr, "preflight") ||
+		strings.Contains(errorStr, "access-control") ||
+		isNetworkError(err) // Network errors might also be CORS-related
+}
+
+// isCorsRelatedStatusCode checks if an HTTP status code indicates a CORS issue
+func isCorsRelatedStatusCode(statusCode int) bool {
+	// Common CORS-related status codes
+	return statusCode == 403 || // Forbidden (often CORS)
+		statusCode == 405 || // Method Not Allowed (CORS preflight rejection)
+		statusCode == 0 // Network error or blocked request
+}
+
+// isSuccessStatusCode checks if an HTTP status code indicates success
+
 func buildDiscoveryUrls(authorizationServerURL string) ([]discoveryUrl, error) {
 	parsedURL, err := url.Parse(authorizationServerURL)
 	if err != nil {
@@ -840,14 +931,40 @@ func startAuthorization(
 	const responseType = "code"
 	const codeChallengeMethod = "S256"
 
+	// Validate required parameters
+	if strings.TrimSpace(authorizationServerUrl) == "" {
+		return nil, fmt.Errorf("authorization server URL is required")
+	}
+	if strings.TrimSpace(options.ClientInformation.ClientID) == "" {
+		return nil, fmt.Errorf("client ID is required")
+	}
+	if strings.TrimSpace(options.RedirectURL) == "" {
+		return nil, fmt.Errorf("redirect URL is required")
+	}
+
+	// Validate redirect URL format
+	if _, err := url.Parse(options.RedirectURL); err != nil {
+		return nil, fmt.Errorf("invalid redirect URL format: %w", err)
+	}
+
 	var authorizationURL *url.URL
 	var err error
 
 	// Determine authorization endpoint URL
 	if options.Metadata != nil {
-		authorizationURL, err = url.Parse(options.Metadata.GetAuthorizationEndpoint())
+		authorizationEndpoint := options.Metadata.GetAuthorizationEndpoint()
+		if strings.TrimSpace(authorizationEndpoint) == "" {
+			return nil, fmt.Errorf("authorization endpoint not found in metadata")
+		}
+
+		authorizationURL, err = url.Parse(authorizationEndpoint)
 		if err != nil {
 			return nil, fmt.Errorf("invalid authorization endpoint: %w", err)
+		}
+
+		// Validate authorization URL scheme
+		if authorizationURL.Scheme != "https" && authorizationURL.Scheme != "http" {
+			return nil, fmt.Errorf("authorization endpoint must use http or https scheme")
 		}
 
 		// Verify server supports "code" response type
@@ -898,6 +1015,17 @@ func startAuthorization(
 		if err != nil {
 			return nil, fmt.Errorf("invalid authorization server URL: %w", err)
 		}
+
+		// Validate base URL scheme
+		if baseURL.Scheme != "https" && baseURL.Scheme != "http" {
+			return nil, fmt.Errorf("authorization server URL must use http or https scheme")
+		}
+
+		// Validate base URL has host
+		if strings.TrimSpace(baseURL.Host) == "" {
+			return nil, fmt.Errorf("authorization server URL must have a valid host")
+		}
+
 		authorizationURL = baseURL.ResolveReference(&url.URL{Path: "/authorize"})
 	}
 
@@ -947,18 +1075,48 @@ func exchangeAuthorization(
 ) (*auth.OAuthTokens, error) {
 	const grantType = "authorization_code"
 
+	// Validate required parameters
+	if strings.TrimSpace(authorizationServerUrl) == "" {
+		return nil, fmt.Errorf("authorization server URL is required")
+	}
+	if options.ClientInformation == nil {
+		return nil, fmt.Errorf("client information is required")
+	}
+	if strings.TrimSpace(options.ClientInformation.ClientID) == "" {
+		return nil, fmt.Errorf("client ID is required")
+	}
+	if strings.TrimSpace(options.AuthorizationCode) == "" {
+		return nil, fmt.Errorf("authorization code is required")
+	}
+	if strings.TrimSpace(options.CodeVerifier) == "" {
+		return nil, fmt.Errorf("code verifier is required")
+	}
+	if strings.TrimSpace(options.RedirectURI) == "" {
+		return nil, fmt.Errorf("redirect URI is required")
+	}
+
+	// Validate redirect URI format
+	if _, err := url.Parse(options.RedirectURI); err != nil {
+		return nil, fmt.Errorf("invalid redirect URI format: %w", err)
+	}
+
 	// Determine token endpoint URL
 	var tokenURL *url.URL
 	var err error
 
 	if options.Metadata != nil {
 		tokenEndpoint := options.Metadata.GetTokenEndpoint()
-		if tokenEndpoint == "" {
+		if strings.TrimSpace(tokenEndpoint) == "" {
 			return nil, fmt.Errorf("token endpoint not found in metadata")
 		}
 		tokenURL, err = url.Parse(tokenEndpoint)
 		if err != nil {
 			return nil, fmt.Errorf("invalid token endpoint: %w", err)
+		}
+
+		// Validate token URL scheme
+		if tokenURL.Scheme != "https" && tokenURL.Scheme != "http" {
+			return nil, fmt.Errorf("token endpoint must use http or https scheme")
 		}
 
 		// Verify server supports authorization_code grant type
@@ -984,6 +1142,17 @@ func exchangeAuthorization(
 		if err != nil {
 			return nil, fmt.Errorf("invalid authorization server URL: %w", err)
 		}
+
+		// Validate base URL scheme
+		if baseURL.Scheme != "https" && baseURL.Scheme != "http" {
+			return nil, fmt.Errorf("authorization server URL must use http or https scheme")
+		}
+
+		// Validate base URL has host
+		if strings.TrimSpace(baseURL.Host) == "" {
+			return nil, fmt.Errorf("authorization server URL must have a valid host")
+		}
+
 		tokenURL = baseURL.ResolveReference(&url.URL{Path: "/token"})
 	}
 
@@ -1051,17 +1220,32 @@ func exchangeAuthorization(
 	// Check response status
 	if !isSuccessStatusCode(resp.StatusCode) {
 		// Try to parse OAuth error response
-		var oauthError errors.OAuthError
-		if err := json.Unmarshal(responseBody, &oauthError); err == nil {
-			return nil, &oauthError
+		oauthError, parseErr := parseErrorResponse(resp)
+		if parseErr == nil && oauthError != nil {
+			return nil, oauthError
 		}
+		// Fallback to generic error if parsing fails
 		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	// Validate response body is not empty
+	if len(responseBody) == 0 {
+		return nil, fmt.Errorf("empty token response body")
 	}
 
 	// Parse success response
 	var tokens auth.OAuthTokens
 	if err := json.Unmarshal(responseBody, &tokens); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	}
+
+	// Validate required token fields
+	if strings.TrimSpace(tokens.AccessToken) == "" {
+		return nil, fmt.Errorf("access token is missing from response")
+	}
+	if strings.TrimSpace(tokens.TokenType) == "" {
+		// Default to Bearer if not specified
+		tokens.TokenType = "Bearer"
 	}
 
 	return &tokens, nil

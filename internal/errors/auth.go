@@ -39,6 +39,27 @@ var (
 	ErrInsufficientScope       OAuthErrorCode = errors.New("insufficient scope")
 )
 
+// OAuthErrors maps error codes to their corresponding OAuthErrorCode constants
+// Similar to TypeScript's OAUTH_ERRORS mapping for cleaner error handling
+var OAuthErrors = map[string]OAuthErrorCode{
+	"invalid_request":          ErrInvalidRequest,
+	"invalid_client":           ErrInvalidClient,
+	"invalid_grant":            ErrInvalidGrant,
+	"unauthorized_client":      ErrUnauthorizedClient,
+	"unsupported_grant_type":   ErrUnsupportedGrantType,
+	"invalid_scope":            ErrInvalidScope,
+	"access_denied":            ErrAccessDenied,
+	"server_error":             ErrServerError,
+	"temporarily_unavailable":  ErrTemporarilyUnavailable,
+	"unsupported_response_type": ErrUnsupportedResponseType,
+	"unsupported_token_type":   ErrUnsupportedTokenType,
+	"invalid_token":            ErrInvalidToken,
+	"method_not_allowed":       ErrMethodNotAllowed,
+	"too_many_requests":        ErrTooManyRequests,
+	"invalid_client_metadata":  ErrInvalidClientMetadata,
+	"insufficient_scope":       ErrInsufficientScope,
+}
+
 // NewOAuthError creates a new OAuthError
 func NewOAuthError(errCode OAuthErrorCode, message string, uri string) OAuthError {
 	err := OAuthError{
