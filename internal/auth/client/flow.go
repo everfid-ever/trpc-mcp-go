@@ -13,11 +13,10 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-
-	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/utils"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/pkce"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
 type AuthResult string
@@ -59,14 +58,6 @@ type discoveryUrl struct {
 	Type discoveryUrlType
 }
 
-// PKCEChallenge holds PKCE code verifier and challenge
-type PKCEChallenge struct {
-	// CodeVerifier is the high-entropy cryptographic random string
-	CodeVerifier string
-	// CodeChallenge is the derived challenge from the code verifier
-	CodeChallenge string
-}
-
 // StartAuthorizationOptions configures OAuth authorization startup
 type StartAuthorizationOptions struct {
 	// Metadata contains authorization server configuration (optional)
@@ -91,23 +82,23 @@ type StartAuthorizationResult struct {
 	CodeVerifier string
 }
 type ExchangeAuthorizationOptions struct {
-	Metadata                    auth.AuthorizationServerMetadata // server config (optional)
-	ClientInformation          *auth.OAuthClientInformation      // client credentials
-	AuthorizationCode          string                            // auth code from server
-	CodeVerifier               string                            // PKCE verifier
-	RedirectURI                string                            // must match auth request
-	Resource                   *url.URL                          // target resource (optional)
-	AddClientAuthentication    func(http.Header, url.Values, string) error // custom auth (optional)
-	FetchFn                    auth.FetchFunc                    // custom HTTP client (optional)
+	Metadata                auth.AuthorizationServerMetadata            // server config (optional)
+	ClientInformation       *auth.OAuthClientInformation                // client credentials
+	AuthorizationCode       string                                      // auth code from server
+	CodeVerifier            string                                      // PKCE verifier
+	RedirectURI             string                                      // must match auth request
+	Resource                *url.URL                                    // target resource (optional)
+	AddClientAuthentication func(http.Header, url.Values, string) error // custom auth (optional)
+	FetchFn                 auth.FetchFunc                              // custom HTTP client (optional)
 }
 
 type RefreshAuthorizationOptions struct {
-	Metadata                    auth.AuthorizationServerMetadata // server config (optional)
-	ClientInformation          *auth.OAuthClientInformation      // client credentials
-	RefreshToken               string                            // refresh token
-	Resource                   *url.URL                          // target resource (optional)
-	AddClientAuthentication    func(http.Header, url.Values, string) error // custom auth (optional)
-	FetchFn                    auth.FetchFunc                    // custom HTTP client (optional)
+	Metadata                auth.AuthorizationServerMetadata            // server config (optional)
+	ClientInformation       *auth.OAuthClientInformation                // client credentials
+	RefreshToken            string                                      // refresh token
+	Resource                *url.URL                                    // target resource (optional)
+	AddClientAuthentication func(http.Header, url.Values, string) error // custom auth (optional)
+	FetchFn                 auth.FetchFunc                              // custom HTTP client (optional)
 }
 
 type UnauthorizedError struct {
@@ -394,7 +385,7 @@ func authInternal(provider OAuthClientProvider, options auth.AuthOptions) (*Auth
 }
 
 func selectResourceURL(serverUrl string, provider OAuthClientProvider, resourceMetadata *auth.OAuthProtectedResourceMetadata) (*url.URL, error) {
-	defaultResource, err := utils.ResourceURLFromServerURL(serverUrl)
+	defaultResource, err := auth.ResourceURLFromServerURL(serverUrl)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +401,7 @@ func selectResourceURL(serverUrl string, provider OAuthClientProvider, resourceM
 	}
 
 	// Check metadata resource compatibility
-	allowed, err := utils.CheckResourceAllowed(utils.CheckResourceAllowedParams{
+	allowed, err := auth.CheckResourceAllowed(auth.CheckResourceAllowedParams{
 		RequestedResource:  defaultResource,
 		ConfiguredResource: resourceMetadata.Resource,
 	})
@@ -851,7 +842,7 @@ func RegisterClient(
 func isSuccessStatusCode(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
 }
-func generatePKCEChallenge() (*PKCEChallenge, error) {
+func generatePKCEChallenge() (*pkce.PKCEChallenge, error) {
 	// Generate 43-128 character code_verifier (RFC 7636)
 	verifierBytes := make([]byte, 32) // 32 bytes = 43 chars in base64url
 	if _, err := rand.Read(verifierBytes); err != nil {
@@ -864,7 +855,7 @@ func generatePKCEChallenge() (*PKCEChallenge, error) {
 	hash := sha256.Sum256([]byte(codeVerifier))
 	codeChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
 
-	return &PKCEChallenge{
+	return &pkce.PKCEChallenge{
 		CodeVerifier:  codeVerifier,
 		CodeChallenge: codeChallenge,
 	}, nil
@@ -941,7 +932,7 @@ func startAuthorization(
 	}
 
 	// Generate PKCE challenge
-	challenge, err := generatePKCEChallenge()
+	challenge, err := pkce.GeneratePKCEChallenge()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate PKCE challenge: %w", err)
 	}
