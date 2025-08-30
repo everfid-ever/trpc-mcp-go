@@ -199,8 +199,47 @@ func applyPublicAuth(clientID string, params url.Values) {
 	params.Set("client_id", clientID)
 }
 func parseErrorResponse(input interface{}) (*errors.OAuthError, error) {
-	// TODO parse error response
-	return nil, nil
+	var responseBody []byte
+	var err error
+
+	// Handle different input types
+	switch v := input.(type) {
+	case []byte:
+		responseBody = v
+	case string:
+		responseBody = []byte(v)
+	case *http.Response:
+		defer v.Body.Close()
+		responseBody, err = io.ReadAll(v.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported input type: %T", input)
+	}
+
+	// Try to parse as OAuth error response
+	var oauthErrorResp errors.OAuthErrorResponse
+	if err := json.Unmarshal(responseBody, &oauthErrorResp); err != nil {
+		// Not a valid OAuth error response format
+		return nil, fmt.Errorf("failed to parse OAuth error response: %w", err)
+	}
+
+	// Validate required error field
+	if oauthErrorResp.Error == "" {
+		return nil, fmt.Errorf("invalid OAuth error response: missing error field")
+	}
+
+	// Map error code to OAuthErrorCode using the mapping table
+	errorCode, exists := errors.OAuthErrorMapping[oauthErrorResp.Error]
+	if !exists {
+		// Unknown error code, default to server error
+		errorCode = errors.ErrServerError
+	}
+
+	// Create OAuthError with parsed information
+	oauthError := errors.NewOAuthError(errorCode, oauthErrorResp.ErrorDescription, oauthErrorResp.ErrorURI)
+	return &oauthError, nil
 }
 func Auth(provider OAuthClientProvider, options auth.AuthOptions) (*AuthResult, error) {
 	result, err := authInternal(provider, options)
