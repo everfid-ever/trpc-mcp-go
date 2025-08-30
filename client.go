@@ -177,12 +177,12 @@ func NewClient(serverURL string, clientInfo Implementation, options ...ClientOpt
 	}
 
 	// Handle OAuth authentication if configured
-	if client.oauthProvider == nil {
-		// Retrieve and store tokens
-		tokens, err := client.oauthProvider.Tokens()
-		if err == nil && tokens != nil {
+	if client.oauthProvider != nil {
+		if tokens, err := client.oauthProvider.Tokens(); err == nil && tokens != nil {
 			client.accessToken = tokens.AccessToken
-			client.refreshToken = *tokens.RefreshToken
+			if tokens.RefreshToken != nil {
+				client.refreshToken = *tokens.RefreshToken
+			}
 		}
 	}
 
@@ -681,18 +681,11 @@ func isZeroStruct(x interface{}) bool {
 	return reflect.ValueOf(x).IsZero()
 }
 
-// WithClientOAuthProvider configures the OAuth client provider for the Client.
-func WithClientOAuthProvider(p client.OAuthClientProvider) ClientOption {
+func WithOAuthClientProvider(p client.OAuthClientProvider) ClientOption {
 	return func(c *Client) {
+		// 1) 存一份在 Client（后续取初始 token / 刷新等会用到）
+		c.oauthProvider = p
+		// 2) 也下发给 transport（与 a2a 同步，走 transportOptions 管线）
 		c.transportOptions = append(c.transportOptions, withTransportOAuthProvider(p))
-	}
-}
-
-// WithClientOAuth sets up OAuth client authentication
-func WithClientOAuth(oauthProvider client.OAuthClientProvider) ClientOption {
-	return func(c *Client) {
-		if transport, ok := c.transport.(*streamableHTTPClientTransport); ok {
-			transport.oauthProvider = oauthProvider
-		}
 	}
 }

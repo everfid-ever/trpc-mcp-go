@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 )
 
