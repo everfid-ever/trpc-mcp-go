@@ -14,9 +14,10 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
 
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/retry"
 )
 
 // State represents the client state.
@@ -117,10 +118,19 @@ type Client struct {
 	state            State                  // State.
 	transportOptions []transportOption
 
+	// OAuth provider
+	oauthProvider client.OAuthClientProvider
+	// OAuth token management
+	accessToken  string
+	refreshToken string
+
 	// transport configuration.
 	transportConfig *transportConfig
 
 	logger Logger // Logger for client transport (optional).
+
+	// Retry configuration.
+	retryConfig *retry.Config // Configuration for retry behavior (optional).
 
 	// Roots support.
 	rootsProvider RootsProvider // Provider for roots information.
@@ -164,6 +174,21 @@ func NewClient(serverURL string, clientInfo Implementation, options ...ClientOpt
 		if streamableTransport, ok := client.transport.(*streamableHTTPClientTransport); ok {
 			streamableTransport.client = client
 		}
+	}
+
+	// Handle OAuth authentication if configured
+	if client.oauthProvider != nil {
+		if tokens, err := client.oauthProvider.Tokens(); err == nil && tokens != nil {
+			client.accessToken = tokens.AccessToken
+			if tokens.RefreshToken != nil {
+				client.refreshToken = *tokens.RefreshToken
+			}
+		}
+	}
+
+	// Set retry config on transport if configured
+	if client.retryConfig != nil {
+		client.transport.setRetryConfig(client.retryConfig)
 	}
 
 	return client, nil
@@ -656,8 +681,11 @@ func isZeroStruct(x interface{}) bool {
 	return reflect.ValueOf(x).IsZero()
 }
 
-func WithOAuthProvider(p client.OAuthClientProvider) ClientOption {
+func WithOAuthClientProvider(p client.OAuthClientProvider) ClientOption {
 	return func(c *Client) {
+		// 1) 存一份在 Client（后续取初始 token / 刷新等会用到）
+		c.oauthProvider = p
+		// 2) 也下发给 transport（与 a2a 同步，走 transportOptions 管线）
 		c.transportOptions = append(c.transportOptions, withTransportOAuthProvider(p))
 	}
 }

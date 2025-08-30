@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
@@ -22,9 +21,14 @@ type ClientAuthenticationMiddlewareOptions struct {
 	ClientsStore server.OAuthClientsStoreInterface
 }
 
-// ClientAuthenticatedRequest represents the request schema for client authentication
+// ClientAuthenticatedRequest represents the request schema for client authentication.
+// It is typically used when exchanging credentials at the token endpoint.
 type ClientAuthenticatedRequest struct {
-	ClientID     string `json:"client_id"`
+	// ClientID is the unique identifier issued to the client during registration.
+	ClientID string `json:"client_id"`
+
+	// ClientSecret is the client’s secret credential.
+	// It may be omitted when using public clients or PKCE-only flows.
 	ClientSecret string `json:"client_secret,omitempty"`
 }
 
@@ -47,7 +51,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 				var statusCode int
 				switch err.ErrorCode {
 				case errors.ErrInvalidClient.Error():
-					statusCode = http.StatusBadRequest
+					statusCode = http.StatusUnauthorized
 				case errors.ErrInvalidRequest.Error():
 					statusCode = http.StatusBadRequest
 				case errors.ErrServerError.Error():
