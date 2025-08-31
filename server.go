@@ -57,6 +57,34 @@ const (
 // Multiple HTTPContextFunc will be executed in the order they are registered.
 type HTTPContextFunc func(ctx context.Context, r *http.Request) context.Context
 
+// AuditConfig defines configuration for audit middleware
+type AuditConfig struct {
+	// Whether to enable audit logging
+	Enabled bool
+
+	// Audit level: none, basic, detailed, full
+	Level string
+
+	// Whether to hash sensitive data
+	HashSensitiveData bool
+
+	// Whether to include request/response body
+	IncludeRequestBody  bool
+	IncludeResponseBody bool
+
+	// Custom endpoint patterns to audit
+	EndpointPatterns []string
+
+	// Patterns to exclude from auditing
+	ExcludePatterns []string
+
+	// Custom metadata extractor function
+	MetadataExtractor func(*http.Request) map[string]interface{}
+
+	// Custom risk assessor function
+	RiskAssessor func(map[string]interface{}) (string, []string)
+}
+
 // serverConfig stores all server configuration options
 type serverConfig struct {
 	// Basic configuration
@@ -75,6 +103,9 @@ type serverConfig struct {
 
 	// HTTP context functions for extracting information from HTTP requests
 	httpContextFuncs []HTTPContextFunc
+
+	// Audit middleware configuration
+	auditConfig *AuditConfig
 
 	// Tool list filter function
 	toolListFilter ToolListFilter
@@ -294,6 +325,25 @@ func WithNotificationBufferSize(size int) ServerOption {
 func WithHTTPContextFunc(fn HTTPContextFunc) ServerOption {
 	return func(s *Server) {
 		s.config.httpContextFuncs = append(s.config.httpContextFuncs, fn)
+	}
+}
+
+// WithAudit enables audit logging for the server with the specified configuration.
+// The audit middleware will log all HTTP requests and responses based on the configuration.
+//
+// Example:
+//
+//	server := mcp.NewServer("my-server", "1.0",
+//	    mcp.WithAudit(&mcp.AuditConfig{
+//	        Enabled: true,
+//	        Level: "detailed",
+//	        EndpointPatterns: []string{"/mcp/", "/oauth2/"},
+//	        HashSensitiveData: true,
+//	    }),
+//	)
+func WithAudit(config *AuditConfig) ServerOption {
+	return func(s *Server) {
+		s.config.auditConfig = config
 	}
 }
 

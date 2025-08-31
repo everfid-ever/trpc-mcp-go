@@ -1,556 +1,635 @@
 package middleware
 
 import (
-	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"io"
-	"log"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"go.uber.org/zap"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
 
-// Middleware interface definition
-type Middleware interface {
-	Wrap(next http.Handler) http.Handler
-}
+// AuditLevel 定义审计日志级别
+type AuditLevel int
 
-// AuditLogger defines the interface for logging audit events.
-type AuditLogger interface {
-	LogAuditEvent(ctx context.Context, event AuditEvent)
-}
+const (
+	AuditLevelNone AuditLevel = iota
+	AuditLevelBasic
+	AuditLevelDetailed
+	AuditLevelFull
+)
 
-// DefaultAuditLogger is a simple synchronous logger using the standard log package.
-type DefaultAuditLogger struct{}
-
-// LogAuditEvent implements AuditLogger using structured JSON logging.
-func (l *DefaultAuditLogger) LogAuditEvent(ctx context.Context, event AuditEvent) {
-	logEntry := map[string]interface{}{
-		"timestamp": event.Timestamp.Format(time.RFC3339),
-		"trace_id":  event.TraceID,
-		"type":      event.Type,
-		"details":   event.Details,
-	}
-	jsonLog, _ := json.Marshal(logEntry)
-	log.Println(string(jsonLog))
-}
-
-// AsyncAuditLogger wraps an AuditLogger for asynchronous logging with batch processing.
-type AsyncAuditLogger struct {
-	inner AuditLogger
-	wg    sync.WaitGroup
-	ch    chan AuditEventWithCtx
-}
-
-// AuditEventWithCtx bundles the event and context for async processing.
-type AuditEventWithCtx struct {
-	Ctx   context.Context
-	Event AuditEvent
-}
-
-// NewAsyncAuditLogger creates an async logger with batch processing.
-func NewAsyncAuditLogger(inner AuditLogger, bufferSize int) *AsyncAuditLogger {
-	if inner == nil {
-		inner = &DefaultAuditLogger{}
-	}
-	al := &AsyncAuditLogger{
-		inner: inner,
-		ch:    make(chan AuditEventWithCtx, bufferSize),
-	}
-	al.wg.Add(1)
-	al.startBatchProcessing()
-	return al
-}
-
-// startBatchProcessing processes events in batches to reduce logging overhead.
-func (al *AsyncAuditLogger) startBatchProcessing() {
-	go func() {
-		defer al.wg.Done()
-		batch := make([]AuditEventWithCtx, 0, 10)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case e, ok := <-al.ch:
-				if !ok {
-					if len(batch) > 0 {
-						al.processBatch(batch)
-					}
-					return
-				}
-				batch = append(batch, e)
-				if len(batch) >= 10 {
-					al.processBatch(batch)
-					batch = batch[:0]
-				}
-			case <-ticker.C:
-				if len(batch) > 0 {
-					al.processBatch(batch)
-					batch = batch[:0]
-				}
-			}
-		}
-	}()
-}
-
-func (al *AsyncAuditLogger) processBatch(batch []AuditEventWithCtx) {
-	for _, e := range batch {
-		al.inner.LogAuditEvent(e.Ctx, e.Event)
-	}
-}
-
-// LogAuditEvent queues the event for async logging.
-func (al *AsyncAuditLogger) LogAuditEvent(ctx context.Context, event AuditEvent) {
-	select {
-	case al.ch <- AuditEventWithCtx{Ctx: ctx, Event: event}:
-	default:
-		log.Printf("[AsyncAuditLogger] Buffer full, logging synchronously: %+v", event)
-		al.inner.LogAuditEvent(ctx, event)
-	}
-}
-
-// Close waits for all queued events to be logged and closes the channel.
-func (al *AsyncAuditLogger) Close() {
-	close(al.ch)
-	al.wg.Wait()
-}
-
-// AuditEvent represents a structured audit event for OAuth operations.
+// AuditEvent 表示 OAuth2.1 操作的审计事件
 type AuditEvent struct {
-	Timestamp time.Time
-	TraceID   string
-	Type      string
-	Details   map[string]interface{}
+	EventID      string                 `json:"event_id"`
+	Timestamp    time.Time              `json:"timestamp"`
+	EventType    string                 `json:"event_type"`
+	AuditLevel   AuditLevel             `json:"audit_level"`
+	Method       string                 `json:"method"`
+	Path         string                 `json:"path"`
+	QueryParams  map[string]string      `json:"query_params,omitempty"`
+	Headers      map[string]string      `json:"headers,omitempty"`
+	RemoteAddr   string                 `json:"remote_addr"`
+	UserAgent    string                 `json:"user_agent"`
+	RequestID    string                 `json:"request_id,omitempty"`
+	ClientID     string                 `json:"client_id,omitempty"`
+	Subject      string                 `json:"subject,omitempty"`
+	Scopes       []string               `json:"scopes,omitempty"`
+	GrantType    string                 `json:"grant_type,omitempty"`
+	ResponseType string                 `json:"response_type,omitempty"`
+	RedirectURI  string                 `json:"redirect_uri,omitempty"`
+	Resource     string                 `json:"resource,omitempty"`
+	StatusCode   int                    `json:"status_code"`
+	ResponseTime time.Duration          `json:"response_time"`
+	ErrorCode    string                 `json:"error_code,omitempty"`
+	ErrorMessage string                 `json:"error_message,omitempty"`
+	TokenHash    string                 `json:"token_hash,omitempty"`
+	CodeHash     string                 `json:"code_hash,omitempty"`
+	IPHash       string                 `json:"ip_hash,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	RiskLevel    string                 `json:"risk_level,omitempty"`
+	RiskFactors  []string               `json:"risk_factors,omitempty"`
 }
 
-// AuditMiddleware is an http.Handler middleware for auditing OAuth 2.1 core endpoints.
-type AuditMiddleware struct {
+// AuditLogger 定义审计日志接口
+type AuditLogger interface {
+	LogEvent(event AuditEvent) error
+	LogError(event AuditEvent, err error) error
+}
+
+// DefaultAuditLogger 使用 zap 实现审计日志
+type DefaultAuditLogger struct {
+	logger *zap.Logger
+}
+
+// NewAuditLogger 创建审计日志器，支持默认或自定义 zap logger
+func NewAuditLogger(logger *zap.Logger) *DefaultAuditLogger {
+	if logger == nil {
+		var err error
+		logger, err = zap.NewProduction()
+		if err != nil {
+			logger, _ = zap.NewDevelopment()
+		}
+	}
+	return &DefaultAuditLogger{logger: logger}
+}
+
+// GetZapLogger 返回底层 zap logger
+func (l *DefaultAuditLogger) GetZapLogger() *zap.Logger {
+	return l.logger
+}
+
+// LogEvent 记录审计事件
+func (l *DefaultAuditLogger) LogEvent(event AuditEvent) error {
+	if l.logger == nil {
+		return fmt.Errorf("zap logger not initialized")
+	}
+
+	data, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("failed to marshal audit event: %w", err)
+	}
+
+	l.logger.Info("[AUDIT]",
+		zap.ByteString("event", data),
+		zap.Any("audit", struct {
+			Method       string
+			Path         string
+			StatusCode   int
+			ResponseTime time.Duration
+			ClientID     string
+			Subject      string
+			Scopes       []string
+			RiskLevel    string
+		}{
+			Method:       event.Method,
+			Path:         event.Path,
+			StatusCode:   event.StatusCode,
+			ResponseTime: event.ResponseTime,
+			ClientID:     event.ClientID,
+			Subject:      event.Subject,
+			Scopes:       event.Scopes,
+			RiskLevel:    event.RiskLevel,
+		}),
+	)
+	return nil
+}
+
+// LogError 记录带有错误的审计事件
+func (l *DefaultAuditLogger) LogError(event AuditEvent, err error) error {
+	event.ErrorMessage = err.Error()
+	return l.LogEvent(event)
+}
+
+// AuditMiddlewareOptions 定义审计中间件配置
+type AuditMiddlewareOptions struct {
 	Logger              AuditLogger
-	SensitiveFields     []string
-	MaxBodySizeToAudit  int64
-	EnableOAuth21Checks bool
-	complianceRules     []ComplianceRule
+	Level               AuditLevel
+	HashSensitiveData   bool
+	IncludeRequestBody  bool
+	IncludeResponseBody bool
+	RiskAssessor        func(AuditEvent) (string, []string)
+	MetadataExtractor   func(*http.Request) map[string]interface{}
+	EndpointPatterns    []string
+	ExcludePatterns     []string
+	SensitiveKeys       []string
 }
 
-// ComplianceRule defines a rule for OAuth 2.1 compliance checks.
-type ComplianceRule struct {
-	Endpoint string
-	Check    func(r *http.Request, event *AuditEvent) []string
-}
-
-// Option is a functional option for configuring AuditMiddleware.
-type Option func(*AuditMiddleware)
-
-// WithLogger sets the logger.
-func WithLogger(logger AuditLogger) Option {
-	return func(m *AuditMiddleware) {
-		m.Logger = logger
-	}
-}
-
-// WithSensitiveFields sets fields to mask.
-func WithSensitiveFields(fields []string) Option {
-	return func(m *AuditMiddleware) {
-		m.SensitiveFields = fields
-	}
-}
-
-// WithMaxBodySizeToAudit sets the max body size to audit.
-func WithMaxBodySizeToAudit(size int64) Option {
-	return func(m *AuditMiddleware) {
-		m.MaxBodySizeToAudit = size
-	}
-}
-
-// WithEnableOAuth21Checks sets whether to enable OAuth 2.1 checks.
-func WithEnableOAuth21Checks(enable bool) Option {
-	return func(m *AuditMiddleware) {
-		m.EnableOAuth21Checks = enable
-	}
-}
-
-// NewAuditMiddleware creates a new AuditMiddleware with default values and applies options.
-func NewAuditMiddleware(options ...Option) *AuditMiddleware {
-	m := &AuditMiddleware{
-		Logger:              NewAsyncAuditLogger(&DefaultAuditLogger{}, 100),
-		SensitiveFields:     []string{"client_secret", "password", "refresh_token", "access_token", "id_token", "code_verifier", "client_assertion"},
-		MaxBodySizeToAudit:  1 << 20, // 1MB
-		EnableOAuth21Checks: true,
-	}
-	for _, opt := range options {
-		opt(m)
-	}
-	m.initComplianceRules()
-	return m
-}
-
-// initComplianceRules initializes OAuth 2.1 compliance rules.
-func (m *AuditMiddleware) initComplianceRules() {
-	m.complianceRules = []ComplianceRule{
-		{
-			Endpoint: "/authorize",
-			Check: func(r *http.Request, event *AuditEvent) []string {
-				warnings := []string{}
-				if r.URL.Scheme != "https" {
-					warnings = append(warnings, "Non-HTTPS URL detected - OAuth 2.1 requires HTTPS")
-				}
-				query := r.URL.Query()
-				responseType := query.Get("response_type")
-				if responseType == "token" || responseType == "id_token" {
-					warnings = append(warnings, "Implicit flow (response_type=token or id_token) is deprecated in OAuth 2.1")
-				}
-				if responseType == "code" && query.Get("code_challenge") == "" {
-					warnings = append(warnings, "Missing PKCE code_challenge - OAuth 2.1 requires PKCE for public clients")
-				}
-				redirectURI := query.Get("redirect_uri")
-				if redirectURI != "" && !strings.HasPrefix(redirectURI, "https://") && !strings.HasPrefix(redirectURI, "http://localhost") {
-					warnings = append(warnings, "Insecure redirect_uri - OAuth 2.1 requires HTTPS (except localhost)")
-				}
-				return warnings
-			},
+// DefaultAuditMiddlewareOptions 返回默认审计配置
+func DefaultAuditMiddlewareOptions() *AuditMiddlewareOptions {
+	return &AuditMiddlewareOptions{
+		Logger:            NewAuditLogger(nil),
+		Level:             AuditLevelDetailed,
+		HashSensitiveData: true,
+		EndpointPatterns: []string{
+			"/oauth2/authorize",
+			"/oauth2/token",
+			"/oauth2/revoke",
+			"/oauth2/register",
+			"/oauth2/metadata",
 		},
-		{
-			Endpoint: "/token",
-			Check: func(r *http.Request, event *AuditEvent) []string {
-				warnings := []string{}
-				if r.URL.Scheme != "https" {
-					warnings = append(warnings, "Non-HTTPS URL detected - OAuth 2.1 requires HTTPS")
-				}
-				bodyParams, ok := event.Details["BodyParams"].(map[string]string)
-				if !ok {
-					bodyParams = parseFormBody(r.URL.RawQuery)
-				}
-				grantType := bodyParams["grant_type"]
-				if grantType == "authorization_code" && bodyParams["code_verifier"] == "" {
-					warnings = append(warnings, "Missing PKCE code_verifier - OAuth 2.1 requires PKCE for authorization_code grant")
-				}
-				if grantType == "password" {
-					warnings = append(warnings, "Password grant is deprecated in OAuth 2.1")
-				}
-				if grantType == "client_credentials" && r.Header.Get("Authorization") == "" && bodyParams["client_secret"] == "" {
-					warnings = append(warnings, "Missing client authentication - OAuth 2.1 recommends client_secret or private_key_jwt")
-				}
-				return warnings
-			},
-		},
-		{
-			Endpoint: "/register",
-			Check: func(r *http.Request, event *AuditEvent) []string {
-				warnings := []string{}
-				if r.URL.Scheme != "https" {
-					warnings = append(warnings, "Non-HTTPS URL detected - OAuth 2.1 requires HTTPS")
-				}
-				var jsonBody map[string]interface{}
-				if body, ok := event.Details["Body"]; ok && r.Header.Get("Content-Type") == "application/json" {
-					jsonBody, _ = body.(map[string]interface{})
-				}
-				if jsonBody != nil {
-					if redirectURIs, ok := jsonBody["redirect_uris"].([]interface{}); ok {
-						for _, uri := range redirectURIs {
-							if uriStr, ok := uri.(string); ok && !strings.HasPrefix(uriStr, "https://") && !strings.HasPrefix(uriStr, "http://localhost") {
-								warnings = append(warnings, "Insecure redirect_uri in client registration - OAuth 2.1 requires HTTPS")
-							}
-						}
-					}
-					if grantTypes, ok := jsonBody["grant_types"].([]interface{}); ok {
-						for _, gt := range grantTypes {
-							if gtStr, ok := gt.(string); ok && (gtStr == "implicit" || gtStr == "password") {
-								warnings = append(warnings, "Deprecated grant_type in client registration: "+gtStr)
-							}
-						}
-					}
-				}
-				return warnings
-			},
-		},
-		{
-			Endpoint: "/revoke",
-			Check: func(r *http.Request, event *AuditEvent) []string {
-				warnings := []string{}
-				if r.URL.Scheme != "https" {
-					warnings = append(warnings, "Non-HTTPS URL detected - OAuth 2.1 requires HTTPS")
-				}
-				bodyParams, ok := event.Details["BodyParams"].(map[string]string)
-				if !ok {
-					bodyParams = parseFormBody(r.URL.RawQuery)
-				}
-				if token := bodyParams["token"]; token == "" {
-					warnings = append(warnings, "Missing token parameter in revocation request")
-				}
-				return warnings
-			},
-		},
-		{
-			Endpoint: "/metadata",
-			Check: func(r *http.Request, event *AuditEvent) []string {
-				warnings := []string{}
-				if r.URL.Scheme != "https" {
-					warnings = append(warnings, "Non-HTTPS URL detected - OAuth 2.1 requires HTTPS")
-				}
-				if r.Method != http.MethodGet {
-					warnings = append(warnings, "Non-GET method used for /metadata - RFC 8414 recommends GET")
-				}
-				return warnings
-			},
-		},
+		SensitiveKeys: []string{"client_secret", "code_verifier", "password", "authorization", "cookie", "x-api-key"},
 	}
 }
 
-// responseWriter wraps http.ResponseWriter to capture status and body.
-type responseWriter struct {
+// AuditOptionsBuilder 用于构建审计中间件选项
+type AuditOptionsBuilder struct {
+	options *AuditMiddlewareOptions
+}
+
+// NewAuditOptionsBuilder 创建配置构建器
+func NewAuditOptionsBuilder() *AuditOptionsBuilder {
+	return &AuditOptionsBuilder{options: DefaultAuditMiddlewareOptions()}
+}
+
+// WithLogger 设置自定义 logger
+func (b *AuditOptionsBuilder) WithLogger(logger *zap.Logger) *AuditOptionsBuilder {
+	b.options.Logger = NewAuditLogger(logger)
+	return b
+}
+
+// WithLevel 设置审计级别
+func (b *AuditOptionsBuilder) WithLevel(level AuditLevel) *AuditOptionsBuilder {
+	b.options.Level = level
+	return b
+}
+
+// WithHashSensitiveData 设置是否哈希敏感数据
+func (b *AuditOptionsBuilder) WithHashSensitiveData(hash bool) *AuditOptionsBuilder {
+	b.options.HashSensitiveData = hash
+	return b
+}
+
+// WithRequestBody 设置是否包含请求体
+func (b *AuditOptionsBuilder) WithRequestBody(include bool) *AuditOptionsBuilder {
+	b.options.IncludeRequestBody = include
+	return b
+}
+
+// WithResponseBody 设置是否包含响应体
+func (b *AuditOptionsBuilder) WithResponseBody(include bool) *AuditOptionsBuilder {
+	b.options.IncludeResponseBody = include
+	return b
+}
+
+// WithRiskAssessor 设置风险评估函数
+func (b *AuditOptionsBuilder) WithRiskAssessor(assessor func(AuditEvent) (string, []string)) *AuditOptionsBuilder {
+	b.options.RiskAssessor = assessor
+	return b
+}
+
+// WithMetadataExtractor 设置元数据提取函数
+func (b *AuditOptionsBuilder) WithMetadataExtractor(extractor func(*http.Request) map[string]interface{}) *AuditOptionsBuilder {
+	b.options.MetadataExtractor = extractor
+	return b
+}
+
+// WithEndpointPatterns 设置审计端点模式
+func (b *AuditOptionsBuilder) WithEndpointPatterns(patterns []string) *AuditOptionsBuilder {
+	b.options.EndpointPatterns = patterns
+	return b
+}
+
+// WithExcludePatterns 设置排除模式
+func (b *AuditOptionsBuilder) WithExcludePatterns(patterns []string) *AuditOptionsBuilder {
+	b.options.ExcludePatterns = patterns
+	return b
+}
+
+// WithSensitiveKeys 设置敏感字段
+func (b *AuditOptionsBuilder) WithSensitiveKeys(keys []string) *AuditOptionsBuilder {
+	b.options.SensitiveKeys = keys
+	return b
+}
+
+// Build 返回最终配置
+func (b *AuditOptionsBuilder) Build() *AuditMiddlewareOptions {
+	return b.options
+}
+
+// AuditMiddleware 创建审计中间件
+func AuditMiddleware(options *AuditMiddlewareOptions) func(http.Handler) http.Handler {
+	if options == nil {
+		options = DefaultAuditMiddlewareOptions()
+	}
+	if options.Logger == nil {
+		options.Logger = NewAuditLogger(nil)
+	}
+	if err := validateOptions(options); err != nil {
+		panic(fmt.Sprintf("invalid audit middleware options: %v", err))
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !shouldAuditPath(r.URL.Path, options.EndpointPatterns, options.ExcludePatterns) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			event, wrappedWriter := initializeAuditEvent(w, r, options)
+			defer logAuditEvent(event, wrappedWriter, options.Logger)
+			next.ServeHTTP(wrappedWriter, r)
+		})
+	}
+}
+
+// validateOptions 验证配置
+func validateOptions(options *AuditMiddlewareOptions) error {
+	if len(options.EndpointPatterns) == 0 && len(options.ExcludePatterns) == 0 {
+		return fmt.Errorf("at least one endpoint pattern or exclude pattern must be specified")
+	}
+	return nil
+}
+
+// auditResponseWriter 包装 ResponseWriter 以捕获状态码和响应体
+type auditResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
-	body       *bytes.Buffer
+	body       []byte
 }
 
-// WriteHeader captures the status code.
-func (rw *responseWriter) WriteHeader(code int) {
-	rw.statusCode = code
-	rw.ResponseWriter.WriteHeader(code)
+func (w *auditResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
 }
 
-// Write captures the response body.
-func (rw *responseWriter) Write(b []byte) (int, error) {
-	rw.body.Write(b)
-	return rw.ResponseWriter.Write(b)
+func (w *auditResponseWriter) Write(b []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	w.body = append(w.body, b...)
+	return w.ResponseWriter.Write(b)
 }
 
-var bufferPool = sync.Pool{
-	New: func() interface{} { return new(bytes.Buffer) },
+// OAuthInfo 包含从请求中提取的 OAuth2.1 信息
+type OAuthInfo struct {
+	ClientID     string
+	Subject      string
+	Scopes       []string
+	GrantType    string
+	ResponseType string
+	RedirectURI  string
+	Resource     string
+	Token        string
+	Code         string
 }
 
-// Wrap implements Middleware by wrapping the next handler with audit logic.
-func (m *AuditMiddleware) Wrap(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		traceID := extractTraceID(ctx)
-		coreEndpoints := []string{"/authorize", "/token", "/register", "/revoke", "/metadata"}
+// extractOAuthInfo 提取 OAuth2.1 特定信息
+func extractOAuthInfo(r *http.Request) OAuthInfo {
+	info := OAuthInfo{}
+	if r.URL != nil {
+		query := r.URL.Query()
+		info.ClientID = query.Get("client_id")
+		info.ResponseType = query.Get("response_type")
+		info.RedirectURI = query.Get("redirect_uri")
+		info.Resource = query.Get("resource")
+		if scope := query.Get("scope"); scope != "" {
+			info.Scopes = strings.Split(scope, " ")
+		}
+	}
+	if err := r.ParseForm(); err == nil {
+		if info.GrantType == "" {
+			info.GrantType = r.FormValue("grant_type")
+		}
+		info.Code = r.FormValue("code")
+		if scope := r.FormValue("scope"); scope != "" && len(info.Scopes) == 0 {
+			info.Scopes = strings.Split(scope, " ")
+		}
+	}
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		info.Token = strings.TrimPrefix(auth, "Bearer ")
+	}
+	if authInfo, ok := GetAuthInfo(r.Context()); ok {
+		info.Subject = extractSubject(authInfo)
+		if len(info.Scopes) == 0 {
+			info.Scopes = authInfo.Scopes
+		}
+	}
+	return info
+}
 
-		// Check if the request is for a core endpoint
-		isCoreEndpoint := false
-		for _, endpoint := range coreEndpoints {
-			if strings.HasSuffix(r.URL.Path, endpoint) {
-				isCoreEndpoint = true
+// shouldAuditPath 判断路径是否需要审计
+func shouldAuditPath(path string, includePatterns, excludePatterns []string) bool {
+	for _, pattern := range excludePatterns {
+		if matched, _ := regexp.MatchString(pattern, path); matched {
+			return false
+		}
+	}
+	if len(includePatterns) == 0 {
+		return true
+	}
+	for _, pattern := range includePatterns {
+		if matched, _ := regexp.MatchString(pattern, path); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// determineEventType 确定事件类型
+func determineEventType(path, method string) string {
+	switch {
+	case strings.Contains(path, "/authorize"):
+		return "oauth_authorization"
+	case strings.Contains(path, "/token"):
+		return "oauth_token"
+	case strings.Contains(path, "/revoke"):
+		return "oauth_revocation"
+	case strings.Contains(path, "/register"):
+		return "oauth_registration"
+	case strings.Contains(path, "/metadata"):
+		return "oauth_metadata"
+	default:
+		return "oauth_request"
+	}
+}
+
+// generateEventID 生成唯一事件 ID
+func generateEventID() string {
+	return fmt.Sprintf("audit_%d_%s", time.Now().UnixNano(), randomString(8))
+}
+
+// randomString 生成随机字符串
+func randomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		for i := range b {
+			b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+		}
+	} else {
+		for i := range b {
+			b[i] = charset[int(b[i])%len(charset)]
+		}
+	}
+	return string(b)
+}
+
+// sanitizeMap 清理敏感键值对
+func sanitizeMap[T string | []string](data map[string]T, sensitiveKeys []string) map[string]string {
+	sanitized := make(map[string]string)
+	for key, value := range data {
+		isSensitive := false
+		for _, sensitiveKey := range sensitiveKeys {
+			if strings.EqualFold(key, sensitiveKey) {
+				isSensitive = true
 				break
 			}
 		}
-		if !isCoreEndpoint {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Audit the request
-		reqEvent := AuditEvent{
-			Timestamp: time.Now(),
-			TraceID:   traceID,
-			Type:      getRequestType(r.URL.Path),
-			Details:   make(map[string]interface{}),
-		}
-		m.auditRequest(r, &reqEvent)
-		if m.EnableOAuth21Checks {
-			m.checkOAuth21Compliance(r, &reqEvent)
-		}
-		m.Logger.LogAuditEvent(ctx, reqEvent)
-
-		// Wrap response writer
-		buf := bufferPool.Get().(*bytes.Buffer)
-		defer bufferPool.Put(buf)
-		buf.Reset()
-		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK, body: buf}
-		next.ServeHTTP(rw, r)
-
-		// Audit the response
-		respEvent := AuditEvent{
-			Timestamp: time.Now(),
-			TraceID:   traceID,
-			Type:      "Response",
-			Details:   make(map[string]interface{}),
-		}
-		m.auditResponse(rw, &reqEvent, &respEvent)
-		m.Logger.LogAuditEvent(ctx, respEvent)
-	})
-}
-
-// auditRequest populates the AuditEvent with request details.
-func (m *AuditMiddleware) auditRequest(r *http.Request, event *AuditEvent) {
-	event.Details["Method"] = r.Method
-	event.Details["URL"] = r.URL.String()
-	event.Details["QueryParams"] = r.URL.Query()
-	event.Details["Headers"] = redactHeaders(r.Header)
-	if r.Body != nil && r.Method != http.MethodGet {
-		m.parseRequestBody(r, event)
-	}
-}
-
-// parseRequestBody parses and masks the request body.
-func (m *AuditMiddleware) parseRequestBody(r *http.Request, event *AuditEvent) {
-	contentType := r.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "application/x-www-form-urlencoded") {
-		event.Details["Body"] = "[SKIPPED: Unsupported Content-Type]"
-		return
-	}
-
-	limitedReader := io.LimitReader(r.Body, m.MaxBodySizeToAudit)
-	reqBody, _ := io.ReadAll(limitedReader)
-	r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
-	if len(reqBody) > 0 {
-		m.parseAndMaskBody(r, string(reqBody), event)
-	}
-	if int64(len(reqBody)) == m.MaxBodySizeToAudit {
-		event.Details["BodyTruncated"] = true
-	}
-}
-
-// auditResponse populates the AuditEvent with response details.
-func (m *AuditMiddleware) auditResponse(rw *responseWriter, reqEvent *AuditEvent, respEvent *AuditEvent) {
-	respEvent.Details["StatusCode"] = rw.statusCode
-	respEvent.Details["Headers"] = redactHeaders(rw.Header())
-	respEvent.Details["RequestType"] = reqEvent.Type
-
-	respBody := rw.body.Bytes()
-	if len(respBody) > 0 {
-		contentType := rw.Header().Get("Content-Type")
-		if strings.Contains(contentType, "application/json") {
-			var jsonBody map[string]interface{}
-			if err := json.Unmarshal(respBody, &jsonBody); err == nil {
-				if len(m.SensitiveFields) > 0 {
-					m.maskSensitiveJSON(jsonBody)
+		if isSensitive {
+			sanitized[key] = "[REDACTED]"
+		} else {
+			switch v := any(value).(type) {
+			case string:
+				sanitized[key] = v
+			case []string:
+				if len(v) > 0 {
+					sanitized[key] = v[0]
 				}
-				respEvent.Details["Body"] = jsonBody
-			} else {
-				respEvent.Details["ParseError"] = err.Error()
-				respEvent.Details["Body"] = string(respBody)
-			}
-		} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-			bodyParams := parseFormBody(string(respBody))
-			if len(m.SensitiveFields) > 0 {
-				m.maskSensitiveForm(bodyParams)
-			}
-			respEvent.Details["BodyParams"] = bodyParams
-		} else {
-			respEvent.Details["Body"] = "[SKIPPED: Unsupported Content-Type]"
-		}
-		if int64(len(respBody)) == m.MaxBodySizeToAudit {
-			respEvent.Details["BodyTruncated"] = true
-		}
-	}
-}
-
-// parseAndMaskBody parses and masks the request body based on content type.
-func (m *AuditMiddleware) parseAndMaskBody(r *http.Request, bodyStr string, event *AuditEvent) {
-	contentType := r.Header.Get("Content-Type")
-	if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-		bodyParams := parseFormBody(bodyStr)
-		if len(m.SensitiveFields) > 0 {
-			m.maskSensitiveForm(bodyParams)
-		}
-		event.Details["BodyParams"] = bodyParams
-	} else if strings.Contains(contentType, "application/json") {
-		var jsonBody map[string]interface{}
-		if err := json.Unmarshal([]byte(bodyStr), &jsonBody); err == nil {
-			if len(m.SensitiveFields) > 0 {
-				m.maskSensitiveJSON(jsonBody)
-			}
-			event.Details["Body"] = jsonBody
-		} else {
-			event.Details["ParseError"] = err.Error()
-			event.Details["Body"] = bodyStr
-		}
-	}
-}
-
-// parseFormBody parses urlencoded form into a map.
-func parseFormBody(body string) map[string]string {
-	params := make(map[string]string)
-	for _, param := range strings.Split(body, "&") {
-		parts := strings.SplitN(param, "=", 2)
-		if len(parts) == 2 {
-			params[parts[0]] = parts[1]
-		}
-	}
-	return params
-}
-
-// maskSensitiveForm masks sensitive keys in form params.
-func (m *AuditMiddleware) maskSensitiveForm(params map[string]string) {
-	sensitive := make(map[string]struct{}, len(m.SensitiveFields))
-	for _, key := range m.SensitiveFields {
-		sensitive[key] = struct{}{}
-	}
-	for key := range params {
-		if _, ok := sensitive[key]; ok {
-			params[key] = "[MASKED]"
-		}
-	}
-}
-
-// maskSensitiveJSON masks sensitive keys in JSON body.
-func (m *AuditMiddleware) maskSensitiveJSON(body map[string]interface{}) {
-	sensitive := make(map[string]struct{}, len(m.SensitiveFields))
-	for _, key := range m.SensitiveFields {
-		sensitive[key] = struct{}{}
-	}
-	for key := range body {
-		if _, ok := sensitive[key]; ok {
-			body[key] = "[MASKED]"
-		}
-	}
-}
-
-// checkOAuth21Compliance performs OAuth 2.1 compliance checks.
-func (m *AuditMiddleware) checkOAuth21Compliance(r *http.Request, event *AuditEvent) {
-	for _, rule := range m.complianceRules {
-		if strings.HasSuffix(r.URL.Path, rule.Endpoint) {
-			warnings := rule.Check(r, event)
-			if len(warnings) > 0 {
-				event.Details["OAuth21Warnings"] = warnings
-				event.Type = event.Type + "WithWarnings"
 			}
 		}
 	}
+	return sanitized
 }
 
-// getRequestType determines the event type based on the endpoint.
-func getRequestType(path string) string {
+// sanitizeQueryParams 清理查询参数
+func sanitizeQueryParams(query map[string][]string, sensitiveKeys []string) map[string]string {
+	return sanitizeMap(query, sensitiveKeys)
+}
+
+// sanitizeHeaders 清理头部信息
+func sanitizeHeaders(headers map[string][]string, sensitiveKeys []string) map[string]string {
+	return sanitizeMap(headers, sensitiveKeys)
+}
+
+// hashSensitiveData 创建敏感数据的 SHA256 哈希
+func hashSensitiveData(data string) string {
+	if data == "" {
+		return ""
+	}
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:])
+}
+
+// defaultRiskAssessment 默认风险评估逻辑
+func defaultRiskAssessment(event AuditEvent) (string, []string) {
+	var riskFactors []string
+	riskLevel := "low"
+	if event.StatusCode >= 400 {
+		riskFactors = append(riskFactors, "client_error")
+	}
+	if event.StatusCode >= 500 {
+		riskFactors = append(riskFactors, "server_error")
+		riskLevel = "medium"
+	}
+	if event.ResponseTime > 5*time.Second {
+		riskFactors = append(riskFactors, "slow_response")
+		riskLevel = "medium"
+	}
+	if event.ClientID == "" {
+		riskFactors = append(riskFactors, "missing_client_id")
+		riskLevel = "high"
+	}
+	if strings.Contains(event.Path, "/revoke") {
+		riskFactors = append(riskFactors, "token_revocation")
+		riskLevel = "medium"
+	}
+	if strings.Contains(event.Path, "/register") {
+		riskFactors = append(riskFactors, "client_registration")
+		riskLevel = "medium"
+	}
+	return riskLevel, riskFactors
+}
+
+// determineErrorCode 确定错误代码
+func determineErrorCode(statusCode int) string {
 	switch {
-	case strings.HasSuffix(path, "/authorize"):
-		return "AuthorizeRequest"
-	case strings.HasSuffix(path, "/token"):
-		return "TokenRequest"
-	case strings.HasSuffix(path, "/register"):
-		return "RegisterRequest"
-	case strings.HasSuffix(path, "/revoke"):
-		return "RevokeRequest"
-	case strings.HasSuffix(path, "/metadata"):
-		return "MetadataRequest"
+	case statusCode == 400:
+		return "invalid_request"
+	case statusCode == 401:
+		return "invalid_token"
+	case statusCode == 403:
+		return "insufficient_scope"
+	case statusCode == 404:
+		return "not_found"
+	case statusCode == 429:
+		return "too_many_requests"
+	case statusCode >= 500:
+		return "server_error"
 	default:
-		return "UnknownRequest"
+		return "unknown_error"
 	}
 }
 
-// redactHeaders redacts sensitive headers.
-func redactHeaders(headers http.Header) http.Header {
-	redacted := make(http.Header)
-	for k, v := range headers {
-		lowerK := strings.ToLower(k)
-		if lowerK == "authorization" || lowerK == "cookie" || lowerK == "x-api-key" {
-			redacted[k] = []string{"[REDACTED]"}
-		} else {
-			redacted[k] = v
+// determineErrorMessage 从响应体提取错误信息
+func determineErrorMessage(statusCode int, body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var errorResponse struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if err := json.Unmarshal(body, &errorResponse); err == nil {
+		if errorResponse.ErrorDescription != "" {
+			return errorResponse.ErrorDescription
+		}
+		if errorResponse.Error != "" {
+			return errorResponse.Error
 		}
 	}
-	return redacted
+	return http.StatusText(statusCode)
 }
 
-// extractTraceID extracts a trace ID from the context or generates a new one.
-func extractTraceID(ctx context.Context) string {
-	if traceID, ok := ctx.Value("trace_id").(string); ok && traceID != "" {
-		return traceID
+// extractSubject 从 AuthInfo 提取 subject
+func extractSubject(authInfo server.AuthInfo) string {
+	if authInfo.Extra != nil {
+		if sub, ok := authInfo.Extra["sub"].(string); ok {
+			return sub
+		}
 	}
-	return uuid.New().String()
+	return ""
+}
+
+// GetAuthInfo 从请求上下文中提取 AuthInfo
+func GetAuthInfo(ctx context.Context) (server.AuthInfo, bool) {
+	if authInfo, ok := ctx.Value(authInfoKeyType{}).(server.AuthInfo); ok {
+		return authInfo, true
+	}
+	return server.AuthInfo{}, false
+}
+
+// initializeAuditEvent 初始化审计事件
+func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *AuditMiddlewareOptions) (AuditEvent, *auditResponseWriter) {
+	start := time.Now()
+	wrappedWriter := &auditResponseWriter{ResponseWriter: w}
+	oauthInfo := extractOAuthInfo(r)
+
+	event := AuditEvent{
+		EventID:      generateEventID(),
+		Timestamp:    start,
+		EventType:    determineEventType(r.URL.Path, r.Method),
+		AuditLevel:   options.Level,
+		Method:       r.Method,
+		Path:         r.URL.Path,
+		RemoteAddr:   r.RemoteAddr,
+		UserAgent:    r.UserAgent(),
+		RequestID:    r.Header.Get("X-Request-ID"),
+		ClientID:     oauthInfo.ClientID,
+		Subject:      oauthInfo.Subject,
+		Scopes:       oauthInfo.Scopes,
+		GrantType:    oauthInfo.GrantType,
+		ResponseType: oauthInfo.ResponseType,
+		RedirectURI:  oauthInfo.RedirectURI,
+		Resource:     oauthInfo.Resource,
+		Metadata:     make(map[string]interface{}),
+	}
+
+	if options.Level >= AuditLevelDetailed {
+		event.QueryParams = sanitizeQueryParams(r.URL.Query(), options.SensitiveKeys)
+		event.Headers = sanitizeHeaders(r.Header, options.SensitiveKeys)
+	}
+
+	if options.HashSensitiveData {
+		event.TokenHash = hashSensitiveData(oauthInfo.Token)
+		event.CodeHash = hashSensitiveData(oauthInfo.Code)
+		event.IPHash = hashSensitiveData(r.RemoteAddr)
+	}
+
+	if options.MetadataExtractor != nil {
+		event.Metadata = options.MetadataExtractor(r)
+	}
+
+	if options.RiskAssessor != nil {
+		event.RiskLevel, event.RiskFactors = options.RiskAssessor(event)
+	} else {
+		event.RiskLevel, event.RiskFactors = defaultRiskAssessment(event)
+	}
+
+	return event, wrappedWriter
+}
+
+// logAuditEvent 记录审计事件
+func logAuditEvent(event AuditEvent, w *auditResponseWriter, logger AuditLogger) {
+	event.ResponseTime = time.Since(event.Timestamp)
+	event.StatusCode = w.statusCode
+
+	if event.StatusCode >= 400 {
+		event.ErrorCode = determineErrorCode(event.StatusCode)
+		event.ErrorMessage = determineErrorMessage(event.StatusCode, w.body)
+	}
+
+	if err := logger.LogEvent(event); err != nil {
+		fmt.Printf("[AUDIT ERROR] Failed to log audit event: %v\n", err)
+	}
+}
+
+// WithOAuthAudit 创建 OAuth2.1 特定审计中间件
+func WithOAuthAudit(options *AuditMiddlewareOptions) func(http.Handler) http.Handler {
+	return AuditMiddleware(options)
+}
+
+// WithBasicAudit 创建基础审计中间件
+func WithBasicAudit() func(http.Handler) http.Handler {
+	return AuditMiddleware(NewAuditOptionsBuilder().
+		WithLevel(AuditLevelBasic).
+		Build())
+}
+
+// WithDetailedAudit 创建详细审计中间件
+func WithDetailedAudit() func(http.Handler) http.Handler {
+	return AuditMiddleware(NewAuditOptionsBuilder().
+		WithLevel(AuditLevelDetailed).
+		Build())
+}
+
+// WithFullAudit 创建完整审计中间件
+func WithFullAudit() func(http.Handler) http.Handler {
+	return AuditMiddleware(NewAuditOptionsBuilder().
+		WithLevel(AuditLevelFull).
+		WithRequestBody(true).
+		WithResponseBody(true).
+		Build())
+}
+
+// WithZapLogger 创建带自定义 zap logger 的审计配置
+func WithZapLogger(logger *zap.Logger) *AuditMiddlewareOptions {
+	return NewAuditOptionsBuilder().
+		WithLogger(logger).
+		Build()
+}
+
+// WithCustomZapLogger 创建带自定义 zap logger 和配置的审计配置
+func WithCustomZapLogger(logger *zap.Logger, level AuditLevel, hashSensitive bool) *AuditMiddlewareOptions {
+	return NewAuditOptionsBuilder().
+		WithLogger(logger).
+		WithLevel(level).
+		WithHashSensitiveData(hashSensitive).
+		Build()
 }
