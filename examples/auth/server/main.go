@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/url"
-	"trpc.group/trpc-go/trpc-mcp-go"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
+
+	mcp "trpc.group/trpc-go/trpc-mcp-go"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/providers"
@@ -25,13 +28,14 @@ func strPtr(s string) *string {
 func main() {
 	log.Println("Starting server...")
 
-	// 1. 创建 OAuth Provider
+	// 1. 创建代理 OAuth Provider，但指向本地端点
 	provider := providers.NewProxyOAuthServerProvider(providers.ProxyOptions{
 		Endpoints: providers.ProxyEndpoints{
-			AuthorizationURL: "https://auth.example.com/authorize",
-			TokenURL:         "https://auth.example.com/token",
-			RevocationURL:    "https://auth.example.com/revoke",
-			RegistrationURL:  "https://auth.example.com/register",
+			// 关键修改：将外部 URL 改为本地 URL
+			AuthorizationURL: "http://localhost:3000/authorize",
+			TokenURL:         "http://localhost:3000/token",
+			RevocationURL:    "http://localhost:3000/revoke",
+			RegistrationURL:  "http://localhost:3000/register",
 		},
 		VerifyAccessToken: func(token string) (*server.AuthInfo, error) {
 			// 暂时返回一个模拟有效的用户信息
@@ -39,42 +43,50 @@ func main() {
 				Token:    token,
 				ClientID: "test-client-id",
 				Scopes:   []string{"mcp.read", "mcp.write"},
-				// ExpiresAt, Resource, Extra 都是可选的
 			}, nil
 		},
 		GetClient: func(clientID string) (*auth.OAuthClientInformationFull, error) {
 			// 返回一个模拟的客户端信息
-			return &auth.OAuthClientInformationFull{
-				OAuthClientMetadata: auth.OAuthClientMetadata{
-					RedirectURIs:  []string{"http://localhost:5173/callback"},
-					ResponseTypes: []string{"code"},
-					GrantTypes:    []string{"authorization_code", "refresh_token"},
-					ClientName:    strPtr("demo-client"),
-				},
-				OAuthClientInformation: auth.OAuthClientInformation{
-					ClientID:     clientID,
-					ClientSecret: "test-secret", // 实际应用中应该是安全的密钥
-				},
-			}, nil
+			if clientID == "test-client-id" {
+				return &auth.OAuthClientInformationFull{
+					OAuthClientMetadata: auth.OAuthClientMetadata{
+						RedirectURIs:  []string{"http://localhost:5173/callback"},
+						ResponseTypes: []string{"code"},
+						GrantTypes:    []string{"authorization_code", "refresh_token"},
+						ClientName:    strPtr("demo-client"),
+						Scope:         strPtr("mcp.read mcp.write"),
+					},
+					OAuthClientInformation: auth.OAuthClientInformation{
+						ClientID:     clientID,
+						ClientSecret: "test-secret",
+					},
+				}, nil
+			}
+			return nil, errors.NewOAuthError(errors.ErrInvalidClient, "Client not found", "")
 		},
 		Fetch: nil, // 可选自定义 HTTP 请求函数
 	})
 
-	//ctx := context.Background()
-	//
-	//// 2. 构建访问令牌校验器（远程 JWKS）
-	//tv, err := server.NewTokenVerifier(ctx, server.TokenVerifierConfig{
-	//	Remote: &server.RemoteJWKSConfig{
-	//		URLs:            []string{"https://issuer.example.com/.well-known/jwks.json"},
-	//		RefreshInterval: 30 * time.Minute,
-	//		IssuerToURL: map[string]string{
-	//			"https://issuer.example.com": "https://issuer.example.com/.well-known/jwks.json",
-	//		},
-	//	},
-	//})
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
+	ctx := context.Background()
+
+	// 2. 构建访问令牌校验器（本地 JWKS）
+	tv, err := server.NewTokenVerifier(ctx, server.TokenVerifierConfig{
+		Local: &server.LocalJWKSConfig{
+			JWKS: `{
+                "keys": [
+                    {
+                        "kty": "oct",
+                        "k": "dGVzdC1zZWNyZXQta2V5LWZvci1qd3QtdG9rZW4tc2lnbmluZw==",
+                        "kid": "test-key-id",
+                        "alg": "HS256"
+                    }
+                ]
+            }`,
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	//// 3. 手动生成 OAuth 元数据，用于 .well-known 端点
 	//meta, err := router.CreateOAuthMetadata(struct {
@@ -85,47 +97,52 @@ func main() {
 	//	ScopesSupported         []string
 	//}{
 	//	Provider:                provider,
-	//	IssuerUrl:               mustURL("https://issuer.example.com"),
-	//	BaseUrl:                 mustURL("https://api.example.com"),
-	//	ServiceDocumentationUrl: mustURL("https://docs.example.com/mcp"),
+	//	IssuerUrl:               mustURL("http://localhost:3000"),
+	//	BaseUrl:                 mustURL("http://localhost:3000"),
+	//	ServiceDocumentationUrl: mustURL("http://localhost:3000/docs"),
 	//	ScopesSupported:         []string{"mcp.read", "mcp.write"},
 	//})
 	//if err != nil {
 	//	log.Fatal(err)
 	//}
 
-	// 4. 启动 MCP Server（含鉴权上下文与 .well-known 元数据）
+	// 4. 启动 MCP Server（包含鉴权上下文与 .well-known 元数据）
 	mcpServer := mcp.NewServer(
 		"Auth-Example-Server",
 		"1.0.0",
 		mcp.WithServerAddress(":3000"),
 		mcp.WithServerPath("/mcp"),
 
-		//// 在每个请求前执行：抽取 Authorization: Bearer 并校验
-		//mcp.WithHTTPContextFunc(mcp.NewAuthHTTPContextFunc(*tv, mcp.ServerAuthConfig{
-		//	Issuer:         "https://issuer.example.com",
-		//	Audience:       []string{"https://api.example.com"},
-		//	RequiredScopes: []string{"mcp.read"},
-		//})),
+		// 在每个请求前执行：抽取 Authorization: Bearer 并校验
+		mcp.WithHTTPContextFunc(mcp.NewAuthHTTPContextFunc(*tv, mcp.ServerAuthConfig{
+			Issuer:         "http://localhost:3000",
+			Audience:       []string{"http://localhost:3000"},
+			RequiredScopes: []string{"mcp.read"},
+		})),
 
 		//// 安装 .well-known 元数据端点
 		//mcp.WithOAuthMetadata(router.AuthMetadataOptions{
 		//	OAuthMetadata:           meta,
-		//	ResourceServerUrl:       mustURL("https://api.example.com"),
-		//	ServiceDocumentationUrl: mustURL("https://docs.example.com/mcp"),
+		//	ResourceServerUrl:       mustURL("http://localhost:3000"),
+		//	ServiceDocumentationUrl: mustURL("http://localhost:3000/docs"),
 		//	ScopesSupported:         []string{"mcp.read", "mcp.write"},
 		//}),
 
 		// OAuth 路由：暴露 /authorize、/token 等端点
 		mcp.WithOAuthRoutes(router.AuthRouterOptions{
 			Provider:        provider,
-			IssuerUrl:       mustURL("https://issuer.example.com"),
-			BaseUrl:         mustURL("https://api.example.com"),
+			IssuerUrl:       mustURL("http://localhost:3000"),
+			BaseUrl:         mustURL("http://localhost:3000"),
 			ScopesSupported: []string{"mcp.read", "mcp.write"},
 		}),
 	)
 
 	log.Println("Server listening on :3000")
+	log.Println("OAuth endpoints available:")
+	log.Println("  - Authorization: http://localhost:3000/authorize")
+	log.Println("  - Token: http://localhost:3000/token")
+	log.Println("  - Metadata: http://localhost:3000/.well-known/oauth-authorization-server")
+
 	if err := mcpServer.Start(); err != nil {
 		log.Fatal(err)
 	}
