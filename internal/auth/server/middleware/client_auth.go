@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
@@ -44,14 +45,14 @@ func validateClientRequest(req *ClientAuthenticatedRequest) error {
 }
 
 // AuthenticateClient returns an HTTP middleware function for client authentication
-func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecision OnDecision) func(http.Handler) http.Handler {
+func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, clientID string) {
 				var statusCode int
 				switch err.ErrorCode {
 				case errors.ErrInvalidClient.Error():
-					statusCode = http.StatusUnauthorized
+					statusCode = http.StatusBadRequest
 				case errors.ErrInvalidRequest.Error():
 					statusCode = http.StatusBadRequest
 				case errors.ErrServerError.Error():
@@ -145,6 +146,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecisio
 					}
 				}
 			}
+
 			ctx := context.WithValue(r.Context(), clientInfoKeyType{}, client)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
