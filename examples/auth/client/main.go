@@ -147,15 +147,7 @@ func startCallbackServer() {
 
 		select {
 		case codeCh <- code:
-			fmt.Fprintf(w, `
-<!DOCTYPE html>
-<html>
-<head><title>Authorization Complete</title></head>
-<body>
-    <h1>Authorization Successful!</h1>
-    <p>You can close this window and return to the terminal.</p>
-</body>
-</html>`)
+			fmt.Fprintf(w, "Authorization Successful!")
 		default:
 			fmt.Fprintf(w, "Authorization code already received")
 		}
