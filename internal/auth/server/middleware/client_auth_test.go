@@ -44,7 +44,7 @@ func runClientAuth(t *testing.T, store srv.OAuthClientsStoreInterface, body inte
 		}{Success: true, Client: cli})
 	})
 
-	middleware := AuthenticateClient(ClientAuthenticationMiddlewareOptions{ClientsStore: store}, nil)
+	middleware := AuthenticateClient(ClientAuthenticationMiddlewareOptions{ClientsStore: store})
 	h := middleware(next)
 
 	var b []byte

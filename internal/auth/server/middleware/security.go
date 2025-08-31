@@ -1,12 +1,10 @@
 package middleware
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
@@ -14,8 +12,7 @@ import (
 )
 
 type SecurityMiddlewareOption struct {
-	verifier   server.TokenVerifier
-	OnDecision OnDecision
+	verifier server.TokenVerifier
 }
 
 // Authorizer define a unified authorization decision interface
@@ -64,19 +61,6 @@ func (a *PolicyAuthorizer) Authorize(authInfo server.AuthInfo, resource string, 
 		fmt.Sprintf("Missing permission %s", required), "")
 }
 
-// Decision defines audit decision-making structure
-type Decision struct {
-	Allowed   bool
-	Reason    string
-	ClientID  string
-	Subject   string
-	Scopes    []string
-	Resource  string
-	Action    string
-	TraceID   string
-	Timestamp time.Time
-}
-
 // responseWriterWithStatus 包装 http.ResponseWriter 用于捕获状态码
 type responseWriterWithStatus struct {
 	http.ResponseWriter
@@ -88,71 +72,6 @@ func (rw *responseWriterWithStatus) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
-type OnDecision func(Decision)
-
-//	func AllowedMethods(methods []string, onDecision OnDecision) func(http.Handler) http.Handler {
-//		return func(next http.Handler) http.Handler {
-//			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-//				for _, method := range methods {
-//					if r.Method == method {
-//						next.ServeHTTP(w, r)
-//						return
-//					}
-//				}
-//
-//				w.Header().Set("Allow", strings.Join(methods, ", "))
-//				w.Header().Set("Content-Type", "application/json")
-//				w.WriteHeader(http.StatusMethodNotAllowed)
-//
-//				// 创建OAuth错误
-//				oauthErr := errors.NewOAuthError(
-//					errors.ErrMethodNotAllowed,
-//					fmt.Sprintf("HTTP method %s not allowed", r.Method),
-//					"", // 可选的错误URI
-//				)
-//
-//				// 转换为响应结构并编码
-//				_ = json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
-//
-//				if onDecision != nil {
-//					onDecision(Decision{
-//						Allowed:   false,
-//						Reason:    "method not allowed",
-//						Resource:  r.URL.Path,
-//						Action:    r.Method,
-//						TraceID:   r.Header.Get("X-Request-ID"),
-//						Timestamp: time.Now(),
-//					})
-//				}
-//			})
-//		}
-//	}
-func AllowedMethods(methods []string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			for _, method := range methods {
-				if r.Method == method {
-					next.ServeHTTP(w, r)
-					return
-				}
-			}
-
-			w.Header().Set("Allow", strings.Join(methods, ", "))
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-
-			// 创建OAuth错误
-			oauthErr := errors.NewOAuthError(
-				errors.ErrMethodNotAllowed,
-				fmt.Sprintf("The method %s is not allowed for this endpoint", r.Method),
-				"", // 可选的错误URI
-			)
-
-			// 转换为响应结构并编码
-			_ = json.NewEncoder(w).Encode(oauthErr.ToResponseStruct())
-		})
-	}
-}
 func CorsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 获取请求的 Origin
@@ -181,7 +100,7 @@ func CorsMiddleware(next http.Handler) http.Handler {
 }
 
 // RateLimitMiddleware applies rate limiting
-func RateLimitMiddleware(limiter *rate.Limiter, onDecision OnDecision) func(http.Handler) http.Handler {
+func RateLimitMiddleware(limiter *rate.Limiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !limiter.Allow() {
@@ -195,16 +114,6 @@ func RateLimitMiddleware(limiter *rate.Limiter, onDecision OnDecision) func(http
 				)
 				_ = json.NewEncoder(w).Encode(tooManyRequestsError.ToResponseStruct())
 
-				if onDecision != nil {
-					onDecision(Decision{
-						Allowed:   false,
-						Reason:    "rate limit exceeded",
-						Resource:  r.URL.Path,
-						Action:    r.Method,
-						TraceID:   r.Header.Get("X-Request-ID"),
-						Timestamp: time.Now(),
-					})
-				}
 				return
 			}
 
@@ -283,35 +192,7 @@ func JSONValidationMiddleware() func(http.Handler) http.Handler {
 	return ContentTypeValidationMiddleware([]string{"application/json"}, false)
 }
 
-//func AuditMiddleware(onDecision OnDecision) func(http.Handler) http.Handler {
-//	return func(next http.Handler) http.Handler {
-//		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-//			// 包装 ResponseWriter 以获取状态码
-//			rw := &responseWriterWithStatus{ResponseWriter: w, statusCode: http.StatusOK}
-//
-//			start := time.Now()
-//			next.ServeHTTP(rw, r)
-//			duration := time.Since(start)
-//
-//			// 构建审计事件
-//			if onDecision != nil {
-//				onDecision(Decision{
-//					Allowed:   rw.statusCode < 400, // 状态码 <400 认为成功
-//					Reason:    http.StatusText(rw.statusCode),
-//					Resource:  r.URL.Path,
-//					Action:    r.Method,
-//					TraceID:   r.Header.Get("X-Request-ID"), // 可选，追踪 ID
-//					Timestamp: time.Now(),
-//				})
-//			}
-//
-//			// 可选：打印调试日志
-//			fmt.Printf("[AUDIT] %s %s -> %d (%v)\n", r.Method, r.URL.Path, rw.statusCode, duration)
-//		})
-//	}
-//}
-
-func AuthorizationMiddleware(authorizer Authorizer, resource string, action string, onDecision OnDecision) func(http.Handler) http.Handler {
+func AuthorizationMiddleware(authorizer Authorizer, resource string, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authInfo, ok := GetAuthInfo(r.Context())
@@ -332,59 +213,13 @@ func AuthorizationMiddleware(authorizer Authorizer, resource string, action stri
 				// 提取 subject
 				subject := extractSubject(authInfo)
 
-				if onDecision != nil {
-					onDecision(Decision{
-						Allowed:   false,
-						Reason:    err.Error(),
-						ClientID:  authInfo.ClientID,
-						Subject:   subject,
-						Scopes:    authInfo.Scopes,
-						Resource:  resource,
-						Action:    action,
-						TraceID:   r.Header.Get("X-Request-ID"),
-						Timestamp: time.Now(),
-					})
-				}
 				return
 			}
 
 			// 提取 subject
 			subject := extractSubject(authInfo)
 
-			// 授权成功
-			if onDecision != nil {
-				onDecision(Decision{
-					Allowed:   true,
-					Reason:    "authorized",
-					ClientID:  authInfo.ClientID,
-					Subject:   subject,
-					Scopes:    authInfo.Scopes,
-					Resource:  resource,
-					Action:    action,
-					TraceID:   r.Header.Get("X-Request-ID"),
-					Timestamp: time.Now(),
-				})
-			}
-
 			next.ServeHTTP(w, r)
 		})
 	}
-}
-
-// extractSubject 从 AuthInfo 中提取 subject
-func extractSubject(authInfo server.AuthInfo) string {
-	if authInfo.Extra != nil {
-		if sub, ok := authInfo.Extra["sub"].(string); ok {
-			return sub
-		}
-	}
-	return ""
-}
-
-// GetAuthInfo 从请求上下文中提取 AuthInfo
-func GetAuthInfo(ctx context.Context) (server.AuthInfo, bool) {
-	if authInfo, ok := ctx.Value(authInfoKeyType{}).(server.AuthInfo); ok {
-		return authInfo, true
-	}
-	return server.AuthInfo{}, false
 }

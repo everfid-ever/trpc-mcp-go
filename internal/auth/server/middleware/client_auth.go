@@ -40,7 +40,7 @@ func validateClientRequest(req *ClientAuthenticatedRequest) error {
 }
 
 // AuthenticateClient returns an HTTP middleware function for client authentication
-func AuthenticateClient(options ClientAuthenticationMiddlewareOptions, onDecision OnDecision) func(http.Handler) http.Handler {
+func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, clientID string) {
