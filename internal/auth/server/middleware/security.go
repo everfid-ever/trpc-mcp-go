@@ -211,13 +211,13 @@ func AuthorizationMiddleware(authorizer Authorizer, resource string, action stri
 				_ = json.NewEncoder(w).Encode(err.(errors.OAuthError).ToResponseStruct())
 
 				// 提取 subject
-				subject := extractSubject(authInfo)
+				_ = extractSubject(authInfo)
 
 				return
 			}
 
 			// 提取 subject
-			subject := extractSubject(authInfo)
+			_ = extractSubject(authInfo)
 
 			next.ServeHTTP(w, r)
 		})
