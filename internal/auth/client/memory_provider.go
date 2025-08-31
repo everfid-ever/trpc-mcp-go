@@ -1,9 +1,12 @@
 package client
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -89,23 +92,58 @@ func (p *InMemoryOAuthClientProvider) SaveCodeVerifier(codeVerifier string) erro
 
 // 可选方法的默认实现
 func (p *InMemoryOAuthClientProvider) State() (string, error) {
-	// Default implementation: no state parameter generated
-	// For state validation, implement a custom OAuthStateProvider
-	return "", nil
+	// Generate a random state parameter for CSRF protection
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("failed to generate random state: %w", err)
+	}
+	return base64.URLEncoding.EncodeToString(bytes), nil
 }
 
 func (p *InMemoryOAuthClientProvider) AddClientAuthentication(headers http.Header, params url.Values, tokenUrl string) error {
-	// 默认不添加自定义认证
+	// Add client authentication using client_secret_post method
+	p.mutex.RLock()
+	clientInfo := p.clientInfo
+	p.mutex.RUnlock()
+	
+	if clientInfo != nil && clientInfo.ClientID != "" {
+		params.Set("client_id", clientInfo.ClientID)
+		if clientInfo.ClientSecret != "" {
+			params.Set("client_secret", clientInfo.ClientSecret)
+		}
+	}
 	return nil
 }
 
-func (p *InMemoryOAuthClientProvider) ValidateResourceURL(serverUrl, resource string) (*url.URL, error) {
-	// 默认不进行额外验证
-	return nil, nil
+func (p *InMemoryOAuthClientProvider) ValidateResourceURL(serverUrl *url.URL, resourceMetadata *auth.OAuthProtectedResourceMetadata) (*url.URL, error) {
+	// If no resource metadata provided, return nil (no resource parameter needed)
+	if resourceMetadata == nil {
+		return nil, nil
+	}
+	
+	// Parse the resource URL from metadata
+	resourceURL, err := url.Parse(resourceMetadata.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("invalid resource URL in metadata: %w", err)
+	}
+	
+	// Basic validation: ensure the resource URL has the same origin as server URL
+	if resourceURL.Scheme != serverUrl.Scheme || resourceURL.Host != serverUrl.Host {
+		// Allow if resource URL is a more specific path under the same origin
+		if !strings.HasPrefix(resourceURL.String(), serverUrl.Scheme+"://"+serverUrl.Host) {
+			return nil, fmt.Errorf("resource URL %s does not match server origin %s://%s", 
+				resourceURL.String(), serverUrl.Scheme, serverUrl.Host)
+		}
+	}
+	
+	return resourceURL, nil
 }
 
 func (p *InMemoryOAuthClientProvider) InvalidateCredentials(scope string) error {
-	// 根据 scope 清除相应凭据
+	// 根据 scope 清除相应凭据，使用互斥锁保护
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	
 	switch scope {
 	case "all":
 		p.clientInfo = nil
@@ -117,6 +155,8 @@ func (p *InMemoryOAuthClientProvider) InvalidateCredentials(scope string) error 
 		p.tokens = nil
 	case "verifier":
 		p.codeVerifier = ""
+	default:
+		return fmt.Errorf("unknown invalidation scope: %s", scope)
 	}
 	return nil
 }

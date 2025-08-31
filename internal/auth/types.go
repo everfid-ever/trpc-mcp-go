@@ -214,6 +214,24 @@ type OpenIdProviderMetadata struct {
 	OpTosUri                                   *string  `json:"op_tos_uri,omitempty"`
 }
 
+// AuthOptions contains configuration options for the OAuth authorization process
+type AuthOptions struct {
+	ServerUrl           string    // OAuth server URL
+	ResourceMetadataUrl *string   // Resource metadata URL
+	AuthorizationCode   *string   // Authorization code
+	Scope               *string   // Requested authorization scope
+	ProtocolVersion     *string   // OAuth protocol version
+	FetchFn             FetchFunc // Custom HTTP request function
+}
+
+// DiscoveryOptions contains options for discovering OAuth server metadata
+type DiscoveryOptions struct {
+	ServerUrl           string    // Server URL
+	ResourceMetadataUrl *string   // Resource metadata URL
+	FetchFn             FetchFunc // Custom HTTP request function
+	ProtocolVersion     *string   // Protocol version
+}
+
 func (m OpenIdProviderMetadata) GetIssuer() string {
 	return m.Issuer
 }
