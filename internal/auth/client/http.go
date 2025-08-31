@@ -2,242 +2,88 @@ package client
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"sync"
 	"time"
-
-	mcp "trpc.group/trpc-go/trpc-mcp-go"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 )
 
-// OAuth2HTTPReqHandler is an HTTP request handler with OAuth 2.1 support.
-// It automatically injects the Authorization header for all requests
-// and handles token caching and refresh logic.
-type OAuth2HTTPReqHandler struct {
-	// underlying HTTP request handler
-	base mcp.HTTPReqHandler
-	// OAuth client provider
-	provider OAuthClientProvider
-	// target server URL
-	serverUrl string
-	// custom HTTP fetch function
-	fetchFn auth.FetchFunc
+type ctxKey int
 
-	// Token management
-	tokenMu sync.RWMutex
-	// cached OAuth tokens
-	cachedToken *auth.OAuthTokens
-	// last refresh timestamp
-	lastRefresh time.Time
+const (
+	ctxKeyClientAuthInfo ctxKey = iota
+	ctxKeyClientAuthErr
+)
+
+// ClientAuthInfo 客户端认证信息
+type ClientAuthInfo struct {
+	AccessToken  string
+	RefreshToken *string
+	ExpiresAt    *time.Time
+	Scopes       []string
+	Extra        map[string]interface{}
 }
 
-// OAuth2HTTPReqHandlerOptions defines configuration options for OAuth2HTTPReqHandler.
-type OAuth2HTTPReqHandlerOptions struct {
-	// underlying HTTP request handler, use default if nil
-	Base mcp.HTTPReqHandler
-	// OAuth client provider (required)
-	Provider OAuthClientProvider
-	// target server URL (required)
-	ServerUrl string
-	// custom HTTP fetch function, defaults to http.DefaultClient
-	FetchFn auth.FetchFunc
+// WithAuthInfo 将认证信息写入context
+func WithAuthInfo(ctx context.Context, info *ClientAuthInfo) context.Context {
+	if info == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyClientAuthInfo, info)
 }
 
-// NewOAuth2HTTPReqHandler creates a new OAuth2HTTPReqHandler.
-func NewOAuth2HTTPReqHandler(opts OAuth2HTTPReqHandlerOptions) (*OAuth2HTTPReqHandler, error) {
-	if opts.Provider == nil {
-		return nil, fmt.Errorf("OAuth provider is required")
+// GetAuthInfo 从context读取认证信息
+func GetAuthInfo(ctx context.Context) (*ClientAuthInfo, bool) {
+	v := ctx.Value(ctxKeyClientAuthInfo)
+	if v == nil {
+		return nil, false
 	}
-	if opts.ServerUrl == "" {
-		return nil, fmt.Errorf("server URL is required")
-	}
-
-	base := opts.Base
-	if base == nil {
-		// Use default HTTP request handler
-		base = &defaultHTTPReqHandler{}
-	}
-
-	fetchFn := opts.FetchFn
-	if fetchFn == nil {
-		fetchFn = func(url string, req *http.Request) (*http.Response, error) {
-			return http.DefaultClient.Do(req)
-		}
-	}
-
-	return &OAuth2HTTPReqHandler{
-		base:      base,
-		provider:  opts.Provider,
-		serverUrl: opts.ServerUrl,
-		fetchFn:   fetchFn,
-	}, nil
+	info, ok := v.(*ClientAuthInfo)
+	return info, ok && info != nil
 }
 
-// Handle processes an HTTP request, automatically injecting the OAuth access token.
-func (h *OAuth2HTTPReqHandler) Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
-	// Retrieve a valid access token
-	token, err := h.getValidToken(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get valid token: %w", err)
+// WithAuthErr 将认证错误写入context
+func WithAuthErr(ctx context.Context, err error) context.Context {
+	if err == nil {
+		return ctx
 	}
-
-	// Inject Authorization header
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	// Send the request via the underlying handler
-	resp, err := h.base.Handle(ctx, client, req)
-
-	// If unauthorized, try refreshing the token and retry once
-	if err == nil && resp.StatusCode == 401 {
-		if retryResp, retryErr := h.handleUnauthorized(ctx, client, req); retryErr == nil {
-			resp.Body.Close() // close original response body
-			return retryResp, nil
-		}
-	}
-
-	return resp, err
+	return context.WithValue(ctx, ctxKeyClientAuthErr, err)
 }
 
-// getValidToken retrieves a valid access token, refreshing if necessary.
-func (h *OAuth2HTTPReqHandler) getValidToken(ctx context.Context) (string, error) {
-	h.tokenMu.RLock()
-
-	// Return cached token if still valid
-	if h.cachedToken != nil && !h.isTokenExpired() {
-		token := h.cachedToken.AccessToken
-		h.tokenMu.RUnlock()
-		return token, nil
+// ConvertTokensToAuthInfo 转换token为认证信息
+func ConvertTokensToAuthInfo(tokens *auth.OAuthTokens) *ClientAuthInfo {
+	if tokens == nil || tokens.AccessToken == "" {
+		return nil
 	}
 
-	h.tokenMu.RUnlock()
-
-	// Upgrade to write lock to refresh token
-	h.tokenMu.Lock()
-	defer h.tokenMu.Unlock()
-
-	// Double-check in case another goroutine refreshed the token
-	if h.cachedToken != nil && !h.isTokenExpired() {
-		return h.cachedToken.AccessToken, nil
+	authInfo := &ClientAuthInfo{
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		Scopes:       parseTokenScopes(tokens),
+		Extra:        make(map[string]interface{}),
 	}
 
-	// Request tokens from provider
-	tokens, err := h.provider.Tokens()
-	if err != nil {
-		return "", fmt.Errorf("failed to get tokens from provider: %w", err)
+	if tokens.ExpiresIn != nil {
+		expiresAt := time.Now().Add(time.Duration(*tokens.ExpiresIn) * time.Second)
+		authInfo.ExpiresAt = &expiresAt
 	}
 
-	if tokens == nil {
-		return "", fmt.Errorf("no tokens available, authorization required")
-	}
-
-	// Update cache
-	h.cachedToken = tokens
-	h.lastRefresh = time.Now()
-
-	// Check expiration
-	if h.isTokenExpired() {
-		// Attempt to refresh token
-		if err := h.refreshTokenInternal(ctx); err != nil {
-			return "", fmt.Errorf("failed to refresh token: %w", err)
-		}
-	}
-
-	return h.cachedToken.AccessToken, nil
+	return authInfo
 }
 
-// handleUnauthorized handles 401 Unauthorized by refreshing the token and retrying the request.
-func (h *OAuth2HTTPReqHandler) handleUnauthorized(ctx context.Context, client *http.Client, originalReq *http.Request) (*http.Response, error) {
-	h.tokenMu.Lock()
-	defer h.tokenMu.Unlock()
-
-	// Invalidate cached token
-	h.cachedToken = nil
-
-	// Attempt token refresh
-	if err := h.refreshTokenInternal(ctx); err != nil {
-		return nil, fmt.Errorf("failed to refresh token after 401: %w", err)
+// IsTokenExpired 检查token是否过期
+func IsTokenExpired(authInfo *ClientAuthInfo) bool {
+	if authInfo == nil {
+		return true // When authInfo is nil, it is considered expired.
 	}
 
-	// Clone and retry the request with new token
-	retryReq := originalReq.Clone(ctx)
-	retryReq.Header.Set("Authorization", "Bearer "+h.cachedToken.AccessToken)
+	if authInfo.ExpiresAt == nil {
+		return false // No expiration date, considered never expired
+	}
 
-	return h.base.Handle(ctx, client, retryReq)
+	// If the token expires within the next 30 seconds, it is considered expired.
+	return !authInfo.ExpiresAt.After(time.Now().Add(30 * time.Second))
 }
 
-// refreshTokenInternal performs internal token refresh logic.
-func (h *OAuth2HTTPReqHandler) refreshTokenInternal(ctx context.Context) error {
-	// Retrieve current tokens
-	tokens, err := h.provider.Tokens()
-	if err != nil {
-		return err
-	}
-
-	if tokens == nil || tokens.RefreshToken == nil || *tokens.RefreshToken == "" {
-		return fmt.Errorf("no refresh token available")
-	}
-
-	// Perform full authorization flow (including token refresh)
-	result, err := Auth(h.provider, auth.AuthOptions{
-		ServerUrl: h.serverUrl,
-		FetchFn:   h.fetchFn,
-	})
-	if err != nil {
-		return err
-	}
-
-	if *result != AuthResultAuthorized {
-		return fmt.Errorf("authentication failed, result: %s", *result)
-	}
-
-	// Get updated tokens
-	newTokens, err := h.provider.Tokens()
-	if err != nil {
-		return err
-	}
-
-	if newTokens == nil {
-		return fmt.Errorf("no tokens received after refresh")
-	}
-
-	// Update cache
-	h.cachedToken = newTokens
-	h.lastRefresh = time.Now()
-
-	return nil
-}
-
-// isTokenExpired checks if the cached token has expired.
-func (h *OAuth2HTTPReqHandler) isTokenExpired() bool {
-	if h.cachedToken == nil {
-		return true
-	}
-
-	// If explicit expiration is available
-	if h.cachedToken.ExpiresIn != nil {
-		expiryTime := h.lastRefresh.Add(time.Duration(*h.cachedToken.ExpiresIn) * time.Second)
-		// Consider token expired 30s earlier to avoid edge cases
-		return time.Now().After(expiryTime.Add(-30 * time.Second))
-	}
-
-	// Default: assume token valid for up to 50 minutes
-	return time.Since(h.lastRefresh) > 50*time.Minute
-}
-
-// InvalidateToken invalidates the cached token, forcing a refresh on next request.
-func (h *OAuth2HTTPReqHandler) InvalidateToken() {
-	h.tokenMu.Lock()
-	defer h.tokenMu.Unlock()
-	h.cachedToken = nil
-}
-
-// defaultHTTPReqHandler is the default implementation of HTTPReqHandler, which simply forwards the request.
-type defaultHTTPReqHandler struct{}
-
-func (h *defaultHTTPReqHandler) Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
-	return client.Do(req)
+func parseTokenScopes(tokens *auth.OAuthTokens) []string {
+	return []string{}
 }
