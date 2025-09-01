@@ -139,7 +139,7 @@ func TestAuthorization_MissingClientID_JSON400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var resp oauthErrResp
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, "invalid request", resp.Error)
+	assert.Equal(t, "invalid_request", resp.Error)
 	assert.NotEmpty(t, resp.ErrorDescription)
 }
 
@@ -155,7 +155,7 @@ func TestAuthorization_UnregisteredRedirect_JSON400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var resp oauthErrResp
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, "invalid request", resp.Error)
+	assert.Equal(t, "invalid_request", resp.Error)
 	assert.Contains(t, strings.ToLower(resp.ErrorDescription), "redirect")
 }
 
@@ -171,7 +171,7 @@ func TestAuthorization_MultipleRedirects_RequireExplicit_JSON400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var resp oauthErrResp
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, "invalid request", resp.Error)
+	assert.Equal(t, "invalid_request", resp.Error)
 	assert.Contains(t, strings.ToLower(resp.ErrorDescription), "redirect")
 }
 
@@ -197,7 +197,7 @@ func TestAuthorization_InvalidScope_302_WithState(t *testing.T) {
 	assert.Equal(t, http.StatusFound, rr.Code)
 	u, _ := url.Parse(rr.Header().Get("Location"))
 	q := u.Query()
-	assert.Equal(t, "invalid scope", q.Get("error"))
+	assert.Equal(t, "invalid_scope", q.Get("error"))
 	assert.Equal(t, "keep-me", q.Get("state"))
 	assert.NotEmpty(t, q.Get("error_description"))
 }
@@ -223,7 +223,7 @@ func TestAuthorization_InvalidResourceURL_302_ErrorRedirect(t *testing.T) {
 	assert.Equal(t, http.StatusFound, rr.Code)
 	u, _ := url.Parse(rr.Header().Get("Location"))
 	q := u.Query()
-	assert.Equal(t, "invalid request", q.Get("error"))
+	assert.Equal(t, "invalid_request", q.Get("error"))
 	assert.NotEmpty(t, q.Get("error_description"))
 }
 
@@ -244,7 +244,7 @@ func TestAuthorization_RateLimit_429_JSON(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
 	var resp oauthErrResp
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, "too many requests", resp.Error)
+	assert.Equal(t, "too_many_requests", resp.Error)
 }
 
 func TestAllowedMethods_GET_and_POST(t *testing.T) {

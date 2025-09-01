@@ -105,11 +105,11 @@ func TestAuthenticateClient_ValidCredentials(t *testing.T) {
 func TestAuthenticateClient_InvalidClientID(t *testing.T) {
 	store := &mockClientsStore{get: func(clientID string) (*auth.OAuthClientInformationFull, error) { return nil, nil }}
 	rec, nextCalled := runClientAuth(t, store, map[string]interface{}{"client_id": "non-existent-client", "client_secret": "some-secret"}, "application/json")
-	if nextCalled || rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 without next, got %d next=%v", rec.Code, nextCalled)
+	if nextCalled || rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
 	}
 	body := decodeOAuthError(t, rec)
-	if body.Error != "invalid client" || body.ErrorDescription != "invalid client credentials" {
+	if body.Error != "invalid_client" || body.ErrorDescription != "invalid client credentials" {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 }
@@ -122,11 +122,11 @@ func TestAuthenticateClient_InvalidClientSecret(t *testing.T) {
 		return nil, nil
 	}}
 	rec, nextCalled := runClientAuth(t, store, map[string]interface{}{"client_id": "valid-client", "client_secret": "wrong-secret"}, "application/json")
-	if nextCalled || rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 without next, got %d next=%v", rec.Code, nextCalled)
+	if nextCalled || rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
 	}
 	body := decodeOAuthError(t, rec)
-	if body.Error != "invalid client" || body.ErrorDescription != "Invalid client_secret" {
+	if body.Error != "invalid_client" || body.ErrorDescription != "Invalid client_secret" {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 }
@@ -138,7 +138,7 @@ func TestAuthenticateClient_MissingClientID(t *testing.T) {
 		t.Fatalf("expected 400 without next, got %d next=%v", rec.Code, nextCalled)
 	}
 	body := decodeOAuthError(t, rec)
-	if body.Error != "invalid request" {
+	if body.Error != "invalid_request" {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 }
@@ -165,11 +165,11 @@ func TestAuthenticateClient_RejectsExpiredSecret(t *testing.T) {
 		return nil, nil
 	}}
 	rec, nextCalled := runClientAuth(t, store, map[string]interface{}{"client_id": "client-with-expired-secret", "client_secret": "expired-secret"}, "application/json")
-	if nextCalled || rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 without next, got %d next=%v", rec.Code, nextCalled)
+	if nextCalled || rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
 	}
 	body := decodeOAuthError(t, rec)
-	if body.Error != "invalid client" || body.ErrorDescription != "Client secret has expired" {
+	if body.Error != "invalid_client" || body.ErrorDescription != "Client secret has expired" {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 }

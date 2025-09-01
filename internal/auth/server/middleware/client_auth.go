@@ -47,7 +47,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 				var statusCode int
 				switch err.ErrorCode {
 				case errors.ErrInvalidClient.Error():
-					statusCode = http.StatusBadRequest
+					statusCode = http.StatusUnauthorized
 				case errors.ErrInvalidRequest.Error():
 					statusCode = http.StatusBadRequest
 				case errors.ErrServerError.Error():
