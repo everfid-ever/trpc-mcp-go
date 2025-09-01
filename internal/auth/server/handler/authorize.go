@@ -103,9 +103,6 @@ func AuthorizationHandler(options AuthorizationHandlerOptions) http.HandlerFunc 
 	// Apply method restrictions (GET and POST allowed)
 	handler = middleware.AllowedMethods([]string{"GET", "POST"})(handler)
 
-	// Apply Audit middleware
-	handler = middleware.AuditMiddleware(nil)(handler)
-
 	// Convert back to http.HandlerFunc
 	return func(w http.ResponseWriter, r *http.Request) {
 		handler.ServeHTTP(w, r)

@@ -195,9 +195,6 @@ func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 	// Apply CORS middleware (outermost, like TS)
 	handler = middleware.CorsMiddleware(handler)
 
-	// Apply Audit middleware
-	handler = middleware.AuditMiddleware(nil)(handler)
-
 	return handler
 }
 
