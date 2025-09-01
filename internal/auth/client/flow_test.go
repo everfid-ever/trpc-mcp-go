@@ -449,26 +449,6 @@ func TestRegisterClient(t *testing.T) {
 	}
 }
 
-// Test PKCE challenge generation
-func TestGeneratePKCEChallenge(t *testing.T) {
-	challenge, err := generatePKCEChallenge()
-	if err != nil {
-		t.Fatalf("generatePKCEChallenge() error = %v", err)
-	}
-
-	if challenge.CodeVerifier == "" {
-		t.Error("CodeVerifier should not be empty")
-	}
-
-	if challenge.CodeChallenge == "" {
-		t.Error("CodeChallenge should not be empty")
-	}
-
-	if challenge.CodeVerifier == challenge.CodeChallenge {
-		t.Error("CodeVerifier should be different from CodeChallenge")
-	}
-}
-
 // Test error scenarios - using mock server instead of hardcoded domain
 func TestAuthWithoutClientInfo(t *testing.T) {
 	provider := &mockOAuthClientProvider{
@@ -610,12 +590,5 @@ func BenchmarkSelectClientAuthMethod(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		selectClientAuthMethod(clientInfo, supportedMethods)
-	}
-}
-
-func BenchmarkGeneratePKCEChallenge(b *testing.B) {
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		generatePKCEChallenge()
 	}
 }

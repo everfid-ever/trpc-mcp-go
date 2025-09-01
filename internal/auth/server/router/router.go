@@ -174,11 +174,14 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 
 	// Token endpoint (POST only for OAuth 2.1)
 	tokenURL, _ := url.Parse(oauthMetadata.TokenEndpoint)
-	tokenOptions := handler.TokenHandlerOptions{
-		Provider: options.Provider,
-	}
-	if options.TokenOptions != nil && options.TokenOptions.RateLimit != nil {
-		tokenOptions.RateLimit = options.TokenOptions.RateLimit
+	tokenOptions := handler.TokenHandlerOptions{Provider: options.Provider}
+	if options.TokenOptions != nil {
+		if options.TokenOptions.RateLimit != nil {
+			tokenOptions.RateLimit = options.TokenOptions.RateLimit
+		}
+		if options.TokenOptions.ResolveClientIDFromRefreshToken != nil {
+			tokenOptions.ResolveClientIDFromRefreshToken = options.TokenOptions.ResolveClientIDFromRefreshToken
+		}
 	}
 	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
 
