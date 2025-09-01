@@ -68,9 +68,6 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 	// Apply CORS middleware
 	handler = middleware.CorsMiddleware(handler)
 
-	// Apply Audit middleware
-	handler = middleware.AuditMiddleware(nil)(handler)
-
 	// Convert http.Handler to http.HandlerFunc
 	return func(w http.ResponseWriter, r *http.Request) {
 		handler.ServeHTTP(w, r)

@@ -202,9 +202,6 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 
 	handler = middleware.CorsMiddleware(handler)
 
-	// Apply Audit middleware
-	handler = middleware.AuditMiddleware(nil)(handler)
-
 	return handler
 }
 
