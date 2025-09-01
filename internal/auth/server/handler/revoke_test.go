@@ -149,7 +149,7 @@ func TestRevocation_MissingToken_400(t *testing.T) {
 
 	rr := postFormBasicAuth(t, h, "/revoke", testClientID, testClientSecret, url.Values{})
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, strings.ToLower(rr.Body.String()), "invalid request")
+	assert.Contains(t, strings.ToLower(rr.Body.String()), "invalid_request")
 }
 
 // Unknown hint should still be 200; if authentication fails, skip

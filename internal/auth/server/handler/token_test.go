@@ -257,7 +257,7 @@ func TestToken_RequiresGrantType(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid request", errResp["error"])
+	assert.Equal(t, "invalid_request", errResp["error"])
 }
 
 func TestToken_RejectsUnsupportedGrantTypes(t *testing.T) {
@@ -276,7 +276,7 @@ func TestToken_RejectsUnsupportedGrantTypes(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "unsupported grant type", errResp["error"])
+	assert.Equal(t, "unsupported_grant_type", errResp["error"])
 	assert.Equal(t, "The grant type is not supported by this authorization server.", errResp["error_description"])
 }
 
@@ -300,7 +300,7 @@ func TestToken_RequiresValidClientCredentials_CurrentBehavior(t *testing.T) {
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
 
-	assert.Equal(t, "invalid client", errResp["error"])
+	assert.Equal(t, "invalid_client", errResp["error"])
 	assert.Contains(t, errResp["error_description"].(string), "client")
 }
 
@@ -341,7 +341,7 @@ func TestToken_AuthorizationCode_RequiresCodeParameter(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid request", errResp["error"])
+	assert.Equal(t, "invalid_request", errResp["error"])
 }
 
 func TestToken_AuthorizationCode_RequiresCodeVerifierParameter(t *testing.T) {
@@ -362,7 +362,7 @@ func TestToken_AuthorizationCode_RequiresCodeVerifierParameter(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid request", errResp["error"])
+	assert.Equal(t, "invalid_request", errResp["error"])
 }
 
 func TestToken_AuthorizationCode_VerifiesPKCEChallenge(t *testing.T) {
@@ -385,7 +385,7 @@ func TestToken_AuthorizationCode_VerifiesPKCEChallenge(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid grant", errResp["error"])
+	assert.Equal(t, "invalid_grant", errResp["error"])
 	assert.Contains(t, errResp["error_description"], "code_verifier")
 }
 
@@ -407,7 +407,7 @@ func TestToken_AuthorizationCode_RejectsExpiredCode(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid grant", errResp["error"])
+	assert.Equal(t, "invalid_grant", errResp["error"])
 }
 
 func TestToken_AuthorizationCode_RejectsInvalidCode(t *testing.T) {
@@ -428,7 +428,7 @@ func TestToken_AuthorizationCode_RejectsInvalidCode(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid grant", errResp["error"])
+	assert.Equal(t, "invalid_grant", errResp["error"])
 }
 
 func TestToken_AuthorizationCode_ReturnsTokensForValidExchange(t *testing.T) {
@@ -499,7 +499,7 @@ func TestToken_RefreshToken_RequiresRefreshTokenParameter(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid request", errResp["error"])
+	assert.Equal(t, "invalid_request", errResp["error"])
 }
 
 func TestToken_RefreshToken_RejectsInvalidRefreshToken(t *testing.T) {
@@ -519,7 +519,7 @@ func TestToken_RefreshToken_RejectsInvalidRefreshToken(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid grant", errResp["error"])
+	assert.Equal(t, "invalid_grant", errResp["error"])
 }
 
 func TestToken_RefreshToken_ReturnsNewTokensForValidRefresh(t *testing.T) {
@@ -669,7 +669,7 @@ func TestToken_ValidatesResourceParameter(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var errResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "invalid request", errResp["error"])
+	assert.Equal(t, "invalid_request", errResp["error"])
 	assert.Contains(t, errResp["error_description"], "resource")
 }
 

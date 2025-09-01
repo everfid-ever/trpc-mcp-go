@@ -68,7 +68,7 @@ func TestClientRegistration_NotImplemented_WhenNoStore(t *testing.T) {
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, "unsupported grant type", resp["error"])
+	assert.Equal(t, "unsupported_grant_type", resp["error"])
 }
 
 func TestClientRegistration_MethodNotAllowed_Get405(t *testing.T) {
@@ -97,7 +97,7 @@ func TestClientRegistration_InvalidJSON_400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, "invalid client metadata", resp["error"])
+	assert.Equal(t, "invalid_client_metadata", resp["error"])
 }
 
 func TestClientRegistration_MetadataValidation_400(t *testing.T) {
@@ -112,7 +112,7 @@ func TestClientRegistration_MetadataValidation_400(t *testing.T) {
 
 	var resp map[string]any
 	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
-	assert.Equal(t, "invalid client metadata", resp["error"])
+	assert.Equal(t, "invalid_client_metadata", resp["error"])
 }
 
 func TestClientRegistration_PublicClient_NoSecret(t *testing.T) {
@@ -198,7 +198,7 @@ func TestClientRegistration_RegisterError_500(t *testing.T) {
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, "server error", resp["error"])
+	assert.Equal(t, "server_error", resp["error"])
 }
 
 func TestClientRegistration_RateLimit_429_WhenEnabled(t *testing.T) {
