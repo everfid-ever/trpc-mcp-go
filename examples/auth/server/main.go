@@ -2,19 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
+
+	mcp "trpc.group/trpc-go/trpc-mcp-go"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/providers"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/router"
-
-	mcp "trpc.group/trpc-go/trpc-mcp-go"
 )
 
 func strPtr(s string) *string {
@@ -50,16 +52,17 @@ func main() {
 			AuthorizationURL: "http://localhost:3030/authorize",
 			TokenURL:         "http://localhost:3030/token",
 			RevocationURL:    "http://localhost:3030/revoke",
-			RegistrationURL:  "http://localhost:3030/register",
+			//RegistrationURL:  "http://localhost:3030/register",
 		},
+
 		VerifyAccessToken: func(token string) (*server.AuthInfo, error) {
-			log.Printf("Verifying access token: %s", token)
-			return &server.AuthInfo{
-				Token:    token,
-				ClientID: "test-client-id",
-				Scopes:   []string{"mcp.read", "mcp.write"},
-			}, nil
+			ai, err := mockVerifyJWT(token)
+			if err != nil {
+				return nil, err
+			}
+			return &ai, nil
 		},
+
 		GetClient: func(clientID string) (*auth.OAuthClientInformationFull, error) {
 			log.Printf("Getting client info for: %s", clientID)
 			return &auth.OAuthClientInformationFull{
@@ -90,6 +93,53 @@ func main() {
 			BaseUrl:         mustURL("http://localhost:3000"),
 			ScopesSupported: []string{"mcp.read", "mcp.write"},
 		}),
+
+		mcp.WithBearerAuth(&mcp.BearerAuthConfig{
+			Enabled:        true,
+			RequiredScopes: []string{"mcp.read"},
+			Verifier: server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
+				// 直接复用你原来 main.go 里的 mock 逻辑：
+				parts := strings.Split(token, ".")
+				if len(parts) < 2 {
+					return server.AuthInfo{}, fmt.Errorf("invalid token format")
+				}
+				payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+				if err != nil {
+					return server.AuthInfo{}, fmt.Errorf("failed to decode JWT payload: %w", err)
+				}
+				var payload map[string]interface{}
+				if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+					return server.AuthInfo{}, fmt.Errorf("failed to unmarshal JWT payload: %w", err)
+				}
+
+				clientID, _ := payload["client_id"].(string)
+				scopeStr, _ := payload["scope"].(string)
+				scopes := []string{}
+				if scopeStr != "" {
+					scopes = strings.Split(scopeStr, " ")
+				}
+
+				exp := time.Now().Add(1 * time.Hour).Unix()
+
+				return server.AuthInfo{
+					Token:     token,
+					ClientID:  clientID,
+					Scopes:    scopes,
+					ExpiresAt: &exp,
+					Extra:     payload,
+				}, nil
+			}),
+		}),
+
+		mcp.WithAudit(&mcp.AuditConfig{
+			Enabled:             true,
+			Level:               "detailed",
+			HashSensitiveData:   true,
+			IncludeRequestBody:  true,
+			IncludeResponseBody: true,
+			EndpointPatterns:    []string{"/mcp/", "/oauth2/", "/authorize", "/token"},
+			ExcludePatterns:     []string{"/healthz"},
+		}),
 	)
 
 	greetTool := mcp.NewTool("greet",
@@ -117,7 +167,12 @@ func startMockOAuthServer() {
 
 	// 存储授权码
 	var authCode = "mock_auth_code_12345"
-	var accessToken = "mock_access_token_67890"
+	// 生成一个模拟 JWT: header.payload.signature
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"client_id":"test-client-id","scope":"mcp.read mcp.write"}`))
+	signature := "mocksignature" // 不做签名校验
+
+	accessToken := fmt.Sprintf("%s.%s.%s", header, payload, signature)
 
 	// 授权端点
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +290,7 @@ func startMockOAuthServer() {
 			"expires_in":    3600,
 			"refresh_token": "mock_refresh_token_99999",
 			"scope":         "mcp.read mcp.write",
+			"client_id":     "test-client-id",
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -256,7 +312,16 @@ func startMockOAuthServer() {
 	// 注册端点（可选）
 	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Mock OAuth: Client registration request received")
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"client_id":      "test-client-id",
+			"client_secret":  "test-secret",
+			"client_name":    "demo-client",
+			"scope":          "mcp.read mcp.write",
+			"redirect_uris":  []string{"http://localhost:5173/callback"},
+			"grant_types":    []string{"authorization_code", "refresh_token"},
+			"response_types": []string{"code"},
+		})
 	})
 
 	// 添加一个通用的请求日志中间件
@@ -279,4 +344,35 @@ func startMockOAuthServer() {
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("Mock OAuth server error: %v", err)
 	}
+}
+
+func mockVerifyJWT(token string) (server.AuthInfo, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return server.AuthInfo{}, fmt.Errorf("invalid token format")
+	}
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return server.AuthInfo{}, fmt.Errorf("failed to decode JWT payload: %w", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		return server.AuthInfo{}, fmt.Errorf("failed to unmarshal JWT payload: %w", err)
+	}
+
+	clientID, _ := payload["client_id"].(string)
+	scopeStr, _ := payload["scope"].(string)
+	var scopes []string
+	if scopeStr != "" {
+		scopes = strings.Split(scopeStr, " ")
+	}
+	exp := time.Now().Add(1 * time.Hour).Unix()
+
+	return server.AuthInfo{
+		Token:     token,
+		ClientID:  clientID,
+		Scopes:    scopes,
+		ExpiresAt: &exp,
+		Extra:     payload,
+	}, nil
 }

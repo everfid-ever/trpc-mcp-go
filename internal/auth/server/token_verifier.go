@@ -52,6 +52,12 @@ type TokenVerifier struct {
 	isRemote    bool              // 是否使用远程模式
 }
 
+type TokenVerifierFunc func(ctx context.Context, token string) (AuthInfo, error)
+
+func (f TokenVerifierFunc) VerifyAccessToken(ctx context.Context, token string) (AuthInfo, error) {
+	return f(ctx, token)
+}
+
 // NewLocalTokenVerifier 创建仅使用本地 JWKS 的 TokenVerifier
 func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVerifier, error) {
 	verifier := &TokenVerifier{}
@@ -232,6 +238,16 @@ func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (j
 func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (AuthInfo, error) {
 	authInfo := AuthInfo{Token: tokenStr}
 
+	// 写入 exp -> ExpiresAt （一定要在最前面做）
+	if exp, ok := token.Expiration(); ok {
+		ts := exp.Unix()
+		authInfo.ExpiresAt = &ts
+	} else {
+		// 正常不会走到这里，因为上面 Parse 时用了 WithRequiredClaim("exp")
+		// 但为了健壮性，返回 invalid_token 更清晰
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing exp claim", "")
+	}
+
 	// 提取 OAuth 字段
 	var err error
 	if authInfo.ClientID, err = extractClientID(token); err != nil {
@@ -244,7 +260,7 @@ func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (
 		return AuthInfo{}, err
 	}
 
-	// optional fields
+	// 其他自定义声明
 	authInfo.Extra = extractExtra(token)
 	return authInfo, nil
 }
