@@ -881,7 +881,10 @@ func (h *httpServerHandler) isValidPath(requestPath string) bool {
 	if h.serverPath == "" {
 		return true
 	}
-	return requestPath == h.serverPath
+	sp := strings.TrimSuffix(h.serverPath, "/")
+	rp := strings.TrimSuffix(requestPath, "/")
+	
+	return rp == sp || strings.HasPrefix(requestPath, sp+"/")
 }
 
 // responseManager manages pending requests and their response channels.
