@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/router"
 )
 
@@ -85,6 +87,19 @@ type AuditConfig struct {
 	RiskAssessor func(map[string]interface{}) (string, []string)
 }
 
+type BearerAuthConfig struct {
+	Enabled bool
+
+	// Required: Token validator
+	Verifier server.TokenVerifierInterface
+
+	// Optional: List of required scopes
+	RequiredScopes []string
+
+	// Optional: Write resource_metadata for WWW-Authenticate
+	ResourceMetadataURL *string
+}
+
 // serverConfig stores all server configuration options
 type serverConfig struct {
 	// Basic configuration
@@ -106,6 +121,9 @@ type serverConfig struct {
 
 	// Audit middleware configuration
 	auditConfig *AuditConfig
+
+	// Bearer authenticate configuration
+	bearerAuth *BearerAuthConfig
 
 	// Tool list filter function
 	toolListFilter ToolListFilter
@@ -192,7 +210,6 @@ func (s *Server) initComponents() {
 	if s.config.methodNameModifier != nil {
 		toolManager.withMethodNameModifier(s.config.methodNameModifier)
 	}
-	// Only set tool list filter if not nil.
 	if s.config.toolListFilter != nil {
 		toolManager.withToolListFilter(s.config.toolListFilter)
 	}
@@ -202,7 +219,6 @@ func (s *Server) initComponents() {
 	resourceManager := newResourceManager()
 	s.resourceManager = resourceManager
 
-	// Create prompt manager.
 	promptManager := newPromptManager()
 	s.promptManager = promptManager
 
@@ -244,32 +260,34 @@ func (s *Server) initComponents() {
 
 	// Inject logger into httpServerHandler if provided.
 	if s.logger != nil {
-		// This is the httpServerHandler option version.
 		httpOptions = append(httpOptions, withServerTransportLogger(s.logger))
 	}
 
 	// Create HTTP handler.
 	s.httpHandler = newHTTPServerHandler(s.mcpHandler, s.config.path, httpOptions...)
+	core := http.Handler(s.httpHandler)
 
-	// By default, the server only exposes the core MCP handler.
-	// If additional route installers were provided via ServerOptions
-	// (e.g. WithOAuthRoutes, WithOAuthMetadata, or WithHTTPRoutes),
-	// build a new mux that mounts the MCP endpoint under the configured
-	// path (e.g. /mcp/) and then installs the extra routes.
-	// The mux becomes the rootHandler exposed by Handler().
-	s.rootHandler = s.httpHandler
-
-	if len(s.config.routerInstallers) > 0 {
-		mux := http.NewServeMux()
-		// Mount the MCP core handler under the configured path (e.g. /mcp/).
-		mux.Handle(s.config.path+"/", s.httpHandler)
-		// Apply each user-provided installer to add extra endpoints
-		// such as /authorize, /token, /revoke, /register, or .well-known.
-		for _, install := range s.config.routerInstallers {
-			_ = install(mux) // consider logging errors in production
-		}
-		s.rootHandler = mux
+	if s.config.bearerAuth != nil && s.config.bearerAuth.Enabled {
+		core = middleware.RequireBearerAuth(middleware.BearerAuthMiddlewareOptions{
+			Verifier:            s.config.bearerAuth.Verifier,
+			RequiredScopes:      s.config.bearerAuth.RequiredScopes,
+			ResourceMetadataURL: s.config.bearerAuth.ResourceMetadataURL,
+		})(core)
 	}
+	mux := http.NewServeMux()
+	mux.Handle(s.config.path+"/", core)
+
+	for _, install := range s.config.routerInstallers {
+		_ = install(mux)
+	}
+
+	root := http.Handler(mux)
+	if s.config.auditConfig != nil && s.config.auditConfig.Enabled {
+		auditOptions := convertToMiddlewareOptions(s.config.auditConfig)
+		root = middleware.AuditMiddleware(auditOptions)(root)
+	}
+
+	s.rootHandler = root
 }
 
 // ServerOption server option function.
@@ -344,6 +362,15 @@ func WithHTTPContextFunc(fn HTTPContextFunc) ServerOption {
 func WithAudit(config *AuditConfig) ServerOption {
 	return func(s *Server) {
 		s.config.auditConfig = config
+	}
+}
+
+// WithBearerAuth configures the server to use Bearer token authentication.
+// The provided BearerAuthConfig specifies how tokens are verified,
+// what scopes are required, and optionally, metadata for WWW-Authenticate responses.
+func WithBearerAuth(config *BearerAuthConfig) ServerOption {
+	return func(s *Server) {
+		s.config.bearerAuth = config
 	}
 }
 
@@ -737,4 +764,25 @@ func (s *Server) handleServerNotification(ctx context.Context, notification *JSO
 		s.logger.Debugf("No handler registered for notification method: %s", notification.Method)
 	}
 	return nil
+}
+
+func convertToMiddlewareOptions(config *AuditConfig) *middleware.AuditMiddlewareOptions {
+	level := middleware.AuditLevelBasic
+	switch config.Level {
+	case "detailed":
+		level = middleware.AuditLevelDetailed
+	case "full":
+		level = middleware.AuditLevelFull
+	}
+
+	return &middleware.AuditMiddlewareOptions{
+		Level:               level,
+		HashSensitiveData:   config.HashSensitiveData,
+		IncludeRequestBody:  config.IncludeRequestBody,
+		IncludeResponseBody: config.IncludeResponseBody,
+		EndpointPatterns:    config.EndpointPatterns,
+		ExcludePatterns:     config.ExcludePatterns,
+		MetadataExtractor:   config.MetadataExtractor,
+		// Convert RiskAssessor function signature if needed
+	}
 }
