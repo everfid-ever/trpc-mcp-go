@@ -18,8 +18,9 @@ import (
 
 // TokenHandlerOptions defines configuration options for the token endpoint
 type TokenHandlerOptions struct {
-	Provider  server.OAuthServerProvider `json:"provider"`
-	RateLimit *rate.Limiter              `json:"rateLimit,omitempty"` // ä½¿ç"¨æ ‡å‡†çš„ rate.Limiter
+	Provider                        server.OAuthServerProvider `json:"provider"`
+	RateLimit                       *rate.Limiter              `json:"rateLimit,omitempty"`
+	ResolveClientIDFromRefreshToken func(refreshToken string) (string, bool)
 }
 
 // TokenRequest defines the base structure of a token request.
@@ -69,7 +70,8 @@ func TokenHandler(options TokenHandlerOptions) http.HandlerFunc {
 
 	// Apply client authentication middleware
 	handler = middleware.AuthenticateClient(middleware.ClientAuthenticationMiddlewareOptions{
-		ClientsStore: options.Provider.ClientsStore(),
+		ClientsStore:                    options.Provider.ClientsStore(),
+		ResolveClientIDFromRefreshToken: options.ResolveClientIDFromRefreshToken,
 	})(handler)
 
 	// Apply rate limiting middleware

@@ -5,12 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
 
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
@@ -75,7 +75,7 @@ func main() {
 				},
 				OAuthClientInformation: auth.OAuthClientInformation{
 					ClientID:     clientID,
-					ClientSecret: "test-secret",
+					ClientSecret: "",
 				},
 			}, nil
 		},
@@ -92,42 +92,45 @@ func main() {
 			IssuerUrl:       mustURL("http://localhost:3000"),
 			BaseUrl:         mustURL("http://localhost:3000"),
 			ScopesSupported: []string{"mcp.read", "mcp.write"},
+			TokenOptions: &handler.TokenHandlerOptions{
+				ResolveClientIDFromRefreshToken: func(rt string) (string, bool) {
+					log.Printf("DEBUG: Attempting to resolve client_id from refresh_token: %s", rt)
+					parts := strings.Split(rt, ".")
+					if len(parts) == 3 {
+						log.Printf("DEBUG: JWT has 3 parts")
+						if payload, err := base64.RawURLEncoding.DecodeString(parts[1]); err == nil {
+							log.Printf("DEBUG: Decoded payload: %s", string(payload))
+							var m map[string]any
+							if json.Unmarshal(payload, &m) == nil {
+								log.Printf("DEBUG: Parsed JSON: %+v", m)
+								if cid, ok := m["client_id"].(string); ok && cid != "" {
+									log.Printf("DEBUG: Found client_id: %s", cid)
+									return cid, true
+								}
+							}
+						} else {
+							log.Printf("DEBUG: Failed to decode base64: %v", err)
+						}
+					}
+					log.Printf("DEBUG: Failed to resolve client_id from refresh token")
+					return "", false
+				},
+			},
 		}),
 
 		mcp.WithBearerAuth(&mcp.BearerAuthConfig{
 			Enabled:        true,
 			RequiredScopes: []string{"mcp.read"},
 			Verifier: server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
-				// 直接复用你原来 main.go 里的 mock 逻辑：
-				parts := strings.Split(token, ".")
-				if len(parts) < 2 {
-					return server.AuthInfo{}, fmt.Errorf("invalid token format")
-				}
-				payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+				log.Printf("DEBUG: Verifying token: %s", token[:20]+"...")
+				ai, err := mockVerifyJWT(token)
 				if err != nil {
-					return server.AuthInfo{}, fmt.Errorf("failed to decode JWT payload: %w", err)
-				}
-				var payload map[string]interface{}
-				if err := json.Unmarshal(payloadJSON, &payload); err != nil {
-					return server.AuthInfo{}, fmt.Errorf("failed to unmarshal JWT payload: %w", err)
+					log.Printf("DEBUG: Token verification failed: %v", err)
+					return server.AuthInfo{}, err
 				}
 
-				clientID, _ := payload["client_id"].(string)
-				scopeStr, _ := payload["scope"].(string)
-				scopes := []string{}
-				if scopeStr != "" {
-					scopes = strings.Split(scopeStr, " ")
-				}
-
-				exp := time.Now().Add(1 * time.Hour).Unix()
-
-				return server.AuthInfo{
-					Token:     token,
-					ClientID:  clientID,
-					Scopes:    scopes,
-					ExpiresAt: &exp,
-					Extra:     payload,
-				}, nil
+				log.Printf("DEBUG Verifier->return: client_id=%s scopes=%v", ai.ClientID, ai.Scopes)
+				return ai, nil
 			}),
 		}),
 
@@ -156,7 +159,13 @@ func main() {
 	})
 
 	// 直接启动MCP服务器
-	if err := mcpServer.Start(); err != nil {
+	observing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("ROUTING: hit path=%s", r.URL.Path)
+		mcpServer.Handler().ServeHTTP(w, r)
+	})
+
+	log.Println("== DEBUG: wrapping :3000 with observing handler ==")
+	if err := http.ListenAndServe(":3000", observing); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -167,12 +176,6 @@ func startMockOAuthServer() {
 
 	// 存储授权码
 	var authCode = "mock_auth_code_12345"
-	// 生成一个模拟 JWT: header.payload.signature
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"client_id":"test-client-id","scope":"mcp.read mcp.write"}`))
-	signature := "mocksignature" // 不做签名校验
-
-	accessToken := fmt.Sprintf("%s.%s.%s", header, payload, signature)
 
 	// 授权端点
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
@@ -203,104 +206,133 @@ func startMockOAuthServer() {
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 	})
 
-	// 模拟 OAuth 服务器的令牌端点
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Mock OAuth: Token exchange request received")
-
-		if r.Method != "POST" {
-			log.Printf("Mock OAuth: Method not allowed: %s", r.Method)
+		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// 读取原始请求体进行调试
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("Mock OAuth: Error reading body: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":             "invalid_request",
-				"error_description": fmt.Sprintf("Failed to read body: %v", err),
+		// 统一解析表单
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Invalid form", http.StatusBadRequest)
+			return
+		}
+
+		grantType := r.FormValue("grant_type")
+
+		// 小工具：签发一个“无签名”的伪 JWT，便于调试
+		makeJWT := func(payload map[string]any) string {
+			header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+			b, _ := json.Marshal(payload)
+			body := base64.RawURLEncoding.EncodeToString(b)
+			return header + "." + body + "."
+		}
+
+		switch grantType {
+		case "authorization_code":
+			clientID := r.FormValue("client_id")
+			clientSecret := r.FormValue("client_secret") // 如果传了，我们当保密客户端处理
+			code := r.FormValue("code")
+			redirectURI := r.FormValue("redirect_uri")
+			codeVerifier := r.FormValue("code_verifier")
+
+			// 基本参数校验
+			if clientID == "" || code == "" || redirectURI == "" || codeVerifier == "" {
+				http.Error(w, "Missing required parameters for authorization_code", http.StatusBadRequest)
+				return
+			}
+
+			// 若你要演示“保密客户端”，这里可以校验 secret；没传 secret 就按 public 走
+			if clientSecret != "" {
+				if clientSecret != "test-secret" { // 按你的演示值校验
+					http.Error(w, "Invalid client_secret", http.StatusUnauthorized)
+					return
+				}
+			}
+
+			// 颁发 token（演示值）
+			accessToken := makeJWT(map[string]any{
+				"client_id": clientID,
+				"scope":     "mcp.read",
+				"exp":       time.Now().Add(1 * time.Hour).Unix(),
 			})
-			return
-		}
-
-		log.Printf("Mock OAuth: Raw request body: %s", string(body))
-
-		// 手动解析 URL 编码的表单数据
-		formData, err := url.ParseQuery(string(body))
-		if err != nil {
-			log.Printf("Mock OAuth: Error parsing form data: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":             "invalid_request",
-				"error_description": fmt.Sprintf("Failed to parse form data: %v", err),
+			refreshToken := makeJWT(map[string]any{
+				"client_id": clientID,
+				"typ":       "refresh",
+				"exp":       time.Now().Add(24 * time.Hour).Unix(),
 			})
+
+			resp := map[string]any{
+				"access_token":  accessToken,
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+				"scope":         "mcp.read",
+				"refresh_token": refreshToken,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+
+		case "refresh_token":
+			refreshToken := r.FormValue("refresh_token")
+			if refreshToken == "" {
+				http.Error(w, "Missing refresh_token", http.StatusBadRequest)
+				return
+			}
+
+			// 可选：若传了 client_id/client_secret，这里也可验证；不传则按 public 刷新
+			clientID := r.FormValue("client_id")
+			clientSecret := r.FormValue("client_secret")
+			if clientSecret != "" && clientSecret != "test-secret" {
+				http.Error(w, "Invalid client_secret", http.StatusUnauthorized)
+				return
+			}
+
+			// 从 RT 里尽力解析 client_id（便于日志 & 回显）
+			if clientID == "" {
+				parts := strings.Split(refreshToken, ".")
+				if len(parts) == 3 {
+					if payload, err := base64.RawURLEncoding.DecodeString(parts[1]); err == nil {
+						var m map[string]any
+						if json.Unmarshal(payload, &m) == nil {
+							if v, ok := m["client_id"].(string); ok {
+								clientID = v
+							}
+						}
+					}
+				}
+			}
+			if clientID == "" {
+				// 实在拿不到就给个演示用 id（也可以改为 400）
+				clientID = "public-client"
+			}
+
+			// 颁发新 token
+			accessToken := makeJWT(map[string]any{
+				"client_id": clientID,
+				"scope":     "mcp.read",
+				"exp":       time.Now().Add(1 * time.Hour).Unix(),
+			})
+			newRefreshToken := makeJWT(map[string]any{
+				"client_id": clientID,
+				"typ":       "refresh",
+				"exp":       time.Now().Add(24 * time.Hour).Unix(),
+			})
+
+			resp := map[string]any{
+				"access_token":  accessToken,
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+				"scope":         "mcp.read",
+				"refresh_token": newRefreshToken,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+
+		default:
+			http.Error(w, "unsupported_grant_type", http.StatusBadRequest)
 			return
 		}
-
-		// 打印所有接收到的参数进行调试
-		log.Printf("Mock OAuth: Parsed form parameters:")
-		for key, values := range formData {
-			log.Printf("  %s: %v", key, values)
-		}
-
-		// 提取参数并进行验证
-		code := formData.Get("code")
-		clientID := formData.Get("client_id")
-		clientSecret := formData.Get("client_secret")
-		redirectURI := formData.Get("redirect_uri")
-		codeVerifier := formData.Get("code_verifier")
-
-		if code != "mock_auth_code_12345" {
-			log.Printf("Mock OAuth: Invalid authorization code: %s", code)
-			http.Error(w, "Invalid authorization code", http.StatusBadRequest)
-			return
-		}
-
-		if clientID != "test-client-id" {
-			log.Printf("Mock OAuth: Invalid client ID: %s", clientID)
-			http.Error(w, "Invalid client ID", http.StatusBadRequest)
-			return
-		}
-
-		if clientSecret != "test-secret" {
-			log.Printf("Mock OAuth: Invalid client secret: %s", clientSecret)
-			http.Error(w, "Invalid client secret", http.StatusBadRequest)
-			return
-		}
-
-		if redirectURI != "http://localhost:5173/callback" {
-			log.Printf("Mock OAuth: Invalid redirect URI: %s", redirectURI)
-			http.Error(w, "Invalid redirect URI", http.StatusBadRequest)
-			return
-		}
-
-		// 验证 PKCE (code_verifier)
-		if codeVerifier == "" {
-			log.Printf("Mock OAuth: Missing code verifier")
-			http.Error(w, "Missing code verifier", http.StatusBadRequest)
-			return
-		}
-
-		// 返回令牌
-		response := map[string]interface{}{
-			"access_token":  accessToken,
-			"token_type":    "Bearer",
-			"expires_in":    3600,
-			"refresh_token": "mock_refresh_token_99999",
-			"scope":         "mcp.read mcp.write",
-			"client_id":     "test-client-id",
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			log.Printf("Mock OAuth: Error encoding response: %v", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-
-		log.Printf("Mock OAuth: Access token issued successfully")
 	})
 
 	// 撤销端点（可选）
@@ -355,6 +387,8 @@ func mockVerifyJWT(token string) (server.AuthInfo, error) {
 	if err != nil {
 		return server.AuthInfo{}, fmt.Errorf("failed to decode JWT payload: %w", err)
 	}
+	log.Printf("DEBUG mockVerifyJWT: payload b64=%s json=%s", parts[1], string(payloadJSON)) // <— 新增
+
 	var payload map[string]interface{}
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		return server.AuthInfo{}, fmt.Errorf("failed to unmarshal JWT payload: %w", err)
@@ -367,6 +401,8 @@ func mockVerifyJWT(token string) (server.AuthInfo, error) {
 		scopes = strings.Split(scopeStr, " ")
 	}
 	exp := time.Now().Add(1 * time.Hour).Unix()
+
+	log.Printf("DEBUG mockVerifyJWT: client_id=%s scopes=%v", clientID, scopes) // <— 新增
 
 	return server.AuthInfo{
 		Token:     token,

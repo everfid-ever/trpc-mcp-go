@@ -2,8 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	stderrors "errors"
@@ -841,24 +839,6 @@ func RegisterClient(
 // isSuccessStatusCode checks if HTTP status code indicates success
 func isSuccessStatusCode(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
-}
-func generatePKCEChallenge() (*pkce.PKCEChallenge, error) {
-	// Generate 43-128 character code_verifier (RFC 7636)
-	verifierBytes := make([]byte, 32) // 32 bytes = 43 chars in base64url
-	if _, err := rand.Read(verifierBytes); err != nil {
-		return nil, fmt.Errorf("failed to generate code verifier: %w", err)
-	}
-
-	codeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
-
-	// Generate code_challenge using S256 method
-	hash := sha256.Sum256([]byte(codeVerifier))
-	codeChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
-
-	return &pkce.PKCEChallenge{
-		CodeVerifier:  codeVerifier,
-		CodeChallenge: codeChallenge,
-	}, nil
 }
 
 // startAuthorization starts OAuth 2.0 authorization flow

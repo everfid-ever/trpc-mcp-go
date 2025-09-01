@@ -166,6 +166,30 @@ func NewClient(serverURL string, clientInfo Implementation, options ...ClientOpt
 		option(client)
 	}
 
+	// Handle OAuth authentication if configured
+	if client.oauthProvider != nil {
+		if tokens, err := client.oauthProvider.Tokens(); err == nil && tokens != nil {
+			client.accessToken = tokens.AccessToken
+			if tokens.RefreshToken != nil {
+				client.refreshToken = *tokens.RefreshToken
+			}
+			if client.accessToken != "" {
+				// Ensure a headers map exists
+				if client.transportConfig.httpHeaders == nil {
+					client.transportConfig.httpHeaders = make(http.Header)
+				}
+				client.transportConfig.httpHeaders.Set("Authorization", "Bearer "+client.accessToken)
+				// Also push into transportOptions so the streamable transport sees it
+				client.transportOptions = append(client.transportOptions, withTransportHTTPHeaders(client.transportConfig.httpHeaders))
+			}
+		} else if err != nil {
+			// Optional: Surface a warning via logger if available
+			if client.logger != nil {
+				client.logger.Warnf("OAuth provider returned no tokens at client initialization: %v", err)
+			}
+		}
+	}
+
 	// Create transport layer if not previously set via options.
 	if client.transport == nil {
 		client.transport = newStreamableHTTPClientTransport(client.transportConfig, client.transportOptions...)
@@ -175,17 +199,7 @@ func NewClient(serverURL string, clientInfo Implementation, options ...ClientOpt
 			streamableTransport.client = client
 		}
 	}
-
-	// Handle OAuth authentication if configured
-	if client.oauthProvider != nil {
-		if tokens, err := client.oauthProvider.Tokens(); err == nil && tokens != nil {
-			client.accessToken = tokens.AccessToken
-			if tokens.RefreshToken != nil {
-				client.refreshToken = *tokens.RefreshToken
-			}
-		}
-	}
-
+	
 	// Set retry config on transport if configured
 	if client.retryConfig != nil {
 		client.transport.setRetryConfig(client.retryConfig)

@@ -167,7 +167,7 @@ func startCallbackServer() {
 func testMCPConnection(token *auth.OAuthTokens) error {
 	log.Println("Testing MCP connection with OAuth token...")
 
-	// 创建 OAuth client provider
+	// Create OAuth client provider
 	oauthProvider := client.NewInMemoryOAuthClientProvider(
 		"http://localhost:5173/callback",
 		auth.OAuthClientMetadata{
@@ -176,14 +176,14 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 			TokenEndpointAuthMethod: "client_secret_post",
 			RedirectURIs:            []string{"http://localhost:5173/callback"},
 		},
-		nil, // 回调函数，使用 nil 表示默认行为
+		nil, // callback function
 	)
 
-	// 保存客户端信息
+	// Save client information - 确保包含正确的client credentials
 	err := oauthProvider.SaveClientInformation(auth.OAuthClientInformationFull{
 		OAuthClientInformation: auth.OAuthClientInformation{
 			ClientID:     "test-client-id",
-			ClientSecret: "test-secret",
+			ClientSecret: "test-secret", // 确保保存了client_secret
 		},
 		OAuthClientMetadata: auth.OAuthClientMetadata{
 			ClientName:              strPtr("demo-client"),
@@ -196,21 +196,25 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 		return fmt.Errorf("failed to save client information: %v", err)
 	}
 
-	// 保存 token
+	// Save tokens
 	if err := oauthProvider.SaveTokens(*token); err != nil {
 		return fmt.Errorf("failed to save tokens: %v", err)
 	}
 
-	// 验证 token 是否正确保存
-	savedToken, err := oauthProvider.Tokens()
+	// 测试token刷新 - 这将触发refresh_token请求
+	log.Println("Testing token refresh...")
+	refreshedToken, err := refreshTokenManually("http://localhost:3000/token", *token.RefreshToken)
 	if err != nil {
-		return fmt.Errorf("failed to get saved tokens: %v", err)
+		log.Printf("Token refresh failed: %v", err)
+		// 继续使用原token测试MCP连接
+	} else {
+		log.Printf("Token refresh successful: %s", refreshedToken.AccessToken)
+		token = refreshedToken // 使用刷新后的token
 	}
-	log.Printf("Saved token: %s", savedToken.AccessToken)
 
 	ctx := context.Background()
 
-	// 创建 MCP 客户端，确保使用正确的 MCP 端点
+	// Create MCP client
 	c, err := mcp.NewClient(
 		"http://localhost:3000/mcp/",
 		mcp.Implementation{Name: "demo", Version: "0.1.0"},
@@ -222,13 +226,63 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 
 	log.Println("Attempting MCP initialization...")
 
-	// 初始化 MCP 连接
+	// Initialize MCP connection
 	initResult, err := c.Initialize(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("MCP initialization failed: %v", err)
 	}
 
 	log.Printf("MCP initialization successful: %+v", initResult)
-
 	return nil
+}
+
+// 添加手动refresh token的函数，确保包含client_id
+func refreshTokenManually(tokenURL, refreshToken string) (*auth.OAuthTokens, error) {
+	log.Println("Manually refreshing token...")
+
+	data := url.Values{}
+	data.Set("grant_type", "refresh_token")
+	data.Set("refresh_token", refreshToken)
+	// 关键修复：显式包含client_id和client_secret
+	data.Set("client_id", "test-client-id")
+	data.Set("client_secret", "test-secret")
+
+	log.Println("Refresh token parameters:")
+	for key, values := range data {
+		if key == "client_secret" || key == "refresh_token" {
+			log.Printf("  %s: [REDACTED]", key)
+		} else {
+			log.Printf("  %s: %v", key, values)
+		}
+	}
+
+	req, _ := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	log.Printf("Making refresh token request to: %s", tokenURL)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	log.Printf("Refresh token response status: %d", resp.StatusCode)
+	log.Printf("Refresh token response body: %s", string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token refresh failed with status: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var token auth.OAuthTokens
+	if err := json.Unmarshal(body, &token); err != nil {
+		return nil, fmt.Errorf("failed to decode token response: %v", err)
+	}
+
+	return &token, nil
 }
