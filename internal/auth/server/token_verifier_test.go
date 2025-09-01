@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,6 +112,29 @@ func setupTestKeys(t *testing.T) (*rsa.PrivateKey, jwk.Key, string) {
 	jwksJSON := createTestJWKS(publicKey)
 
 	return privateKey, publicKey, jwksJSON
+}
+
+func TestTokenVerifierFunc_VerifyAccessToken(t *testing.T) {
+	ctx := context.Background()
+
+	// 定义一个假的 verifier 函数
+	fn := TokenVerifierFunc(func(ctx context.Context, token string) (AuthInfo, error) {
+		if token == "valid" {
+			return AuthInfo{Token: token, ClientID: "test-client"}, nil
+		}
+		return AuthInfo{}, errors.New("invalid token")
+	})
+
+	// 成功路径
+	authInfo, err := fn.VerifyAccessToken(ctx, "valid")
+	assert.NoError(t, err)
+	assert.Equal(t, "valid", authInfo.Token)
+	assert.Equal(t, "test-client", authInfo.ClientID)
+
+	// 失败路径
+	authInfo, err = fn.VerifyAccessToken(ctx, "invalid")
+	assert.Error(t, err)
+	assert.Empty(t, authInfo.Token)
 }
 
 // Tests for NewLocalTokenVerifier

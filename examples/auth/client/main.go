@@ -10,11 +10,11 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/pkce"
 
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/pkce"
 )
 
 func strPtr(s string) *string { return &s }
@@ -39,7 +39,6 @@ func main() {
 	log.Printf("Generated PKCE verifier: %s", codeVerifier)
 	log.Printf("Generated PKCE challenge: %s", challenge)
 
-	// Fix: Use correct authorization server address (port 3000, since MCP server handles OAuth routes)
 	authURL := "http://localhost:3000/authorize" +
 		"?response_type=code" +
 		"&client_id=test-client-id" +
@@ -61,6 +60,7 @@ func main() {
 	case code := <-codeCh:
 		log.Println("Authorization code received:", code)
 
+		// 修复：使用正确的 token URL (port 3030 而不是 3000)
 		token, err := exchangeToken("http://localhost:3030/token", code, "http://localhost:5173/callback")
 		if err != nil {
 			log.Fatalf("Error exchanging token: %v", err)
@@ -167,6 +167,7 @@ func startCallbackServer() {
 func testMCPConnection(token *auth.OAuthTokens) error {
 	log.Println("Testing MCP connection with OAuth token...")
 
+	// 创建 OAuth client provider
 	oauthProvider := client.NewInMemoryOAuthClientProvider(
 		"http://localhost:5173/callback",
 		auth.OAuthClientMetadata{
@@ -175,18 +176,43 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 			TokenEndpointAuthMethod: "client_secret_post",
 			RedirectURIs:            []string{"http://localhost:5173/callback"},
 		},
-		nil,
+		nil, // 回调函数，使用 nil 表示默认行为
 	)
 
+	// 保存客户端信息
+	err := oauthProvider.SaveClientInformation(auth.OAuthClientInformationFull{
+		OAuthClientInformation: auth.OAuthClientInformation{
+			ClientID:     "test-client-id",
+			ClientSecret: "test-secret",
+		},
+		OAuthClientMetadata: auth.OAuthClientMetadata{
+			ClientName:              strPtr("demo-client"),
+			GrantTypes:              []string{"authorization_code", "refresh_token"},
+			TokenEndpointAuthMethod: "client_secret_post",
+			RedirectURIs:            []string{"http://localhost:5173/callback"},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to save client information: %v", err)
+	}
+
+	// 保存 token
 	if err := oauthProvider.SaveTokens(*token); err != nil {
 		return fmt.Errorf("failed to save tokens: %v", err)
 	}
+
+	// 验证 token 是否正确保存
+	savedToken, err := oauthProvider.Tokens()
+	if err != nil {
+		return fmt.Errorf("failed to get saved tokens: %v", err)
+	}
+	log.Printf("Saved token: %s", savedToken.AccessToken)
 
 	ctx := context.Background()
 
 	// 创建 MCP 客户端，确保使用正确的 MCP 端点
 	c, err := mcp.NewClient(
-		"http://localhost:3000/mcp",
+		"http://localhost:3000/mcp/",
 		mcp.Implementation{Name: "demo", Version: "0.1.0"},
 		mcp.WithOAuthClientProvider(oauthProvider),
 	)
