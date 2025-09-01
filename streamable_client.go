@@ -251,9 +251,7 @@ func (t *streamableHTTPClientTransport) send(
 		return nil, fmt.Errorf("%w: %v", ErrRequestSerialization, err)
 	}
 
-	if _, err := t.ensureAuth(ctx); err != nil {
-		t.logger.Debugf("ensureAuth failed (cintinue anyway): %v", err)
-	}
+	ctx, _ = t.ensureAuth(ctx)
 
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, t.serverURL.String(), bytes.NewReader(reqBytes))
@@ -298,7 +296,7 @@ func (t *streamableHTTPClientTransport) send(
 	if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
 		httpResp.Body.Close()
 
-		if _, err := t.ensureAuth(ctx); err != nil {
+		if _, err := t.ensureAuth(ctx); err == nil {
 			httpReq2, err := http.NewRequestWithContext(ctx, http.MethodPost, t.serverURL.String(), bytes.NewReader(reqBytes))
 			if err != nil {
 				return nil, fmt.Errorf("%w: %v", ErrHTTPRequestCreation, err)
@@ -676,9 +674,7 @@ func (t *streamableHTTPClientTransport) connectGetSSE(ctx context.Context) error
 		return fmt.Errorf("cannot establish GET SSE connection: session ID is empty")
 	}
 
-	if _, err := t.ensureAuth(ctx); err != nil {
-		t.logger.Debugf("ensureAuth for GET SSE failed (continue anyway): %v", err)
-	}
+	ctx, _ = t.ensureAuth(ctx)
 
 	// Build GET request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.serverURL.String(), nil)
