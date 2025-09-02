@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 )
 
@@ -283,7 +284,7 @@ func TestStartAuthorization(t *testing.T) {
 		RedirectURL: "https://client.example.com/callback",
 	}
 
-	result, err := startAuthorization("https://auth.example.com", options)
+	result, err := StartAuthorization("https://auth.example.com", options)
 	if err != nil {
 		t.Fatalf("startAuthorization() error = %v", err)
 	}

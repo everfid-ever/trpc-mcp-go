@@ -319,7 +319,7 @@ func authInternal(provider OAuthClientProvider, options auth.AuthOptions) (*Auth
 			addClientAuth = authProvider.AddClientAuthentication
 		}
 
-		newTokens, err := refreshAuthorization(authorizationServerUrl, RefreshAuthorizationOptions{
+		newTokens, err := RefreshAuthorization(authorizationServerUrl, RefreshAuthorizationOptions{
 			Metadata:                serverMetadata,
 			ClientInformation:       clientInformation,
 			RefreshToken:            *tokens.RefreshToken,
@@ -358,7 +358,7 @@ func authInternal(provider OAuthClientProvider, options auth.AuthOptions) (*Auth
 		}
 	}
 
-	authorizationResult, err := startAuthorization(authorizationServerUrl, StartAuthorizationOptions{
+	authorizationResult, err := StartAuthorization(authorizationServerUrl, StartAuthorizationOptions{
 		Metadata:          serverMetadata,
 		ClientInformation: *clientInformation,
 		State:             state,
@@ -841,9 +841,8 @@ func isSuccessStatusCode(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
 }
 
-// startAuthorization starts OAuth 2.0 authorization flow
-// Generates PKCE challenge and builds authorization URL
-func startAuthorization(
+// StartAuthorization starts OAuth 2.0 authorization flow
+func StartAuthorization(
 	authorizationServerUrl string,
 	options StartAuthorizationOptions,
 ) (*StartAuthorizationResult, error) {
@@ -951,7 +950,7 @@ func startAuthorization(
 		CodeVerifier:     challenge.CodeVerifier,
 	}, nil
 }
-func exchangeAuthorization(
+func ExchangeAuthorization(
 	authorizationServerUrl string,
 	options ExchangeAuthorizationOptions,
 ) (*auth.OAuthTokens, error) {
@@ -1076,7 +1075,7 @@ func exchangeAuthorization(
 
 	return &tokens, nil
 }
-func refreshAuthorization(
+func RefreshAuthorization(
 	authorizationServerUrl string,
 	options RefreshAuthorizationOptions,
 ) (*auth.OAuthTokens, error) {
