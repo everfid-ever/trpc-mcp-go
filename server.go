@@ -11,11 +11,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/time/rate"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/providers"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	sh "trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/router"
 )
@@ -99,6 +104,32 @@ type BearerAuthConfig struct {
 	// Optional: Write resource_metadata for WWW-Authenticate
 	ResourceMetadataURL *string
 }
+
+type OAuthRoutesConfig struct {
+	Provider                server.OAuthServerProvider
+	IssuerURL               *url.URL
+	BaseURL                 *url.URL
+	ServiceDocumentationURL *url.URL
+	ScopesSupported         []string
+	ResourceName            *string
+
+	// Optional
+	AuthorizationRateLimit *rate.Limiter
+	TokenRateLimit         *rate.Limiter
+	ResolveClientIDFromRT  func(rt string) (string, bool)
+	RegistrationRateLimit  *sh.RegisterRateLimitConfig
+	RevocationRateLimit    *sh.RevocationRateLimitConfig
+}
+
+type OAuthMetadataConfig struct {
+	OAuthMetadata           OAuthMetadata
+	ResourceServerURL       *url.URL
+	ServiceDocumentationURL *url.URL
+	ScopesSupported         []string
+	ResourceName            *string
+}
+
+type OAuthMetadata = auth.OAuthMetadata
 
 // serverConfig stores all server configuration options
 type serverConfig struct {
@@ -416,6 +447,14 @@ func WithServerAddress(addr string) ServerOption {
 	}
 }
 
+func WithProxyOAuthProvider(proxyOpts providers.ProxyOptions, cfg OAuthRoutesConfig) ServerOption {
+	return func(s *Server) {
+		prov := providers.NewProxyOAuthServerProvider(proxyOpts)
+		cfg.Provider = prov
+		WithOAuthRoutes(cfg)(s)
+	}
+}
+
 // WithHTTPRoutes registers a custom installer function that can
 // attach additional HTTP routes to the server's root mux.
 func WithHTTPRoutes(install func(*http.ServeMux) error) ServerOption {
@@ -427,8 +466,39 @@ func WithHTTPRoutes(install func(*http.ServeMux) error) ServerOption {
 // WithOAuthRoutes installs standard OAuth 2.1 endpoints into the server,
 // such as /authorize, /token, /revoke, and /register, depending on the
 // provided AuthRouterOptions and the provider's capabilities.
-func WithOAuthRoutes(opts router.AuthRouterOptions) ServerOption {
+func WithOAuthRoutes(cfg OAuthRoutesConfig) ServerOption {
 	return WithHTTPRoutes(func(mux *http.ServeMux) error {
+		base := cfg.BaseURL
+		if base == nil {
+			base = cfg.IssuerURL
+		}
+
+		opts := router.AuthRouterOptions{
+			Provider:                cfg.Provider,
+			IssuerUrl:               cfg.IssuerURL,
+			BaseUrl:                 base,
+			ServiceDocumentationUrl: cfg.ServiceDocumentationURL,
+			ScopesSupported:         cfg.ScopesSupported,
+			ResourceName:            cfg.ResourceName,
+
+			AuthorizationOptions: &sh.AuthorizationHandlerOptions{
+				Provider:  cfg.Provider,
+				RateLimit: cfg.AuthorizationRateLimit,
+			},
+			TokenOptions: &sh.TokenHandlerOptions{
+				Provider:                        cfg.Provider,
+				RateLimit:                       cfg.TokenRateLimit,
+				ResolveClientIDFromRefreshToken: cfg.ResolveClientIDFromRT,
+			},
+			ClientRegistrationOptions: &sh.ClientRegistrationHandlerOptions{
+				ClientsStore: cfg.Provider.ClientsStore(), // 若 provider 支持动态注册则生效
+				RateLimit:    cfg.RegistrationRateLimit,
+			},
+			RevocationOptions: &sh.RevocationHandlerOptions{
+				Provider:  cfg.Provider,
+				RateLimit: cfg.RevocationRateLimit,
+			},
+		}
 		return router.McpAuthRouter(mux, opts)
 	})
 }
@@ -437,8 +507,16 @@ func WithOAuthRoutes(opts router.AuthRouterOptions) ServerOption {
 // (e.g. /.well-known/oauth-authorization-server and
 // /.well-known/oauth-protected-resource) into the server.
 // The returned metadata is constructed from the given AuthMetadataOptions.
-func WithOAuthMetadata(opts router.AuthMetadataOptions) ServerOption {
+func WithOAuthMetadata(cfg OAuthMetadataConfig) ServerOption {
 	return WithHTTPRoutes(func(mux *http.ServeMux) error {
+		// 直接把对外的 MetadataConfig 转为内部的 router.AuthMetadataOptions
+		opts := router.AuthMetadataOptions{
+			OAuthMetadata:           cfg.OAuthMetadata,
+			ResourceServerUrl:       cfg.ResourceServerURL,
+			ServiceDocumentationUrl: cfg.ServiceDocumentationURL,
+			ScopesSupported:         cfg.ScopesSupported,
+			ResourceName:            cfg.ResourceName,
+		}
 		return router.McpAuthMetadataRouter(mux, opts)
 	})
 }

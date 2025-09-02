@@ -39,7 +39,7 @@ func main() {
 	log.Printf("Generated PKCE verifier: %s", codeVerifier)
 	log.Printf("Generated PKCE challenge: %s", challenge)
 
-	authURL := "http://localhost:3000/authorize" +
+	authURL := "http://localhost:3030/authorize" +
 		"?response_type=code" +
 		"&client_id=test-client-id" +
 		"&redirect_uri=http://localhost:5173/callback" +
@@ -203,10 +203,9 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 
 	// 测试token刷新 - 这将触发refresh_token请求
 	log.Println("Testing token refresh...")
-	refreshedToken, err := refreshTokenManually("http://localhost:3000/token", *token.RefreshToken)
+	refreshedToken, err := refreshTokenManually("http://localhost:3030/token", *token.RefreshToken)
 	if err != nil {
 		log.Printf("Token refresh failed: %v", err)
-		// 继续使用原token测试MCP连接
 	} else {
 		log.Printf("Token refresh successful: %s", refreshedToken.AccessToken)
 		token = refreshedToken // 使用刷新后的token
@@ -227,7 +226,7 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 	log.Println("Attempting MCP initialization...")
 
 	// Initialize MCP connection
-	initResult, err := c.Initialize(ctx, nil)
+	initResult, err := c.Initialize(ctx, &mcp.InitializeRequest{})
 	if err != nil {
 		return fmt.Errorf("MCP initialization failed: %v", err)
 	}
@@ -243,7 +242,6 @@ func refreshTokenManually(tokenURL, refreshToken string) (*auth.OAuthTokens, err
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
-	// 关键修复：显式包含client_id和client_secret
 	data.Set("client_id", "test-client-id")
 	data.Set("client_secret", "test-secret")
 
