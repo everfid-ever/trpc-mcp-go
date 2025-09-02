@@ -10,13 +10,11 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
 
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/providers"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/router"
 )
 
 func strPtr(s string) *string {
@@ -52,7 +50,7 @@ func main() {
 			AuthorizationURL: "http://localhost:3030/authorize",
 			TokenURL:         "http://localhost:3030/token",
 			RevocationURL:    "http://localhost:3030/revoke",
-			//RegistrationURL:  "http://localhost:3030/register",
+			RegistrationURL:  "http://localhost:3030/register",
 		},
 
 		VerifyAccessToken: func(token string) (*server.AuthInfo, error) {
@@ -87,34 +85,16 @@ func main() {
 		"1.0.0",
 		mcp.WithServerAddress(":3000"),
 		mcp.WithServerPath("/mcp"),
-		mcp.WithOAuthRoutes(router.AuthRouterOptions{
+		mcp.WithOAuthRoutes(mcp.OAuthRoutesConfig{
 			Provider:        provider,
-			IssuerUrl:       mustURL("http://localhost:3000"),
-			BaseUrl:         mustURL("http://localhost:3000"),
+			IssuerURL:       mustURL("http://localhost:3000"),
+			BaseURL:         mustURL("http://localhost:3000"),
 			ScopesSupported: []string{"mcp.read", "mcp.write"},
-			TokenOptions: &handler.TokenHandlerOptions{
-				ResolveClientIDFromRefreshToken: func(rt string) (string, bool) {
-					log.Printf("DEBUG: Attempting to resolve client_id from refresh_token: %s", rt)
-					parts := strings.Split(rt, ".")
-					if len(parts) == 3 {
-						log.Printf("DEBUG: JWT has 3 parts")
-						if payload, err := base64.RawURLEncoding.DecodeString(parts[1]); err == nil {
-							log.Printf("DEBUG: Decoded payload: %s", string(payload))
-							var m map[string]any
-							if json.Unmarshal(payload, &m) == nil {
-								log.Printf("DEBUG: Parsed JSON: %+v", m)
-								if cid, ok := m["client_id"].(string); ok && cid != "" {
-									log.Printf("DEBUG: Found client_id: %s", cid)
-									return cid, true
-								}
-							}
-						} else {
-							log.Printf("DEBUG: Failed to decode base64: %v", err)
-						}
-					}
-					log.Printf("DEBUG: Failed to resolve client_id from refresh token")
-					return "", false
-				},
+
+			// 可选：令牌刷新时帮助识别 client_id（比如从 RT 里解出来）
+			ResolveClientIDFromRT: func(rt string) (string, bool) {
+				cid := tryParseClientIDFromRefreshToken(rt) // 伪代码
+				return cid, cid != ""
 			},
 		}),
 
@@ -387,8 +367,7 @@ func mockVerifyJWT(token string) (server.AuthInfo, error) {
 	if err != nil {
 		return server.AuthInfo{}, fmt.Errorf("failed to decode JWT payload: %w", err)
 	}
-	log.Printf("DEBUG mockVerifyJWT: payload b64=%s json=%s", parts[1], string(payloadJSON)) // <— 新增
-
+	log.Printf("DEBUG mockVerifyJWT: payload b64=%s json=%s", parts[1], string(payloadJSON))
 	var payload map[string]interface{}
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		return server.AuthInfo{}, fmt.Errorf("failed to unmarshal JWT payload: %w", err)
@@ -402,8 +381,7 @@ func mockVerifyJWT(token string) (server.AuthInfo, error) {
 	}
 	exp := time.Now().Add(1 * time.Hour).Unix()
 
-	log.Printf("DEBUG mockVerifyJWT: client_id=%s scopes=%v", clientID, scopes) // <— 新增
-
+	log.Printf("DEBUG mockVerifyJWT: client_id=%s scopes=%v", clientID, scopes)
 	return server.AuthInfo{
 		Token:     token,
 		ClientID:  clientID,
@@ -411,4 +389,33 @@ func mockVerifyJWT(token string) (server.AuthInfo, error) {
 		ExpiresAt: &exp,
 		Extra:     payload,
 	}, nil
+}
+
+// tryParseClientIDFromRefreshToken 解析 refresh_token 中的 client_id
+func tryParseClientIDFromRefreshToken(refreshToken string) string {
+	// 假设 refresh_token 是无签名的 JWT（header.payload.signature）
+	parts := strings.Split(refreshToken, ".")
+	if len(parts) != 3 {
+		return "" // token 格式不正确
+	}
+
+	// 解码 JWT 的 payload 部分（中间的部分）
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "" // 解码失败
+	}
+
+	// 解析 JSON 数据（payload）
+	var data map[string]interface{}
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return "" // JSON 解析失败
+	}
+
+	// 从 payload 中提取 client_id
+	clientID, ok := data["client_id"].(string)
+	if !ok {
+		return "" // 没有找到 client_id
+	}
+
+	return clientID
 }
