@@ -251,7 +251,10 @@ func (t *streamableHTTPClientTransport) send(
 		return nil, fmt.Errorf("%w: %v", ErrRequestSerialization, err)
 	}
 
-	ctx, _ = t.ensureAuth(ctx)
+	ctx, err = t.ensureAuth(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("authentication failed: %w", err)
+	}
 
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, t.serverURL.String(), bytes.NewReader(reqBytes))
@@ -260,6 +263,23 @@ func (t *streamableHTTPClientTransport) send(
 	}
 	if len(t.path) != 0 {
 		httpReq.URL.Path = t.path
+	}
+
+	t.setBasicHeaders(httpReq)
+	t.setAuthorizationHeader(ctx, httpReq)
+
+	if options != nil && options.lastEventID != "" {
+		httpReq.Header.Set(httputil.LastEventIDHeader, options.lastEventID)
+	}
+
+	httpResp, err := t.httpReqHandler.Handle(ctx, t.httpClient, httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrHTTPRequestCreation, err)
+	}
+
+	if httpResp.StatusCode == http.StatusNoContent || httpResp.StatusCode == http.StatusBadRequest {
+		httpResp.Body.Close()
+		return t.retryWithFreshAuth(ctx, reqBytes, options)
 	}
 
 	// Set request headers - accept both SSE and JSON responses
@@ -288,7 +308,7 @@ func (t *streamableHTTPClientTransport) send(
 	}
 
 	// Send request using the handler
-	httpResp, err := t.httpReqHandler.Handle(ctx, t.httpClient, httpReq)
+	httpResp, err = t.httpReqHandler.Handle(ctx, t.httpClient, httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrHTTPRequestFailed, err)
 	}
@@ -674,7 +694,10 @@ func (t *streamableHTTPClientTransport) connectGetSSE(ctx context.Context) error
 		return fmt.Errorf("cannot establish GET SSE connection: session ID is empty")
 	}
 
-	ctx, _ = t.ensureAuth(ctx)
+	ctx, err := t.ensureAuth(ctx)
+	if err != nil {
+		return fmt.Errorf("authentication failed: %w", err)
+	}
 
 	// Build GET request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.serverURL.String(), nil)
@@ -1048,4 +1071,122 @@ func (t *streamableHTTPClientTransport) ensureAuth(ctx context.Context) (context
 	}
 	info := client.ConvertTokensToAuthInfo(tokens)
 	return client.WithAuthInfo(ctx, info), nil
+}
+
+// setBasicHeaders sets the basic headers that are common to all HTTP requests
+func (t *streamableHTTPClientTransport) setBasicHeaders(req *http.Request) {
+	// Set content type and accept headers
+	req.Header.Set(httputil.ContentTypeHeader, httputil.ContentTypeJSON)
+	req.Header.Set(httputil.AcceptHeader, httputil.ContentTypeJSON+", "+httputil.ContentTypeSSE)
+
+	// Set session ID if available and not in stateless mode
+	if t.sessionID != "" && !t.isStateless {
+		req.Header.Set(httputil.SessionIDHeader, t.sessionID)
+	}
+
+	// Set last event ID if available
+	if t.lastEventID != "" {
+		req.Header.Set(httputil.LastEventIDHeader, t.lastEventID)
+	}
+
+	// Set path if specified
+	if len(t.path) != 0 {
+		req.URL.Path = t.path
+	}
+
+	// Add custom headers
+	for key, values := range t.httpHeaders {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+}
+
+// setAuthorizationHeader sets the Authorization header using context auth info
+func (t *streamableHTTPClientTransport) setAuthorizationHeader(ctx context.Context, req *http.Request) {
+	if authInfo, ok := client.GetAuthInfo(ctx); ok && authInfo != nil && authInfo.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authInfo.AccessToken)
+	}
+}
+
+// retryWithFreshAuth handles retry logic with fresh authentication
+func (t *streamableHTTPClientTransport) retryWithFreshAuth(ctx context.Context, reqBytes []byte, options *streamOptions) (*json.RawMessage, error) {
+	// 强制刷新认证
+	ctx, err := t.ensureAuth(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("re-authentication failed: %w", err)
+	}
+
+	// 创建新的HTTP请求
+	httpReq2, err := http.NewRequestWithContext(ctx, http.MethodPost, t.serverURL.String(), bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrHTTPRequestCreation, err)
+	}
+
+	// 重新设置所有headers
+	t.setBasicHeaders(httpReq2)
+	t.setAuthorizationHeader(ctx, httpReq2) // 关键：使用新的context设置Authorization
+
+	// 处理特定于此请求的选项
+	if options != nil && options.lastEventID != "" {
+		httpReq2.Header.Set(httputil.LastEventIDHeader, options.lastEventID)
+	}
+
+	// 发送重试请求
+	httpResp, err := t.httpReqHandler.Handle(ctx, t.httpClient, httpReq2)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrHTTPRequestFailed, err)
+	}
+	defer httpResp.Body.Close()
+
+	// 处理会话ID
+	if sessionID := httpResp.Header.Get(httputil.SessionIDHeader); sessionID != "" {
+		t.setSessionID(sessionID)
+		t.isStateless = false
+	}
+
+	// 检查内容类型
+	contentType := httpResp.Header.Get(httputil.ContentTypeHeader)
+	if strings.Contains(contentType, httputil.ContentTypeSSE) {
+		// 处理SSE响应
+		return t.handleSSEResponse(ctx, httpResp, nil, options) // reqID设为nil，因为这是重试
+	}
+
+	// 检查状态码
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%w: status code %d", ErrHTTPRequestFailed, httpResp.StatusCode)
+	}
+
+	// 读取响应体
+	respBytes, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// 解析JSON响应
+	var jsonResp map[string]interface{}
+	if err := json.Unmarshal(respBytes, &jsonResp); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrResponseParsing, err)
+	}
+
+	// 检查是否为错误响应
+	if _, hasError := jsonResp["error"]; hasError {
+		rawMessage := json.RawMessage(respBytes)
+		return &rawMessage, nil
+	}
+
+	// 提取结果部分
+	resultData, ok := jsonResp["result"]
+	if !ok {
+		return nil, ErrMissingResultField
+	}
+
+	// 序列化结果为JSON
+	resultBytes, err := json.Marshal(resultData)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrResponseSerialization, err)
+	}
+
+	rawMessage := json.RawMessage(resultBytes)
+	return &rawMessage, nil
 }

@@ -1017,6 +1017,7 @@ func ExchangeAuthorization(
 		var supportedMethods []string
 		if options.Metadata != nil {
 			supportedMethods = options.Metadata.GetTokenEndpointAuthMethodsSupported()
+
 		}
 		authMethod := selectClientAuthMethod(*options.ClientInformation, supportedMethods)
 		if err := applyClientAuthentication(authMethod, *options.ClientInformation, headers, params); err != nil {

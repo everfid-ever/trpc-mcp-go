@@ -395,6 +395,11 @@ func (c *Client) Initialize(ctx context.Context, initReq *InitializeRequest) (*I
 		if err := c.executeAuthFlow(ctx); err != nil {
 			return nil, fmt.Errorf("authentication failed: %w", err)
 		}
+
+		// Ensure transport uses the latest token
+		if err := c.updateClientTokens(); err != nil {
+			return nil, fmt.Errorf("failed to update tokens: %w", err)
+		}
 	}
 
 	// Create request.

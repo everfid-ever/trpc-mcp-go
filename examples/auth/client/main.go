@@ -44,6 +44,7 @@ func main() {
 		"&client_id=test-client-id" +
 		"&redirect_uri=http://localhost:5173/callback" +
 		"&scope=mcp.read" +
+		"&resource=" + url.QueryEscape("http://localhost:3000") +
 		"&code_challenge=" + url.QueryEscape(challenge) +
 		"&code_challenge_method=S256"
 
@@ -60,7 +61,6 @@ func main() {
 	case code := <-codeCh:
 		log.Println("Authorization code received:", code)
 
-		// 修复：使用正确的 token URL (port 3030 而不是 3000)
 		token, err := exchangeToken("http://localhost:3030/token", code, "http://localhost:5173/callback")
 		if err != nil {
 			log.Fatalf("Error exchanging token: %v", err)
@@ -179,11 +179,11 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 		nil, // callback function
 	)
 
-	// Save client information - 确保包含正确的client credentials
+	// Save client information
 	err := oauthProvider.SaveClientInformation(auth.OAuthClientInformationFull{
 		OAuthClientInformation: auth.OAuthClientInformation{
 			ClientID:     "test-client-id",
-			ClientSecret: "test-secret", // 确保保存了client_secret
+			ClientSecret: "test-secret",
 		},
 		OAuthClientMetadata: auth.OAuthClientMetadata{
 			ClientName:              strPtr("demo-client"),
@@ -201,23 +201,35 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 		return fmt.Errorf("failed to save tokens: %v", err)
 	}
 
-	// 测试token刷新 - 这将触发refresh_token请求
-	log.Println("Testing token refresh...")
-	refreshedToken, err := refreshTokenManually("http://localhost:3030/token", *token.RefreshToken)
-	if err != nil {
-		log.Printf("Token refresh failed: %v", err)
-	} else {
-		log.Printf("Token refresh successful: %s", refreshedToken.AccessToken)
-		token = refreshedToken // 使用刷新后的token
-	}
-
 	ctx := context.Background()
+	authFlowConfig := mcp.AuthFlowConfig{
+		ServerURL: "http://localhost:3000",
+
+		ClientMetadata: auth.OAuthClientMetadata{
+			ClientName:              strPtr("demo-client"),
+			GrantTypes:              []string{"authorization_code", "refresh_token"},
+			TokenEndpointAuthMethod: "client_secret_post",
+			RedirectURIs:            []string{"http://localhost:5173/callback"},
+			Scope:                   strPtr("mcp.read"),
+		},
+
+		// 资源发现地址（由 3000 资源端提供），让库知道受众=3000
+		ResourceMetadataURL: strPtr("http://localhost:3000/.well-known/oauth-protected-resource"),
+
+		RedirectURL: "http://localhost:5173/callback",
+		Scope:       strPtr("mcp.read"),
+		OnRedirect: func(u *url.URL) error {
+			log.Printf("Authorization required. Please open: %s", u.String())
+			return nil
+		},
+	}
 
 	// Create MCP client
 	c, err := mcp.NewClient(
 		"http://localhost:3000/mcp/",
 		mcp.Implementation{Name: "demo", Version: "0.1.0"},
 		mcp.WithOAuthClientProvider(oauthProvider),
+		mcp.WithAuthFlow(authFlowConfig),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create MCP client: %v", err)
@@ -233,54 +245,4 @@ func testMCPConnection(token *auth.OAuthTokens) error {
 
 	log.Printf("MCP initialization successful: %+v", initResult)
 	return nil
-}
-
-// 添加手动refresh token的函数，确保包含client_id
-func refreshTokenManually(tokenURL, refreshToken string) (*auth.OAuthTokens, error) {
-	log.Println("Manually refreshing token...")
-
-	data := url.Values{}
-	data.Set("grant_type", "refresh_token")
-	data.Set("refresh_token", refreshToken)
-	data.Set("client_id", "test-client-id")
-	data.Set("client_secret", "test-secret")
-
-	log.Println("Refresh token parameters:")
-	for key, values := range data {
-		if key == "client_secret" || key == "refresh_token" {
-			log.Printf("  %s: [REDACTED]", key)
-		} else {
-			log.Printf("  %s: %v", key, values)
-		}
-	}
-
-	req, _ := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	log.Printf("Making refresh token request to: %s", tokenURL)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %v", err)
-	}
-
-	log.Printf("Refresh token response status: %d", resp.StatusCode)
-	log.Printf("Refresh token response body: %s", string(body))
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var token auth.OAuthTokens
-	if err := json.Unmarshal(body, &token); err != nil {
-		return nil, fmt.Errorf("failed to decode token response: %v", err)
-	}
-
-	return &token, nil
 }
