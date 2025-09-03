@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -85,6 +87,11 @@ func main() {
 		},
 	})
 
+	ctx := context.Background()
+	verifier, err := server.NewTokenVerifier(ctx, server.TokenVerifierConfig{
+		Local: &server.LocalJWKSConfig{File: "keys/jwks.json"},
+	})
+	
 	// 创建并启动MCP服务器
 	mcpServer := mcp.NewServer(
 		"Auth-Example-Server",
@@ -96,12 +103,6 @@ func main() {
 			IssuerURL:       mustURL("http://localhost:3030"),
 			BaseURL:         mustURL("http://localhost:3000"),
 			ScopesSupported: []string{"mcp.read", "mcp.write"},
-
-			// 可选：令牌刷新时帮助识别 client_id（比如从 RT 里解出来）
-			ResolveClientIDFromRT: func(rt string) (string, bool) {
-				cid := tryParseClientIDFromRefreshToken(rt)
-				return cid, cid != ""
-			},
 		}),
 		mcp.WithOAuthMetadata(mcp.OAuthMetadataConfig{
 			ResourceServerURL: mustURL("http://localhost:3000"),
@@ -110,7 +111,7 @@ func main() {
 		}),
 		mcp.WithBearerAuth(&mcp.BearerAuthConfig{
 			Enabled:        true,
-			RequiredScopes: []string{"mcp.read"},
+			RequiredScopes: []string{"mcp.read", "mcp.write"},
 			Verifier: server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
 				log.Printf("Bearer auth: Verifying token: %s", token[:20]+"...")
 				ai, err := mockVerifyJWT(token)
@@ -123,15 +124,22 @@ func main() {
 				return ai, nil
 			}),
 		}),
-		mcp.WithAudit(&mcp.AuditConfig{
-			Enabled:             true,
-			Level:               "detailed",
-			HashSensitiveData:   true,
-			IncludeRequestBody:  true,
-			IncludeResponseBody: true,
-			EndpointPatterns:    []string{"/mcp/", "/authorize", "/token"},
-			ExcludePatterns:     []string{"/healthz"},
-		}),
+		mcp.WithHTTPContextFunc(
+			mcp.NewAuthHTTPContextFunc(verifier, mcp.ServerAuthConfig{
+				Issuer:         "http://localhost:3030",
+				Audience:       []string{"http://localhost:3000"},
+				RequiredScopes: []string{"mcp.read", "mcp.write"},
+			}),
+		),
+		//mcp.WithAudit(&mcp.AuditConfig{
+		//	Enabled:             true,
+		//	Level:               "detailed",
+		//	HashSensitiveData:   true,
+		//	IncludeRequestBody:  true,
+		//	IncludeResponseBody: true,
+		//	EndpointPatterns:    []string{"/mcp/", "/authorize", "/token"},
+		//	ExcludePatterns:     []string{"/healthz"},
+		//}),
 	)
 
 	greetTool := mcp.NewTool("greet",
@@ -147,16 +155,20 @@ func main() {
 		return mcp.NewTextResult(fmt.Sprintf("Hello, %s! (Authenticated via OAuth)", name)), nil
 	})
 
-	// 直接启动MCP服务器
-	observing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("ROUTING: %s %s", r.Method, r.URL.Path)
-		mcpServer.Handler().ServeHTTP(w, r)
-	})
+	// Set up a graceful shutdown.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	log.Println("MCP Server starting on :3000")
-	if err := http.ListenAndServe(":3000", observing); err != nil {
-		log.Fatal(err)
-	}
+	// Start server (run in goroutine).
+	go func() {
+		log.Printf("MCP server started, listening on port 3000, path /mcp")
+		if err := mcpServer.Start(); err != nil {
+			log.Fatalf("Server failed to start: %v", err)
+		}
+	}()
+	// Wait for termination signal.
+	<-stop
+	log.Printf("Shutting down server...")
 }
 
 // 启动一个简单的模拟 OAuth 服务器在端口 3030
@@ -252,7 +264,7 @@ func startMockOAuthServer() {
 				"iat":       now.Unix(),
 				"exp":       now.Add(1 * time.Hour).Unix(),
 				"client_id": clientID,
-				"scope":     "mcp.read",
+				"scope":     "mcp.read mcp.write",
 			})
 			if err != nil {
 				log.Printf("Mock OAuth: Failed to sign access token: %v", err)
@@ -279,7 +291,7 @@ func startMockOAuthServer() {
 				"access_token":  accessToken,
 				"token_type":    "Bearer",
 				"expires_in":    3600,
-				"scope":         "mcp.read",
+				"scope":         "mcp.read mcp.write",
 				"refresh_token": refreshToken,
 			}
 
@@ -328,7 +340,7 @@ func startMockOAuthServer() {
 				"iat":       now.Unix(),
 				"exp":       now.Add(1 * time.Hour).Unix(),
 				"client_id": clientID,
-				"scope":     "mcp.read",
+				"scope":     "mcp.read mcp.write",
 			})
 			if err != nil {
 				http.Error(w, "failed to sign access token", http.StatusInternalServerError)
@@ -353,7 +365,7 @@ func startMockOAuthServer() {
 				"access_token":  newAT,
 				"token_type":    "Bearer",
 				"expires_in":    3600,
-				"scope":         "mcp.read",
+				"scope":         "mcp.read mcp.write",
 				"refresh_token": newRT,
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -470,33 +482,4 @@ func mockVerifyJWT(token string) (server.AuthInfo, error) {
 		ExpiresAt: expPtr,
 		Extra:     claims,
 	}, nil
-}
-
-// tryParseClientIDFromRefreshToken 解析 refresh_token 中的 client_id
-func tryParseClientIDFromRefreshToken(refreshToken string) string {
-	// 假设 refresh_token 是无签名的 JWT（header.payload.signature）
-	parts := strings.Split(refreshToken, ".")
-	if len(parts) != 3 {
-		return "" // token 格式不正确
-	}
-
-	// 解码 JWT 的 payload 部分（中间的部分）
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "" // 解码失败
-	}
-
-	// 解析 JSON 数据（payload）
-	var data map[string]interface{}
-	if err := json.Unmarshal(payload, &data); err != nil {
-		return "" // JSON 解析失败
-	}
-
-	// 从 payload 中提取 client_id
-	clientID, ok := data["client_id"].(string)
-	if !ok {
-		return "" // 没有找到 client_id
-	}
-
-	return clientID
 }
