@@ -16,7 +16,7 @@ const (
 	serverURL           = "http://localhost:3000" // MCP 资源服务器（origin）
 	resourceMetadataURL = "http://localhost:3000/.well-known/oauth-protected-resource"
 	redirectURL         = "http://localhost:5173/callback" // 本地回调
-	scope               = "mcp.read"
+	scope               = "mcp.read mcp.write"
 	callbackListenAddr  = ":5173"                      // 回调监听端口
 	mcpEndpoint         = "http://localhost:3000/mcp/" // MCP 入口
 )
