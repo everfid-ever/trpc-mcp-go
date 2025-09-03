@@ -266,22 +266,6 @@ func (t *streamableHTTPClientTransport) send(
 	}
 
 	t.setBasicHeaders(httpReq)
-	t.setAuthorizationHeader(ctx, httpReq)
-
-	if options != nil && options.lastEventID != "" {
-		httpReq.Header.Set(httputil.LastEventIDHeader, options.lastEventID)
-	}
-
-	httpResp, err := t.httpReqHandler.Handle(ctx, t.httpClient, httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrHTTPRequestCreation, err)
-	}
-
-	if httpResp.StatusCode == http.StatusNoContent || httpResp.StatusCode == http.StatusBadRequest {
-		httpResp.Body.Close()
-		return t.retryWithFreshAuth(ctx, reqBytes, options)
-	}
-
 	// Set request headers - accept both SSE and JSON responses
 	httpReq.Header.Set(httputil.ContentTypeHeader, httputil.ContentTypeJSON)
 	httpReq.Header.Set(httputil.AcceptHeader, httputil.ContentTypeJSON+", "+httputil.ContentTypeSSE)
@@ -296,6 +280,9 @@ func (t *streamableHTTPClientTransport) send(
 		httpReq.Header.Set(httputil.LastEventIDHeader, t.lastEventID)
 	}
 
+	// Authorization from ctx
+	t.setAuthorizationHeader(ctx, httpReq)
+
 	if authInfo, ok := client.GetAuthInfo(ctx); ok && authInfo != nil && authInfo.AccessToken != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+authInfo.AccessToken)
 	}
@@ -308,11 +295,18 @@ func (t *streamableHTTPClientTransport) send(
 	}
 
 	// Send request using the handler
-	httpResp, err = t.httpReqHandler.Handle(ctx, t.httpClient, httpReq)
+	httpResp, err := t.httpReqHandler.Handle(ctx, t.httpClient, httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrHTTPRequestFailed, err)
 	}
 
+	// 204/400: try once with fresh auth (rebuild request inside)
+	if httpResp.StatusCode == http.StatusNoContent || httpResp.StatusCode == http.StatusBadRequest {
+		httpResp.Body.Close()
+		return t.retryWithFreshAuth(ctx, reqBytes, options)
+	}
+
+	// 401/403: refresh/ensure auth, then REBUILD a new request and resend ONCE
 	if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
 		httpResp.Body.Close()
 
@@ -324,15 +318,29 @@ func (t *streamableHTTPClientTransport) send(
 			if len(t.path) != 0 {
 				httpReq2.URL.Path = t.path
 			}
+
+			// headers again (same as first send)
+			t.setBasicHeaders(httpReq2)
+			httpReq2.Header.Set(httputil.ContentTypeHeader, httputil.ContentTypeJSON)
+			httpReq2.Header.Set(httputil.AcceptHeader, httputil.ContentTypeJSON+", "+httputil.ContentTypeSSE)
+			if t.sessionID != "" && !t.isStateless {
+				httpReq2.Header.Set(httputil.SessionIDHeader, t.sessionID)
+			}
+			if options != nil && options.lastEventID != "" {
+				httpReq2.Header.Set(httputil.LastEventIDHeader, options.lastEventID)
+			} else if t.lastEventID != "" {
+				httpReq2.Header.Set(httputil.LastEventIDHeader, t.lastEventID)
+			}
+			t.setAuthorizationHeader(ctx, httpReq2) // new token if refreshed
 			for k, values := range t.httpHeaders {
 				for _, value := range values {
 					httpReq2.Header.Add(k, value)
 				}
+			}
 
-				httpResp, err = t.httpReqHandler.Handle(ctx, t.httpClient, httpReq2)
-				if err != nil {
-					return nil, fmt.Errorf("%w: %v", ErrHTTPRequestFailed, err)
-				}
+			httpResp, err = t.httpReqHandler.Handle(ctx, t.httpClient, httpReq2)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrHTTPRequestFailed, err)
 			}
 		}
 	}
