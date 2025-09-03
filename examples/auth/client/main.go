@@ -2,247 +2,155 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/pkce"
 )
 
-func strPtr(s string) *string { return &s }
-
-var (
-	codeCh       = make(chan string, 1)
-	codeVerifier string
+const (
+	serverURL           = "http://localhost:3000" // MCP 资源服务器（origin）
+	resourceMetadataURL = "http://localhost:3000/.well-known/oauth-protected-resource"
+	redirectURL         = "http://localhost:5173/callback" // 本地回调
+	scope               = "mcp.read"
+	callbackListenAddr  = ":5173"                      // 回调监听端口
+	mcpEndpoint         = "http://localhost:3000/mcp/" // MCP 入口
 )
 
 func main() {
 	log.Println("Starting OAuth client...")
 
-	// Generate PKCE parameters
-	pkceChallenge, err := pkce.GeneratePKCEChallenge()
-	if err != nil {
-		log.Fatalf("Failed to generate PKCE challenge: %v", err)
+	// 配置 AuthFlow
+	authFlow := mcp.AuthFlowConfig{
+		ServerURL: serverURL,
+		ClientMetadata: auth.OAuthClientMetadata{
+			ClientName:              strPtr("demo-client"),
+			GrantTypes:              []string{"authorization_code", "refresh_token"},
+			TokenEndpointAuthMethod: "client_secret_post",
+			RedirectURIs:            []string{redirectURL},
+			Scope:                   strPtr(scope),
+		},
+		ResourceMetadataURL: strPtr(resourceMetadataURL),
+		RedirectURL:         redirectURL,
+		Scope:               strPtr(scope),
+		OnRedirect: func(u *url.URL) error {
+			log.Printf("Authorization required. Opening: %s", u.String())
+			return nil
+		},
 	}
 
-	codeVerifier = pkceChallenge.CodeVerifier
-	challenge := pkceChallenge.CodeChallenge
+	// 创建 MCP 客户端
+	client, err := mcp.NewClient(
+		mcpEndpoint,
+		mcp.Implementation{Name: "Auth-Example-Client", Version: "0.1.0"},
+		mcp.WithAuthFlow(authFlow),
+	)
+	if err != nil {
+		log.Fatalf("failed to create MCP client: %v", err)
+	}
 
-	log.Printf("Generated PKCE verifier: %s", codeVerifier)
-	log.Printf("Generated PKCE challenge: %s", challenge)
+	// 启动本地回调：拿到 code -> 调用 CompleteAuthFlow
+	authDone := make(chan struct{}, 1)
+	cbServer := startCallbackServer(client, authDone)
+	defer shutdownServer(cbServer)
 
-	authURL := "http://localhost:3030/authorize" +
-		"?response_type=code" +
-		"&client_id=test-client-id" +
-		"&redirect_uri=http://localhost:5173/callback" +
-		"&scope=mcp.read" +
-		"&resource=" + url.QueryEscape("http://localhost:3000") +
-		"&code_challenge=" + url.QueryEscape(challenge) +
-		"&code_challenge_method=S256"
+	// 第一次尝试初始化预期会触发授权重定向
+	log.Println("Initialize #1 (triggering authorization flow) ...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	log.Println("Please open the following URL in your browser:")
-	log.Println(authURL)
+	if _, err := client.Initialize(ctx, &mcp.InitializeRequest{}); err != nil {
+		log.Printf("Initialize #1 returned (expected): %v", err)
+	}
 
-	// Start callback server
-	go startCallbackServer()
-
-	log.Println("Waiting for authorization...")
-
-	// Wait for code with timeout
+	// 等回调完成拿到 token
 	select {
-	case code := <-codeCh:
-		log.Println("Authorization code received:", code)
-
-		token, err := exchangeToken("http://localhost:3030/token", code, "http://localhost:5173/callback")
-		if err != nil {
-			log.Fatalf("Error exchanging token: %v", err)
-		}
-
-		log.Println("Access token received:", token.AccessToken)
-
-		// Test MCP connection
-		if err := testMCPConnection(token); err != nil {
-			log.Printf("MCP connection test failed: %v", err)
-		} else {
-			log.Println("MCP connection successful!")
-		}
-
-	case <-time.After(5 * time.Minute):
-		log.Fatal("Timeout waiting for authorization")
+	case <-authDone:
+		log.Println("Authorization completed via callback.")
+	case <-time.After(3 * time.Minute):
+		log.Fatal("timeout waiting for OAuth callback")
 	}
+
+	// 给一点时间让token完全生效
+	time.Sleep(2 * time.Second)
+
+	// 7) 再次初始化此时 TokenStore 已有 token，应成功
+	log.Println("Initialize #2 (with valid tokens) ...")
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+
+	initResp, err := client.Initialize(ctx2, &mcp.InitializeRequest{})
+	if err != nil {
+		log.Fatalf("Initialize #2 failed: %v", err)
+	}
+	log.Printf("MCP initialization successful. Server info: %+v", initResp.ServerInfo)
 }
 
-func exchangeToken(tokenURL, code, redirectURI string) (*auth.OAuthTokens, error) {
-	log.Println("Exchanging authorization code for access token...")
-
-	data := url.Values{}
-	data.Set("grant_type", "authorization_code")
-	data.Set("code", code)
-	data.Set("redirect_uri", redirectURI)
-	data.Set("client_id", "test-client-id")
-	data.Set("client_secret", "test-secret")
-	data.Set("code_verifier", codeVerifier)
-
-	log.Println("Token exchange parameters:")
-	for key, values := range data {
-		log.Printf("  %s: %v", key, values)
-	}
-
-	req, _ := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	log.Printf("Making token request to: %s", tokenURL)
-	log.Printf("Request headers: %v", req.Header)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %v", err)
-	}
-
-	log.Printf("Token response status: %d", resp.StatusCode)
-	log.Printf("Token response body: %s", string(body))
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed with status: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var token auth.OAuthTokens
-	if err := json.Unmarshal(body, &token); err != nil {
-		return nil, fmt.Errorf("failed to decode token response: %v", err)
-	}
-
-	return &token, nil
-}
-
-func startCallbackServer() {
+// 回调服务：/callback?code=...
+func startCallbackServer(c *mcp.Client, done chan<- struct{}) *http.Server {
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Callback received: %s", r.URL.RawQuery)
 
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			errorDesc := r.URL.Query().Get("error_description")
-			if errorDesc == "" {
-				errorDesc = "No authorization code received"
-			}
-			log.Printf("Error: %s", errorDesc)
-			http.Error(w, errorDesc, http.StatusBadRequest)
+			log.Printf("Missing code parameter")
+			http.Error(w, "missing code", http.StatusBadRequest)
 			return
 		}
 
+		state := r.URL.Query().Get("state")
+		log.Printf("Received callback with code: %s, state: %s", code[:10]+"...", state[:10]+"...")
+
+		// 用 SDK 提供的 CompleteAuthFlow 完成换 token
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		if err := c.CompleteAuthFlow(ctx, code); err != nil {
+			log.Printf("Complete auth flow failed: %v", err)
+			http.Error(w, fmt.Sprintf("complete auth failed: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		log.Println("Auth flow completed successfully")
+		_, _ = w.Write([]byte("Authorization complete. You can close this tab."))
+
+		// 通知主协程
 		select {
-		case codeCh <- code:
-			fmt.Fprintf(w, "Authorization Successful!")
+		case done <- struct{}{}:
 		default:
-			fmt.Fprintf(w, "Authorization code already received")
 		}
 	})
 
-	server := &http.Server{
-		Addr:    ":5173",
-		Handler: mux,
+	srv := &http.Server{
+		Addr:              callbackListenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		ReadTimeout:       10 * time.Second,
 	}
 
-	log.Println("Callback server starting on http://localhost:5173")
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("Callback server error: %v", err)
+	go func() {
+		log.Printf("Callback server listening on %s", callbackListenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("callback server error: %v", err)
+		}
+	}()
+	return srv
+}
+
+func shutdownServer(srv *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
 	}
 }
 
-func testMCPConnection(token *auth.OAuthTokens) error {
-	log.Println("Testing MCP connection with OAuth token...")
-
-	// Create OAuth client provider
-	oauthProvider := client.NewInMemoryOAuthClientProvider(
-		"http://localhost:5173/callback",
-		auth.OAuthClientMetadata{
-			ClientName:              strPtr("demo-client"),
-			GrantTypes:              []string{"authorization_code", "refresh_token"},
-			TokenEndpointAuthMethod: "client_secret_post",
-			RedirectURIs:            []string{"http://localhost:5173/callback"},
-		},
-		nil, // callback function
-	)
-
-	// Save client information
-	err := oauthProvider.SaveClientInformation(auth.OAuthClientInformationFull{
-		OAuthClientInformation: auth.OAuthClientInformation{
-			ClientID:     "test-client-id",
-			ClientSecret: "test-secret",
-		},
-		OAuthClientMetadata: auth.OAuthClientMetadata{
-			ClientName:              strPtr("demo-client"),
-			GrantTypes:              []string{"authorization_code", "refresh_token"},
-			TokenEndpointAuthMethod: "client_secret_post",
-			RedirectURIs:            []string{"http://localhost:5173/callback"},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to save client information: %v", err)
-	}
-
-	// Save tokens
-	if err := oauthProvider.SaveTokens(*token); err != nil {
-		return fmt.Errorf("failed to save tokens: %v", err)
-	}
-
-	ctx := context.Background()
-	authFlowConfig := mcp.AuthFlowConfig{
-		ServerURL: "http://localhost:3000",
-
-		ClientMetadata: auth.OAuthClientMetadata{
-			ClientName:              strPtr("demo-client"),
-			GrantTypes:              []string{"authorization_code", "refresh_token"},
-			TokenEndpointAuthMethod: "client_secret_post",
-			RedirectURIs:            []string{"http://localhost:5173/callback"},
-			Scope:                   strPtr("mcp.read"),
-		},
-
-		// 资源发现地址（由 3000 资源端提供），让库知道受众=3000
-		ResourceMetadataURL: strPtr("http://localhost:3000/.well-known/oauth-protected-resource"),
-
-		RedirectURL: "http://localhost:5173/callback",
-		Scope:       strPtr("mcp.read"),
-		OnRedirect: func(u *url.URL) error {
-			log.Printf("Authorization required. Please open: %s", u.String())
-			return nil
-		},
-	}
-
-	// Create MCP client
-	c, err := mcp.NewClient(
-		"http://localhost:3000/mcp/",
-		mcp.Implementation{Name: "demo", Version: "0.1.0"},
-		mcp.WithOAuthClientProvider(oauthProvider),
-		mcp.WithAuthFlow(authFlowConfig),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create MCP client: %v", err)
-	}
-
-	log.Println("Attempting MCP initialization...")
-
-	// Initialize MCP connection
-	initResult, err := c.Initialize(ctx, &mcp.InitializeRequest{})
-	if err != nil {
-		return fmt.Errorf("MCP initialization failed: %v", err)
-	}
-
-	log.Printf("MCP initialization successful: %+v", initResult)
-	return nil
+func strPtr(s string) *string {
+	return &s
 }
