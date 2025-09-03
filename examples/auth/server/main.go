@@ -96,17 +96,16 @@ func main() {
 
 			// 可选：令牌刷新时帮助识别 client_id（比如从 RT 里解出来）
 			ResolveClientIDFromRT: func(rt string) (string, bool) {
-				cid := tryParseClientIDFromRefreshToken(rt) // 伪代码
+				cid := tryParseClientIDFromRefreshToken(rt)
 				return cid, cid != ""
 			},
 		}),
-
 		mcp.WithOAuthMetadata(mcp.OAuthMetadataConfig{
-			ResourceServerURL: mustURL("http://localhost:3000"), // 关键：正确的资源服务器URL
+			ResourceServerURL: mustURL("http://localhost:3000"),
 			ScopesSupported:   []string{"mcp.read", "mcp.write"},
 			ResourceName:      strPtr("MCP Server"), // 可选
-		}),
 
+		}),
 		mcp.WithBearerAuth(&mcp.BearerAuthConfig{
 			Enabled:        true,
 			RequiredScopes: []string{"mcp.read"},
@@ -122,7 +121,6 @@ func main() {
 				return ai, nil
 			}),
 		}),
-
 		mcp.WithAudit(&mcp.AuditConfig{
 			Enabled:             true,
 			Level:               "detailed",
