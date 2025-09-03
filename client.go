@@ -807,7 +807,7 @@ func (c *Client) executeAuthFlow(ctx context.Context) error {
 
 // authInternal orchestrates the complete OAuth flow using internal methods
 func (c *Client) authInternal(options auth.AuthOptions) (*client.AuthResult, error) {
-	// Step 1: Discover protected resource metadata (if available)
+	// Discover protected resource metadata (if available)
 	var resourceMetadata *auth.OAuthProtectedResourceMetadata
 	var authorizationServerUrl string
 
@@ -823,30 +823,62 @@ func (c *Client) authInternal(options auth.AuthOptions) (*client.AuthResult, err
 		authorizationServerUrl = options.ServerUrl
 	}
 
-	// Step 2: Select resource URL
+	// Select resource URL
 	resource, err := c.selectResourceURL(options.ServerUrl, resourceMetadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to select resource URL: %w", err)
 	}
 
-	// Step 3: Discover authorization server metadata
+	// Discover authorization server metadata
 	serverMetadata, err := c.discoverAuthServer(authorizationServerUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover authorization server: %w", err)
 	}
 
-	// Step 4: Handle client registration if needed
+	// Handle client registration if needed
 	clientInfo, err := c.handleClientRegistration(authorizationServerUrl, serverMetadata, options)
 	if err != nil {
 		return nil, fmt.Errorf("client registration failed: %w", err)
 	}
 
-	// Step 5: Try token refresh if refresh token exists
+	// Try token refresh if refresh token exists
 	if result, err := c.tryTokenRefresh(authorizationServerUrl, serverMetadata, clientInfo, resource, options); err == nil {
 		return result, nil
 	}
 
-	// Step 6: Start authorization flow
+	// Exchange the authorization code for a token
+	if options.AuthorizationCode != nil && *options.AuthorizationCode != "" {
+		cv, err := c.oauthProvider.CodeVerifier()
+		if err != nil || cv == "" {
+			return nil, fmt.Errorf("missing code_verifier: %w", err)
+		}
+
+		var addClientAuth func(http.Header, url.Values, string) error
+		if ap, ok := c.oauthProvider.(client.OAuthClientAuthProvider); ok {
+			addClientAuth = ap.AddClientAuthentication
+		}
+
+		tokens, err := client.ExchangeAuthorization(authorizationServerUrl, client.ExchangeAuthorizationOptions{
+			Metadata:                serverMetadata,
+			ClientInformation:       clientInfo,
+			AuthorizationCode:       *options.AuthorizationCode,
+			CodeVerifier:            cv,
+			RedirectURI:             c.oauthProvider.RedirectURL(),
+			Resource:                resource,
+			AddClientAuthentication: addClientAuth,
+			FetchFn:                 options.FetchFn,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := c.oauthProvider.SaveTokens(*tokens); err != nil {
+			return nil, fmt.Errorf("failed to save tokens: %w", err)
+		}
+		res := client.AuthResultAuthorized
+		return &res, nil
+	}
+
+	// Start authorization flow
 	return c.startAuthorizationFlow(authorizationServerUrl, serverMetadata, clientInfo, resource, options)
 }
 
