@@ -57,10 +57,13 @@ func main() {
 		},
 
 		VerifyAccessToken: func(token string) (*server.AuthInfo, error) {
+			log.Printf("Verifying access token: %s", token[:20]+"...")
 			ai, err := mockVerifyJWT(token)
 			if err != nil {
+				log.Printf("Token verification failed: %v", err)
 				return nil, err
 			}
+			log.Printf("Token verified successfully: client_id=%s, scopes=%v", ai.ClientID, ai.Scopes)
 			return &ai, nil
 		},
 
@@ -76,7 +79,7 @@ func main() {
 				},
 				OAuthClientInformation: auth.OAuthClientInformation{
 					ClientID:     clientID,
-					ClientSecret: "",
+					ClientSecret: "", // 公共客户端，无密钥
 				},
 			}, nil
 		},
@@ -103,21 +106,20 @@ func main() {
 		mcp.WithOAuthMetadata(mcp.OAuthMetadataConfig{
 			ResourceServerURL: mustURL("http://localhost:3000"),
 			ScopesSupported:   []string{"mcp.read", "mcp.write"},
-			ResourceName:      strPtr("MCP Server"), // 可选
-
+			ResourceName:      strPtr("MCP Server"),
 		}),
 		mcp.WithBearerAuth(&mcp.BearerAuthConfig{
 			Enabled:        true,
 			RequiredScopes: []string{"mcp.read"},
 			Verifier: server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
-				log.Printf("DEBUG: Verifying token: %s", token[:20]+"...")
+				log.Printf("Bearer auth: Verifying token: %s", token[:20]+"...")
 				ai, err := mockVerifyJWT(token)
 				if err != nil {
-					log.Printf("DEBUG: Token verification failed: %v", err)
+					log.Printf("Bearer auth: Token verification failed: %v", err)
 					return server.AuthInfo{}, err
 				}
 
-				log.Printf("DEBUG Verifier->return: client_id=%s scopes=%v", ai.ClientID, ai.Scopes)
+				log.Printf("Bearer auth: Token verified - client_id=%s scopes=%v", ai.ClientID, ai.Scopes)
 				return ai, nil
 			}),
 		}),
@@ -147,11 +149,11 @@ func main() {
 
 	// 直接启动MCP服务器
 	observing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("ROUTING: hit path=%s", r.URL.Path)
+		log.Printf("ROUTING: %s %s", r.Method, r.URL.Path)
 		mcpServer.Handler().ServeHTTP(w, r)
 	})
 
-	log.Println("== DEBUG: wrapping :3000 with observing handler ==")
+	log.Println("MCP Server starting on :3000")
 	if err := http.ListenAndServe(":3000", observing); err != nil {
 		log.Fatal(err)
 	}
@@ -166,7 +168,7 @@ func startMockOAuthServer() {
 
 	// 授权端点
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Mock OAuth: Authorization request received: %s", r.URL.RawQuery)
+		log.Printf("Mock OAuth: Authorization request: %s %s", r.Method, r.URL.RawQuery)
 
 		// 处理测试请求
 		if r.URL.Query().Get("test") != "" {
@@ -177,6 +179,11 @@ func startMockOAuthServer() {
 
 		redirectURI := r.URL.Query().Get("redirect_uri")
 		state := r.URL.Query().Get("state")
+		clientID := r.URL.Query().Get("client_id")
+		codeChallenge := r.URL.Query().Get("code_challenge")
+		scope := r.URL.Query().Get("scope")
+
+		log.Printf("Mock OAuth: client_id=%s, scope=%s, code_challenge=%s", clientID, scope, codeChallenge[:10]+"...")
 
 		if redirectURI == "" {
 			http.Error(w, "Missing redirect_uri", http.StatusBadRequest)
@@ -208,30 +215,32 @@ func startMockOAuthServer() {
 		}
 
 		grantType := r.FormValue("grant_type")
+		log.Printf("Mock OAuth: Grant type: %s", grantType)
 
 		// 便捷函数：签发 HS256 JWT
 		signJWT := func(claims jwt.MapClaims) (string, error) {
 			tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-			return tok.SignedString([]byte(hmacSecret))
+			signed, err := tok.SignedString([]byte(hmacSecret))
+			if err != nil {
+				return "", err
+			}
+			log.Printf("Mock OAuth: Signed token with claims: %+v", claims)
+			return signed, nil
 		}
 
 		switch grantType {
 		case "authorization_code":
 			clientID := r.FormValue("client_id")
-			clientSecret := r.FormValue("client_secret") // 若传了，当作保密客户端
 			code := r.FormValue("code")
 			redirectURI := r.FormValue("redirect_uri")
 			codeVerifier := r.FormValue("code_verifier")
 
+			log.Printf("Mock OAuth: Code exchange - client_id=%s, code=%s, redirect_uri=%s",
+				clientID, code, redirectURI)
+
 			// 基本参数校验
 			if clientID == "" || code == "" || redirectURI == "" || codeVerifier == "" {
 				http.Error(w, "Missing required parameters for authorization_code", http.StatusBadRequest)
-				return
-			}
-
-			// 可选：演示保密客户端的校验
-			if clientSecret != "" && clientSecret != "test-secret" {
-				http.Error(w, "Invalid client_secret", http.StatusUnauthorized)
 				return
 			}
 
@@ -246,6 +255,7 @@ func startMockOAuthServer() {
 				"scope":     "mcp.read",
 			})
 			if err != nil {
+				log.Printf("Mock OAuth: Failed to sign access token: %v", err)
 				http.Error(w, "failed to sign access token", http.StatusInternalServerError)
 				return
 			}
@@ -260,6 +270,7 @@ func startMockOAuthServer() {
 				"typ":       "refresh",
 			})
 			if err != nil {
+				log.Printf("Mock OAuth: Failed to sign refresh token: %v", err)
 				http.Error(w, "failed to sign refresh token", http.StatusInternalServerError)
 				return
 			}
@@ -271,6 +282,8 @@ func startMockOAuthServer() {
 				"scope":         "mcp.read",
 				"refresh_token": refreshToken,
 			}
+
+			log.Printf("Mock OAuth: Returning token response")
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(resp)
 
@@ -281,11 +294,7 @@ func startMockOAuthServer() {
 				return
 			}
 
-			// 可选：保密客户端校验
-			if cs := r.FormValue("client_secret"); cs != "" && cs != "test-secret" {
-				http.Error(w, "Invalid client_secret", http.StatusUnauthorized)
-				return
-			}
+			log.Printf("Mock OAuth: Refreshing token")
 
 			// 解析并校验 RT（HS256）
 			parsed, err := jwt.Parse(rt, func(t *jwt.Token) (interface{}, error) {
@@ -295,6 +304,7 @@ func startMockOAuthServer() {
 				return []byte(hmacSecret), nil
 			})
 			if err != nil || !parsed.Valid {
+				log.Printf("Mock OAuth: Invalid refresh token: %v", err)
 				http.Error(w, "invalid refresh_token", http.StatusUnauthorized)
 				return
 			}
@@ -378,6 +388,7 @@ func startMockOAuthServer() {
 
 	// 授权服务器元数据（RFC 8414）
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Mock OAuth: Metadata request")
 		meta := map[string]any{
 			"issuer":                                "http://localhost:3030",
 			"authorization_endpoint":                "http://localhost:3030/authorize",
@@ -389,7 +400,6 @@ func startMockOAuthServer() {
 			"code_challenge_methods_supported":      []string{"S256"},
 			"token_endpoint_auth_methods_supported": []string{"client_secret_post"},
 			"scopes_supported":                      []string{"mcp.read", "mcp.write"},
-			// HS256 是对称密钥，没有 jwks_uri（通常用于 RS256/JWKS）
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(meta)
@@ -397,6 +407,7 @@ func startMockOAuthServer() {
 
 	// 兼容 OIDC 发现（很多客户端会同时尝试这个路径）
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Mock OAuth: OIDC configuration request")
 		cfg := map[string]any{
 			"issuer":                                "http://localhost:3030",
 			"authorization_endpoint":                "http://localhost:3030/authorize",
@@ -408,26 +419,14 @@ func startMockOAuthServer() {
 			"code_challenge_methods_supported":      []string{"S256"},
 			"token_endpoint_auth_methods_supported": []string{"client_secret_post"},
 			"scopes_supported":                      []string{"mcp.read", "mcp.write"},
-			// OIDC 常见字段，比如 userinfo_endpoint、jwks_uri，这里演示可不提供
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(cfg)
 	})
 
-	// 添加一个通用的请求日志中间件
-	loggingMux := http.NewServeMux()
-	loggingMux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Mock OAuth: Incoming request: %s %s", r.Method, r.URL.Path)
-		log.Printf("Mock OAuth: Headers:")
-		for key, values := range r.Header {
-			log.Printf("  %s: %v", key, values)
-		}
-		mux.ServeHTTP(w, r)
-	}))
-
 	server := &http.Server{
 		Addr:    ":3030",
-		Handler: loggingMux,
+		Handler: mux,
 	}
 
 	log.Println("Mock OAuth server starting on http://localhost:3030")
@@ -441,7 +440,7 @@ func mockVerifyJWT(token string) (server.AuthInfo, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
-		return []byte("demo-shared-secret"), nil
+		return []byte(hmacSecret), nil
 	})
 	if err != nil || !parsed.Valid {
 		return server.AuthInfo{}, fmt.Errorf("invalid token: %w", err)
