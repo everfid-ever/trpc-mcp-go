@@ -17,8 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/providers"
-
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	sh "trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
@@ -92,6 +90,7 @@ type AuditConfig struct {
 	RiskAssessor func(map[string]interface{}) (string, []string)
 }
 
+// BearerAuthConfig defines configuration for Bearer token authentication
 type BearerAuthConfig struct {
 	Enabled bool
 
@@ -105,28 +104,58 @@ type BearerAuthConfig struct {
 	ResourceMetadataURL *string
 }
 
+// OAuthRoutesConfig defines configuration for OAuth 2.1 server routes.
 type OAuthRoutesConfig struct {
-	Provider                server.OAuthServerProvider
-	IssuerURL               *url.URL
-	BaseURL                 *url.URL
-	ServiceDocumentationURL *url.URL
-	ScopesSupported         []string
-	ResourceName            *string
+	// OAuth server implementation
+	Provider server.OAuthServerProvider
 
-	// Optional
+	// Canonical issuer identifier (iss claim)
+	IssuerURL *url.URL
+
+	// Root URL for OAuth endpoints
+	BaseURL *url.URL
+
+	// Optional link to service documentation
+	ServiceDocumentationURL *url.URL
+
+	// Supported OAuth scopes
+	ScopesSupported []string
+
+	// Optional human-readable resource name
+	ResourceName *string
+
+	// Rate limit for /authorize endpoint
 	AuthorizationRateLimit *rate.Limiter
-	TokenRateLimit         *rate.Limiter
-	ResolveClientIDFromRT  func(rt string) (string, bool)
-	RegistrationRateLimit  *sh.RegisterRateLimitConfig
-	RevocationRateLimit    *sh.RevocationRateLimitConfig
+
+	// Rate limit for /token endpoint
+	TokenRateLimit *rate.Limiter
+
+	// Resolve client_id from refresh token
+	ResolveClientIDFromRT func(rt string) (string, bool)
+
+	// Rate limit for dynamic client registration
+	RegistrationRateLimit *sh.RegisterRateLimitConfig
+
+	// Rate limit for token revocation
+	RevocationRateLimit *sh.RevocationRateLimitConfig
 }
 
+// OAuthMetadataConfig defines configuration for exposing OAuth server metadata.
 type OAuthMetadataConfig struct {
-	OAuthMetadata           OAuthMetadata
-	ResourceServerURL       *url.URL
+	// Core OAuth server metadata
+	OAuthMetadata OAuthMetadata
+
+	// Optional resource server URL
+	ResourceServerURL *url.URL
+
+	// Optional service documentation URL
 	ServiceDocumentationURL *url.URL
-	ScopesSupported         []string
-	ResourceName            *string
+
+	// Scopes advertised in metadata
+	ScopesSupported []string
+
+	// Optional human-readable resource name
+	ResourceName *string
 }
 
 type OAuthMetadata = auth.OAuthMetadata
@@ -200,7 +229,7 @@ func NewServer(name, version string, options ...ServerOption) *Server {
 		getSSEEnabled:          true,
 		notificationBufferSize: defaultNotificationBufferSize,
 		auditConfig:            nil,
-		bearerAuth:             &BearerAuthConfig{Enabled: false},
+		bearerAuth:             nil,
 	}
 
 	// Create server with provided serverInfo
@@ -453,27 +482,11 @@ func WithServerAddress(addr string) ServerOption {
 	}
 }
 
-func WithProxyOAuthProvider(proxyOpts providers.ProxyOptions, cfg OAuthRoutesConfig) ServerOption {
-	return func(s *Server) {
-		prov := providers.NewProxyOAuthServerProvider(proxyOpts)
-		cfg.Provider = prov
-		WithOAuthRoutes(cfg)(s)
-	}
-}
-
-// WithHTTPRoutes registers a custom installer function that can
-// attach additional HTTP routes to the server's root mux.
-func WithHTTPRoutes(install func(*http.ServeMux) error) ServerOption {
-	return func(s *Server) {
-		s.config.routerInstallers = append(s.config.routerInstallers, install)
-	}
-}
-
 // WithOAuthRoutes installs standard OAuth 2.1 endpoints into the server,
 // such as /authorize, /token, /revoke, and /register, depending on the
 // provided AuthRouterOptions and the provider's capabilities.
 func WithOAuthRoutes(cfg OAuthRoutesConfig) ServerOption {
-	return WithHTTPRoutes(func(mux *http.ServeMux) error {
+	return withHTTPRoutes(func(mux *http.ServeMux) error {
 		base := cfg.BaseURL
 		if base == nil {
 			base = cfg.IssuerURL
@@ -496,7 +509,7 @@ func WithOAuthRoutes(cfg OAuthRoutesConfig) ServerOption {
 				RateLimit: cfg.TokenRateLimit,
 			},
 			ClientRegistrationOptions: &sh.ClientRegistrationHandlerOptions{
-				ClientsStore: cfg.Provider.ClientsStore(), // 若 provider 支持动态注册则生效
+				ClientsStore: cfg.Provider.ClientsStore(),
 				RateLimit:    cfg.RegistrationRateLimit,
 			},
 			RevocationOptions: &sh.RevocationHandlerOptions{
@@ -513,8 +526,7 @@ func WithOAuthRoutes(cfg OAuthRoutesConfig) ServerOption {
 // /.well-known/oauth-protected-resource) into the server.
 // The returned metadata is constructed from the given AuthMetadataOptions.
 func WithOAuthMetadata(cfg OAuthMetadataConfig) ServerOption {
-	return WithHTTPRoutes(func(mux *http.ServeMux) error {
-		// 直接把对外的 MetadataConfig 转为内部的 router.AuthMetadataOptions
+	return withHTTPRoutes(func(mux *http.ServeMux) error {
 		opts := router.AuthMetadataOptions{
 			OAuthMetadata:           cfg.OAuthMetadata,
 			ResourceServerUrl:       cfg.ResourceServerURL,
@@ -887,5 +899,13 @@ func withTransportAuditEnabled(wrap func(http.Handler) http.Handler) func(*httpS
 	return func(h *httpServerHandler) {
 		h.auditEnabled = (wrap != nil)
 		h.auditWrap = wrap
+	}
+}
+
+// withHTTPRoutes registers a custom installer function that can
+// attach additional HTTP routes to the server's root mux.
+func withHTTPRoutes(install func(*http.ServeMux) error) ServerOption {
+	return func(s *Server) {
+		s.config.routerInstallers = append(s.config.routerInstallers, install)
 	}
 }
