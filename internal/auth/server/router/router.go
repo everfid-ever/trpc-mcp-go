@@ -179,9 +179,6 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 		if options.TokenOptions.RateLimit != nil {
 			tokenOptions.RateLimit = options.TokenOptions.RateLimit
 		}
-		if options.TokenOptions.ResolveClientIDFromRefreshToken != nil {
-			tokenOptions.ResolveClientIDFromRefreshToken = options.TokenOptions.ResolveClientIDFromRefreshToken
-		}
 	}
 	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
 
