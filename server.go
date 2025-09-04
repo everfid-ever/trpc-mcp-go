@@ -200,7 +200,7 @@ func NewServer(name, version string, options ...ServerOption) *Server {
 		getSSEEnabled:          true,
 		notificationBufferSize: defaultNotificationBufferSize,
 		auditConfig:            nil,
-		bearerAuth:             nil,
+		bearerAuth:             &BearerAuthConfig{Enabled: false},
 	}
 
 	// Create server with provided serverInfo
@@ -296,31 +296,35 @@ func (s *Server) initComponents() {
 		httpOptions = append(httpOptions, withServerTransportLogger(s.logger))
 	}
 
+	// Enable Bearer token auth if configured
+	if s.config.bearerAuth != nil {
+		httpOptions = append(httpOptions, withTransportRequireAuth(s.config.bearerAuth.Enabled))
+	}
+
+	// Enable audit logging if configured
+	if s.config.auditConfig != nil && s.config.auditConfig.Enabled {
+		auditOpts := convertToMiddlewareOptions(s.config.auditConfig)
+		httpOptions = append(httpOptions, withTransportAuditEnabled(
+			middleware.AuditMiddleware(auditOpts),
+		))
+	}
+
 	// Create HTTP handler.
 	s.httpHandler = newHTTPServerHandler(s.mcpHandler, s.config.path, httpOptions...)
-	core := http.Handler(s.httpHandler)
 
-	if s.config.bearerAuth != nil && s.config.bearerAuth.Enabled {
-		core = middleware.RequireBearerAuth(middleware.BearerAuthMiddlewareOptions{
-			Verifier:            s.config.bearerAuth.Verifier,
-			RequiredScopes:      s.config.bearerAuth.RequiredScopes,
-			ResourceMetadataURL: s.config.bearerAuth.ResourceMetadataURL,
-		})(core)
-	}
 	mux := http.NewServeMux()
-	mux.Handle(s.config.path+"/", core)
+	mux.Handle(s.config.path+"/", s.httpHandler)
 
+	// Install additional routes (OAuth, resource metadata, .well-known, etc.)
 	for _, install := range s.config.routerInstallers {
 		_ = install(mux)
 	}
 
-	root := http.Handler(mux)
-	if s.config.auditConfig != nil && s.config.auditConfig.Enabled {
-		auditOptions := convertToMiddlewareOptions(s.config.auditConfig)
-		root = middleware.AuditMiddleware(auditOptions)(root)
-	}
+	// Exposing mux externally
+	s.customServer = &http.Server{Addr: s.config.addr, Handler: mux}
 
-	s.rootHandler = root
+	// Expose mux as the server's root handler
+	s.rootHandler = mux
 }
 
 // ServerOption server option function.
@@ -526,7 +530,9 @@ func WithOAuthMetadata(cfg OAuthMetadataConfig) ServerOption {
 // Start starts the server
 func (s *Server) Start() error {
 	if s.customServer != nil {
-		s.customServer.Handler = s.Handler()
+		if s.customServer.Handler == nil {
+			s.customServer.Handler = s.Handler()
+		}
 		return s.customServer.ListenAndServe()
 	}
 	return http.ListenAndServe(s.config.addr, s.Handler())
@@ -761,7 +767,10 @@ func (s *Server) GetActiveSessions() ([]string, error) {
 // an existing HTTP mux as the unified entry point for MCP and
 // any configured auxiliary endpoints.
 func (s *Server) Handler() http.Handler {
-	return s.rootHandler
+	if s.rootHandler == nil {
+		return s.rootHandler
+	}
+	return s.httpHandler
 }
 
 func (s *Server) Path() string {
@@ -846,6 +855,7 @@ func (s *Server) handleServerNotification(ctx context.Context, notification *JSO
 	return nil
 }
 
+// convertToMiddlewareOptions converts AuditConfig to AuditMiddlewareOptions
 func convertToMiddlewareOptions(config *AuditConfig) *middleware.AuditMiddlewareOptions {
 	level := middleware.AuditLevelBasic
 	switch config.Level {
@@ -863,6 +873,20 @@ func convertToMiddlewareOptions(config *AuditConfig) *middleware.AuditMiddleware
 		EndpointPatterns:    config.EndpointPatterns,
 		ExcludePatterns:     config.ExcludePatterns,
 		MetadataExtractor:   config.MetadataExtractor,
-		// Convert RiskAssessor function signature if needed
+	}
+}
+
+// withTransportRequireAuth sets requireAuth flag to enforce Bearer token checks
+func withTransportRequireAuth(enabled bool) func(*httpServerHandler) {
+	return func(h *httpServerHandler) {
+		h.requireAuth = enabled
+	}
+}
+
+// withTransportAuditEnabled enables audit logging by wrapping the handler with given middleware
+func withTransportAuditEnabled(wrap func(http.Handler) http.Handler) func(*httpServerHandler) {
+	return func(h *httpServerHandler) {
+		h.auditEnabled = (wrap != nil)
+		h.auditWrap = wrap
 	}
 }

@@ -77,6 +77,15 @@ type httpServerHandler struct {
 
 	// Response manager for server-to-client requests.
 	responseManager *responseManager
+
+	// Enforce Bearer token authentication if true
+	requireAuth bool
+	
+	// Enable audit logging if true
+	auditEnabled bool
+
+	// Audit middleware wrapper applied if auditEnabled
+	auditWrap func(http.Handler) http.Handler
 }
 
 // getSSEConnection represents a GET SSE connection
@@ -249,29 +258,37 @@ func withTransportHTTPContextFuncs(funcs []HTTPContextFunc) func(*httpServerHand
 
 // ServeHTTP implements the http.Handler interface
 func (h *httpServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !h.isValidPath(r.URL.Path) {
-		if h.serverPath == "" {
-			http.Error(w, fmt.Sprintf("Path not found: %s (expected: %s)", r.URL.Path, h.serverPath), http.StatusNotFound)
-		}
-		return
-	}
-
-	switch r.Method {
-	case http.MethodPost:
-		h.handlePost(r.Context(), w, r)
-	case http.MethodGet:
-		if !h.enableGetSSE {
-			w.Header().Set("Allow", "POST, DELETE")
-			http.Error(w, "GET method not enabled", http.StatusMethodNotAllowed)
+	var core http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.isValidPath(r.URL.Path) {
+			if h.serverPath == "" {
+				http.Error(w, fmt.Sprintf("Path not found: %s (expected: %s)", r.URL.Path, h.serverPath), http.StatusNotFound)
+			}
 			return
 		}
-		h.handleGet(r.Context(), w, r)
-	case http.MethodDelete:
-		h.handleDelete(r.Context(), w, r)
-	default:
-		w.Header().Set("Allow", "POST, GET, DELETE")
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+
+		switch r.Method {
+		case http.MethodPost:
+			h.handlePost(r.Context(), w, r)
+		case http.MethodGet:
+			if !h.enableGetSSE {
+				w.Header().Set("Allow", "POST, DELETE")
+				http.Error(w, "GET method not enabled", http.StatusMethodNotAllowed)
+				return
+			}
+			h.handleGet(r.Context(), w, r)
+		case http.MethodDelete:
+			h.handleDelete(r.Context(), w, r)
+		default:
+			w.Header().Set("Allow", "POST, GET, DELETE")
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	if h.auditEnabled && h.auditWrap != nil {
+		core = h.auditWrap(core)
 	}
+
+	core.ServeHTTP(w, r)
 }
 
 type baseMessage struct {
@@ -288,27 +305,28 @@ func (h *httpServerHandler) handlePost(ctx context.Context, w http.ResponseWrite
 		enrichedCtx = fn(enrichedCtx, r)
 	}
 
-	// Authentication error: write challenge header and return
-	if err := server.GetAuthErr(enrichedCtx); err != nil {
-		status, code, desc := server.DetermineAuthError(err)
-		if scope, ok := server.GetRequiredScope(enrichedCtx); ok {
-			server.WriteAuthChallenge(w, status, code, desc, scope)
-		} else {
-			server.WriteAuthChallenge(w, status, code, desc, "")
+	if h.requireAuth {
+		// Authentication error: write challenge header and return
+		if err := server.GetAuthErr(enrichedCtx); err != nil {
+			status, code, desc := server.DetermineAuthError(err)
+			if scope, ok := server.GetRequiredScope(enrichedCtx); ok {
+				server.WriteAuthChallenge(w, status, code, desc, scope)
+			} else {
+				server.WriteAuthChallenge(w, status, code, "", "")
+			}
+			return
 		}
-		return
-	}
-
-	// No error, but no AuthInfo either: returns 401 + invalid_token as per RFC
-	if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
-		server.WriteAuthChallenge(
-			w,
-			http.StatusUnauthorized,
-			"invalid_token",
-			"The access token is invalid or expired",
-			"",
-		)
-		return
+		// No error, but no AuthInfo either: 401 per RFC
+		if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
+			server.WriteAuthChallenge(
+				w,
+				http.StatusUnauthorized,
+				"invalid_token",
+				"The access token is invalid or expired",
+				"",
+			)
+			return
+		}
 	}
 
 	var rawMessage json.RawMessage
@@ -645,27 +663,28 @@ func (h *httpServerHandler) handleGet(ctx context.Context, w http.ResponseWriter
 		enrichedCtx = fn(enrichedCtx, r)
 	}
 
-	// Authentication error: write challenge header and return
-	if err := server.GetAuthErr(enrichedCtx); err != nil {
-		status, code, desc := server.DetermineAuthError(err)
-		if scope, ok := server.GetRequiredScope(enrichedCtx); ok {
-			server.WriteAuthChallenge(w, status, code, desc, scope)
-		} else {
-			server.WriteAuthChallenge(w, status, code, desc, "")
+	if h.requireAuth {
+		// Authentication error: write challenge header and return
+		if err := server.GetAuthErr(enrichedCtx); err != nil {
+			status, code, desc := server.DetermineAuthError(err)
+			if scope, ok := server.GetRequiredScope(enrichedCtx); ok {
+				server.WriteAuthChallenge(w, status, code, desc, scope)
+			} else {
+				server.WriteAuthChallenge(w, status, code, desc, "")
+			}
+			return
 		}
-		return
-	}
-
-	// No error, but no AuthInfo either: returns 401 + invalid_token as per RFC
-	if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
-		server.WriteAuthChallenge(
-			w,
-			http.StatusUnauthorized,
-			"invalid_token",
-			"The access token is invalid or expired",
-			"",
-		)
-		return
+		// No error, but no AuthInfo either: 401 per RFC
+		if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
+			server.WriteAuthChallenge(
+				w,
+				http.StatusUnauthorized,
+				"invalid_token",
+				"The access token is invalid or expired",
+				"",
+			)
+			return
+		}
 	}
 
 	// Check if streaming is supported
