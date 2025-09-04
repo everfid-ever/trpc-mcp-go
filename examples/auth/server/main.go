@@ -87,11 +87,6 @@ func main() {
 		},
 	})
 
-	ctx := context.Background()
-	verifier, err := server.NewTokenVerifier(ctx, server.TokenVerifierConfig{
-		Local: &server.LocalJWKSConfig{File: "keys/jwks.json"},
-	})
-	
 	// 创建并启动MCP服务器
 	mcpServer := mcp.NewServer(
 		"Auth-Example-Server",
@@ -125,21 +120,34 @@ func main() {
 			}),
 		}),
 		mcp.WithHTTPContextFunc(
-			mcp.NewAuthHTTPContextFunc(verifier, mcp.ServerAuthConfig{
-				Issuer:         "http://localhost:3030",
-				Audience:       []string{"http://localhost:3000"},
-				RequiredScopes: []string{"mcp.read", "mcp.write"},
-			}),
+			mcp.NewAuthHTTPContextFunc(
+				server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
+					log.Printf("HTTPContext: Verifying token: %s", token[:20]+"...")
+					ai, err := mockVerifyJWT(token)
+					if err != nil {
+						log.Printf("HTTPContext: Token verification failed: %v", err)
+						return server.AuthInfo{}, err
+					}
+					log.Printf("HTTPContext: Token verified - client_id=%s scopes=%v", ai.ClientID, ai.Scopes)
+					return ai, nil
+				}),
+				mcp.ServerAuthConfig{
+					Issuer:         "http://localhost:3030",
+					Audience:       []string{"http://localhost:3000"},
+					RequiredScopes: []string{"mcp.read", "mcp.write"},
+				},
+			),
 		),
-		//mcp.WithAudit(&mcp.AuditConfig{
-		//	Enabled:             true,
-		//	Level:               "detailed",
-		//	HashSensitiveData:   true,
-		//	IncludeRequestBody:  true,
-		//	IncludeResponseBody: true,
-		//	EndpointPatterns:    []string{"/mcp/", "/authorize", "/token"},
-		//	ExcludePatterns:     []string{"/healthz"},
-		//}),
+
+		//	mcp.WithAudit(&mcp.AuditConfig{
+		//		Enabled:             true,
+		//		Level:               "detailed",
+		//		HashSensitiveData:   true,
+		//		IncludeRequestBody:  true,
+		//		IncludeResponseBody: true,
+		//		EndpointPatterns:    []string{"/mcp/", "/authorize", "/token"},
+		//		ExcludePatterns:     []string{"/healthz"},
+		//	}),
 	)
 
 	greetTool := mcp.NewTool("greet",
