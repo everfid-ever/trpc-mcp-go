@@ -199,6 +199,8 @@ func NewServer(name, version string, options ...ServerOption) *Server {
 		postSSEEnabled:         true,
 		getSSEEnabled:          true,
 		notificationBufferSize: defaultNotificationBufferSize,
+		auditConfig:            nil,
+		bearerAuth:             nil,
 	}
 
 	// Create server with provided serverInfo
