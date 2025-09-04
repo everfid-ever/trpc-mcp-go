@@ -139,15 +139,15 @@ func main() {
 			),
 		),
 
-		//	mcp.WithAudit(&mcp.AuditConfig{
-		//		Enabled:             true,
-		//		Level:               "detailed",
-		//		HashSensitiveData:   true,
-		//		IncludeRequestBody:  true,
-		//		IncludeResponseBody: true,
-		//		EndpointPatterns:    []string{"/mcp/", "/authorize", "/token"},
-		//		ExcludePatterns:     []string{"/healthz"},
-		//	}),
+		mcp.WithAudit(&mcp.AuditConfig{
+			Enabled:             true,
+			Level:               "detailed",
+			HashSensitiveData:   true,
+			IncludeRequestBody:  true,
+			IncludeResponseBody: true,
+			EndpointPatterns:    []string{"/mcp/", "/authorize", "/token"},
+			ExcludePatterns:     []string{"/healthz"},
+		}),
 	)
 
 	greetTool := mcp.NewTool("greet",

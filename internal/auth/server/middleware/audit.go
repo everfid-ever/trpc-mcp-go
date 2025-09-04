@@ -1,12 +1,14 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -56,6 +58,8 @@ type AuditEvent struct {
 	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 	RiskLevel    string                 `json:"risk_level,omitempty"`
 	RiskFactors  []string               `json:"risk_factors,omitempty"`
+	RequestBody  string                 `json:"request_body,omitempty"`
+	ResponseBody string                 `json:"response_body,omitempty"`
 }
 
 // AuditLogger 定义审计日志接口
@@ -252,8 +256,17 @@ func AuditMiddleware(options *AuditMiddlewareOptions) func(http.Handler) http.Ha
 				next.ServeHTTP(w, r)
 				return
 			}
+			// Check if it is an SSE request
+			acceptHeader := r.Header.Get("Accept")
+			isSSE := strings.Contains(acceptHeader, "text/event-stream")
+
 			event, wrappedWriter := initializeAuditEvent(w, r, options)
-			defer logAuditEvent(event, wrappedWriter, options.Logger)
+
+			// For SSE requests, the response body is not captured to avoid interfering with streaming.
+			if isSSE {
+				wrappedWriter.captured = false
+			}
+			defer logAuditEvent(event, wrappedWriter, options)
 			next.ServeHTTP(wrappedWriter, r)
 		})
 	}
@@ -272,6 +285,7 @@ type auditResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
 	body       []byte
+	captured   bool
 }
 
 func (w *auditResponseWriter) WriteHeader(code int) {
@@ -283,8 +297,21 @@ func (w *auditResponseWriter) Write(b []byte) (int, error) {
 	if w.statusCode == 0 {
 		w.statusCode = http.StatusOK
 	}
-	w.body = append(w.body, b...)
+	if w.captured {
+		w.body = append(w.body, b...)
+	}
 	return w.ResponseWriter.Write(b)
+}
+
+func (w *auditResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Unwrap 返回底层的 ResponseWriter
+func (w *auditResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // OAuthInfo 包含从请求中提取的 OAuth2.1 信息
@@ -535,7 +562,20 @@ func GetAuthInfo(ctx context.Context) (server.AuthInfo, bool) {
 // initializeAuditEvent 初始化审计事件
 func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *AuditMiddlewareOptions) (AuditEvent, *auditResponseWriter) {
 	start := time.Now()
-	wrappedWriter := &auditResponseWriter{ResponseWriter: w}
+
+	// Read and reset the request body
+	var reqBody []byte
+	if (options.Level >= AuditLevelFull || options.IncludeRequestBody) && r.Body != nil {
+		reqBody, _ = io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
+	}
+
+	// Determines whether to capture the response body according to the configuration
+	wrappedWriter := &auditResponseWriter{
+		ResponseWriter: w,
+		captured:       (options.Level >= AuditLevelFull || options.IncludeRequestBody),
+	}
 	oauthInfo := extractOAuthInfo(r)
 
 	event := AuditEvent{
@@ -569,6 +609,11 @@ func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *Audit
 		event.IPHash = hashSensitiveData(r.RemoteAddr)
 	}
 
+	// If request body logging is enabled, write
+	if (options.Level >= AuditLevelFull || options.IncludeRequestBody) && len(reqBody) > 0 {
+		event.RequestBody = string(reqBody)
+	}
+
 	if options.MetadataExtractor != nil {
 		event.Metadata = options.MetadataExtractor(r)
 	}
@@ -583,16 +628,21 @@ func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *Audit
 }
 
 // logAuditEvent 记录审计事件
-func logAuditEvent(event AuditEvent, w *auditResponseWriter, logger AuditLogger) {
+func logAuditEvent(event AuditEvent, w *auditResponseWriter, options *AuditMiddlewareOptions) {
 	event.ResponseTime = time.Since(event.Timestamp)
 	event.StatusCode = w.statusCode
+
+	// To log the response body
+	if w.captured && len(w.body) > 0 && (options.Level >= AuditLevelFull || options.IncludeResponseBody) {
+		event.ResponseBody = string(w.body)
+	}
 
 	if event.StatusCode >= 400 {
 		event.ErrorCode = determineErrorCode(event.StatusCode)
 		event.ErrorMessage = determineErrorMessage(event.StatusCode, w.body)
 	}
 
-	if err := logger.LogEvent(event); err != nil {
+	if err := options.Logger.LogEvent(event); err != nil {
 		fmt.Printf("[AUDIT ERROR] Failed to log audit event: %v\n", err)
 	}
 }
