@@ -112,13 +112,10 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 			}
 
 			// 将authInfo添加到请求上下文,对应的key为authInfoKeyType{}
-			ctx := context.WithValue(req.Context(), authInfoKeyType{}, authInfo)
+			ctx := context.WithValue(req.Context(), AuthInfoKey, authInfo)
 			req = req.WithContext(ctx)
 
 			next.ServeHTTP(w, req)
 		})
 	}
 }
-
-// authInfoKey 用于标识存储AuthInfo的上下文键
-type authInfoKeyType struct{}

@@ -20,6 +20,8 @@ import (
 type ClientAuthenticationMiddlewareOptions struct {
 	// ClientsStore is a store used to read information about registered OAuth clients
 	ClientsStore server.OAuthClientsStoreInterface
+	// Optional: When grant_type=refresh_token and client_id is not provided, try to parse/reverse-check client_id from refresh_token
+	ResolveClientIDFromRefreshToken func(refreshToken string) (clientID string, ok bool)
 }
 
 // ClientAuthenticatedRequest represents the request schema for client authentication.
@@ -52,7 +54,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 				var statusCode int
 				switch err.ErrorCode {
 				case errors.ErrInvalidClient.Error():
-					statusCode = http.StatusBadRequest
+					statusCode = http.StatusUnauthorized
 				case errors.ErrInvalidRequest.Error():
 					statusCode = http.StatusBadRequest
 				case errors.ErrServerError.Error():
@@ -67,6 +69,7 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 
 			var reqData ClientAuthenticatedRequest
 			var clientID string
+			var bodyBytes []byte
 
 			// Priority: Basic Auth first
 			if authz := r.Header.Get("Authorization"); strings.HasPrefix(strings.ToLower(authz), "basic ") {
@@ -85,9 +88,9 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 				clientID = reqData.ClientID
 			} else {
 				// Non-Basic: buffer and restore Body, support form or JSON
-				bodyBytes, _ := io.ReadAll(r.Body)
+				bodyBytes, _ = io.ReadAll(r.Body)
 				_ = r.Body.Close()
-				defer func() { r.Body = io.NopCloser(bytes.NewReader(bodyBytes)) }()
+				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 				ct := strings.ToLower(r.Header.Get("Content-Type"))
 				switch {
@@ -106,6 +109,36 @@ func AuthenticateClient(options ClientAuthenticationMiddlewareOptions) func(http
 					// Unknown type: maintain compatibility behavior, treat as JSON decode error
 					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidRequest, "Invalid request body", ""), "")
 					return
+				}
+			}
+
+			// Only try to fall back when client_id is not obtained, and it is a form or JSON, and grant_type=refresh_token
+			if reqData.ClientID == "" {
+				ct := strings.ToLower(r.Header.Get("Content-Type"))
+				var grantType, refreshToken string
+
+				switch {
+				case strings.HasPrefix(ct, "application/x-www-form-urlencoded"):
+					formVals, _ := url.ParseQuery(string(bodyBytes))
+					grantType = formVals.Get("grant_type")
+					refreshToken = formVals.Get("refresh_token")
+
+				case strings.HasPrefix(ct, "application/json"):
+					type raw struct {
+						GrantType    string `json:"grant_type"`
+						RefreshToken string `json:"refresh_token"`
+					}
+					var v raw
+					_ = json.Unmarshal(bodyBytes, &v)
+					grantType = v.GrantType
+					refreshToken = v.RefreshToken
+				}
+
+				if strings.EqualFold(grantType, "refresh_token") && refreshToken != "" && options.ResolveClientIDFromRefreshToken != nil {
+					if cid, ok := options.ResolveClientIDFromRefreshToken(refreshToken); ok && cid != "" {
+						reqData.ClientID = cid
+						clientID = cid
+					}
 				}
 			}
 

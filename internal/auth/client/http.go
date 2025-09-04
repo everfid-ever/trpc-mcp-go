@@ -73,14 +73,15 @@ func ConvertTokensToAuthInfo(tokens *auth.OAuthTokens) *ClientAuthInfo {
 // IsTokenExpired 检查token是否过期
 func IsTokenExpired(authInfo *ClientAuthInfo) bool {
 	if authInfo == nil {
-		return true
+		return true // When authInfo is nil, it is considered expired.
 	}
 
-	if authInfo.ExpiresAt != nil {
-		return time.Now().After(authInfo.ExpiresAt.Add(-30 * time.Second))
+	if authInfo.ExpiresAt == nil {
+		return false // No expiration date, considered never expired
 	}
 
-	return false
+	// If the token expires within the next 30 seconds, it is considered expired.
+	return !authInfo.ExpiresAt.After(time.Now().Add(30 * time.Second))
 }
 
 func parseTokenScopes(tokens *auth.OAuthTokens) []string {

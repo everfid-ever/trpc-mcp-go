@@ -222,19 +222,26 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 
 	// Token endpoint (POST only for OAuth 2.1)
 	tokenURL, _ := url.Parse(oauthMetadata.TokenEndpoint)
-	tokenOptions := handler.TokenHandlerOptions{
-		Provider: options.Provider,
-	}
-	if options.TokenOptions != nil && options.TokenOptions.RateLimit != nil {
-		tokenOptions.RateLimit = options.TokenOptions.RateLimit
+	tokenOptions := handler.TokenHandlerOptions{Provider: options.Provider}
+	if options.TokenOptions != nil {
+		if options.TokenOptions.RateLimit != nil {
+			tokenOptions.RateLimit = options.TokenOptions.RateLimit
+		}
+		if options.TokenOptions.ResolveClientIDFromRefreshToken != nil {
+			tokenOptions.ResolveClientIDFromRefreshToken = options.TokenOptions.ResolveClientIDFromRefreshToken
+		}
 	}
 	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
 
 	// Metadata endpoints
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
+	resourceURL := options.BaseUrl
+	if resourceURL == nil {
+		resourceURL = issuerURL
+	}
 	if err := McpAuthMetadataRouter(mux, AuthMetadataOptions{
 		OAuthMetadata:           oauthMetadata,
-		ResourceServerUrl:       issuerURL,
+		ResourceServerUrl:       resourceURL,
 		ServiceDocumentationUrl: options.ServiceDocumentationUrl,
 		ScopesSupported:         options.ScopesSupported,
 		ResourceName:            options.ResourceName,
@@ -339,6 +346,14 @@ func InstallMCPAuthRoutes(
 		return fmt.Errorf("invalid issuer URL: %w", err)
 	}
 
+	var baseURL *url.URL
+	if resourceServerURL != "" {
+		baseURL, err = url.Parse(resourceServerURL)
+		if err != nil {
+			return fmt.Errorf("invalid resource server URL: %w", err)
+		}
+	}
+
 	var serviceDocumentationUrl *url.URL
 	if serviceDocURL != nil {
 		serviceDocumentationUrl, err = url.Parse(*serviceDocURL)
@@ -350,6 +365,7 @@ func InstallMCPAuthRoutes(
 	options := AuthRouterOptions{
 		Provider:                provider,
 		IssuerUrl:               issuerURL,
+		BaseUrl:                 baseURL,
 		ServiceDocumentationUrl: serviceDocumentationUrl,
 		ScopesSupported:         scopesSupported,
 		ResourceName:            resourceName,

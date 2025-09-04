@@ -2,76 +2,155 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"time"
 
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/client"
 )
 
-func strPtr(s string) *string {
-	return &s
-}
+const (
+	serverURL           = "http://localhost:3000" // MCP 资源服务器（origin）
+	resourceMetadataURL = "http://localhost:3000/.well-known/oauth-protected-resource"
+	redirectURL         = "http://localhost:5173/callback" // 本地回调
+	scope               = "mcp.read mcp.write"
+	callbackListenAddr  = ":5173"                      // 回调监听端口
+	mcpEndpoint         = "http://localhost:3000/mcp/" // MCP 入口
+)
 
 func main() {
 	log.Println("Starting OAuth client...")
 
-	// 准备一个 OAuth ClientProvider
-	provider := client.NewInMemoryOAuthClientProvider(
-		"http://localhost:5173/callback",
-		auth.OAuthClientMetadata{
-			ClientName:    strPtr("demo-client"),
-			RedirectURIs:  []string{"http://localhost:5173/callback"},
-			ResponseTypes: []string{"code"},
-			GrantTypes:    []string{"authorization_code", "refresh_token"},
+	// 配置 AuthFlow
+	authFlow := mcp.AuthFlowConfig{
+		ServerURL: serverURL,
+		ClientMetadata: auth.OAuthClientMetadata{
+			ClientName:              strPtr("demo-client"),
+			GrantTypes:              []string{"authorization_code", "refresh_token"},
+			TokenEndpointAuthMethod: "client_secret_post",
+			RedirectURIs:            []string{redirectURL},
+			Scope:                   strPtr(scope),
 		},
-		func(u *url.URL) error {
-			// 这里打印授权URL，用户需要在浏览器中访问
-			log.Println("Please open the following URL in your browser to authorize:")
-			log.Println(u.String())
-			log.Println("Once authorization is complete, the client will automatically continue...")
+		ResourceMetadataURL: strPtr(resourceMetadataURL),
+		RedirectURL:         redirectURL,
+		Scope:               strPtr(scope),
+		OnRedirect: func(u *url.URL) error {
+			log.Printf("Authorization required. Opening: %s", u.String())
 			return nil
 		},
-	)
+	}
 
-	// 配置OAuth服务器URL
-	serverUrl := "http://localhost:3000"
-
-	// 创建 MCP 客户端，但先不初始化
-	c, err := mcp.NewClient(
-		serverUrl+"/mcp",
-		mcp.Implementation{Name: "demo", Version: "0.1.0"},
-		mcp.WithOAuthClientProvider(provider),
+	// 创建 MCP 客户端
+	client, err := mcp.NewClient(
+		mcpEndpoint,
+		mcp.Implementation{Name: "Auth-Example-Client", Version: "0.1.0"},
+		mcp.WithAuthFlow(authFlow),
 	)
 	if err != nil {
-		log.Fatal("Failed to create client: ", err)
+		log.Fatalf("failed to create MCP client: %v", err)
 	}
 
-	ctx := context.Background()
+	// 启动本地回调：拿到 code -> 调用 CompleteAuthFlow
+	authDone := make(chan struct{}, 1)
+	cbServer := startCallbackServer(client, authDone)
+	defer shutdownServer(cbServer)
 
-	// 尝试进行OAuth授权
-	log.Println("Starting OAuth authorization flow...")
+	// 第一次尝试初始化预期会触发授权重定向
+	log.Println("Initialize #1 (triggering authorization flow) ...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// 给用户一些时间完成浏览器授权
-	// 在实际应用中，这里应该等待授权回调
-	log.Println("Waiting for OAuth authorization to complete...")
-	time.Sleep(5 * time.Second) // 给用户时间完成授权
-
-	// 初始化MCP连接
-	log.Println("Trying to initialize MCP connection...")
-	if _, err := c.Initialize(ctx, nil); err != nil {
-		log.Printf("Initialization failed: %v", err)
-		log.Println("This may be because the OAuth authorization has not yet completed")
-		log.Println("Please ensure that:")
-		log.Println("1. Completed OAuth authorization in the browser")
-		log.Println("2. The authorization server returns a valid access token")
-		return
+	if _, err := client.Initialize(ctx, &mcp.InitializeRequest{}); err != nil {
+		log.Printf("Initialize #1 returned (expected): %v", err)
 	}
 
-	log.Println("MCP client initialization successful!")
+	// 等回调完成拿到 token
+	select {
+	case <-authDone:
+		log.Println("Authorization completed via callback.")
+	case <-time.After(3 * time.Minute):
+		log.Fatal("timeout waiting for OAuth callback")
+	}
 
-	// 这里可以添加其他MCP调用
-	// 例如：列出可用工具、调用工具等
+	// 给一点时间让token完全生效
+	time.Sleep(2 * time.Second)
+
+	// 7) 再次初始化此时 TokenStore 已有 token，应成功
+	log.Println("Initialize #2 (with valid tokens) ...")
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+
+	initResp, err := client.Initialize(ctx2, &mcp.InitializeRequest{})
+	if err != nil {
+		log.Fatalf("Initialize #2 failed: %v", err)
+	}
+	log.Printf("MCP initialization successful. Server info: %+v", initResp.ServerInfo)
+}
+
+// 回调服务：/callback?code=...
+func startCallbackServer(c *mcp.Client, done chan<- struct{}) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Callback received: %s", r.URL.RawQuery)
+
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			log.Printf("Missing code parameter")
+			http.Error(w, "missing code", http.StatusBadRequest)
+			return
+		}
+
+		state := r.URL.Query().Get("state")
+		log.Printf("Received callback with code: %s, state: %s", code[:10]+"...", state[:10]+"...")
+
+		// 用 SDK 提供的 CompleteAuthFlow 完成换 token
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		if err := c.CompleteAuthFlow(ctx, code); err != nil {
+			log.Printf("Complete auth flow failed: %v", err)
+			http.Error(w, fmt.Sprintf("complete auth failed: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		log.Println("Auth flow completed successfully")
+		_, _ = w.Write([]byte("Authorization complete. You can close this tab."))
+
+		// 通知主协程
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	})
+
+	srv := &http.Server{
+		Addr:              callbackListenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+	}
+
+	go func() {
+		log.Printf("Callback server listening on %s", callbackListenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("callback server error: %v", err)
+		}
+	}()
+	return srv
+}
+
+func shutdownServer(srv *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
+	}
+}
+
+func strPtr(s string) *string {
+	return &s
 }

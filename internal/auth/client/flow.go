@@ -2,8 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	stderrors "errors"
@@ -321,7 +319,7 @@ func authInternal(provider OAuthClientProvider, options auth.AuthOptions) (*Auth
 			addClientAuth = authProvider.AddClientAuthentication
 		}
 
-		newTokens, err := refreshAuthorization(authorizationServerUrl, RefreshAuthorizationOptions{
+		newTokens, err := RefreshAuthorization(authorizationServerUrl, RefreshAuthorizationOptions{
 			Metadata:                serverMetadata,
 			ClientInformation:       clientInformation,
 			RefreshToken:            *tokens.RefreshToken,
@@ -360,7 +358,7 @@ func authInternal(provider OAuthClientProvider, options auth.AuthOptions) (*Auth
 		}
 	}
 
-	authorizationResult, err := startAuthorization(authorizationServerUrl, StartAuthorizationOptions{
+	authorizationResult, err := StartAuthorization(authorizationServerUrl, StartAuthorizationOptions{
 		Metadata:          serverMetadata,
 		ClientInformation: *clientInformation,
 		State:             state,
@@ -842,28 +840,9 @@ func RegisterClient(
 func isSuccessStatusCode(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
 }
-func generatePKCEChallenge() (*pkce.PKCEChallenge, error) {
-	// Generate 43-128 character code_verifier (RFC 7636)
-	verifierBytes := make([]byte, 32) // 32 bytes = 43 chars in base64url
-	if _, err := rand.Read(verifierBytes); err != nil {
-		return nil, fmt.Errorf("failed to generate code verifier: %w", err)
-	}
 
-	codeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
-
-	// Generate code_challenge using S256 method
-	hash := sha256.Sum256([]byte(codeVerifier))
-	codeChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
-
-	return &pkce.PKCEChallenge{
-		CodeVerifier:  codeVerifier,
-		CodeChallenge: codeChallenge,
-	}, nil
-}
-
-// startAuthorization starts OAuth 2.0 authorization flow
-// Generates PKCE challenge and builds authorization URL
-func startAuthorization(
+// StartAuthorization starts OAuth 2.0 authorization flow
+func StartAuthorization(
 	authorizationServerUrl string,
 	options StartAuthorizationOptions,
 ) (*StartAuthorizationResult, error) {
@@ -971,7 +950,7 @@ func startAuthorization(
 		CodeVerifier:     challenge.CodeVerifier,
 	}, nil
 }
-func exchangeAuthorization(
+func ExchangeAuthorization(
 	authorizationServerUrl string,
 	options ExchangeAuthorizationOptions,
 ) (*auth.OAuthTokens, error) {
@@ -1038,6 +1017,7 @@ func exchangeAuthorization(
 		var supportedMethods []string
 		if options.Metadata != nil {
 			supportedMethods = options.Metadata.GetTokenEndpointAuthMethodsSupported()
+
 		}
 		authMethod := selectClientAuthMethod(*options.ClientInformation, supportedMethods)
 		if err := applyClientAuthentication(authMethod, *options.ClientInformation, headers, params); err != nil {
@@ -1096,7 +1076,7 @@ func exchangeAuthorization(
 
 	return &tokens, nil
 }
-func refreshAuthorization(
+func RefreshAuthorization(
 	authorizationServerUrl string,
 	options RefreshAuthorizationOptions,
 ) (*auth.OAuthTokens, error) {

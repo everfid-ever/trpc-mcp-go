@@ -11,10 +11,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/time/rate"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/providers"
 
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
+	sh "trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/router"
 )
 
@@ -85,6 +92,45 @@ type AuditConfig struct {
 	RiskAssessor func(map[string]interface{}) (string, []string)
 }
 
+type BearerAuthConfig struct {
+	Enabled bool
+
+	// Required: Token validator
+	Verifier server.TokenVerifierInterface
+
+	// Optional: List of required scopes
+	RequiredScopes []string
+
+	// Optional: Write resource_metadata for WWW-Authenticate
+	ResourceMetadataURL *string
+}
+
+type OAuthRoutesConfig struct {
+	Provider                server.OAuthServerProvider
+	IssuerURL               *url.URL
+	BaseURL                 *url.URL
+	ServiceDocumentationURL *url.URL
+	ScopesSupported         []string
+	ResourceName            *string
+
+	// Optional
+	AuthorizationRateLimit *rate.Limiter
+	TokenRateLimit         *rate.Limiter
+	ResolveClientIDFromRT  func(rt string) (string, bool)
+	RegistrationRateLimit  *sh.RegisterRateLimitConfig
+	RevocationRateLimit    *sh.RevocationRateLimitConfig
+}
+
+type OAuthMetadataConfig struct {
+	OAuthMetadata           OAuthMetadata
+	ResourceServerURL       *url.URL
+	ServiceDocumentationURL *url.URL
+	ScopesSupported         []string
+	ResourceName            *string
+}
+
+type OAuthMetadata = auth.OAuthMetadata
+
 // serverConfig stores all server configuration options
 type serverConfig struct {
 	// Basic configuration
@@ -106,6 +152,9 @@ type serverConfig struct {
 
 	// Audit middleware configuration
 	auditConfig *AuditConfig
+
+	// Bearer authenticate configuration
+	bearerAuth *BearerAuthConfig
 
 	// Tool list filter function
 	toolListFilter ToolListFilter
@@ -150,6 +199,8 @@ func NewServer(name, version string, options ...ServerOption) *Server {
 		postSSEEnabled:         true,
 		getSSEEnabled:          true,
 		notificationBufferSize: defaultNotificationBufferSize,
+		auditConfig:            nil,
+		bearerAuth:             nil,
 	}
 
 	// Create server with provided serverInfo
@@ -192,7 +243,6 @@ func (s *Server) initComponents() {
 	if s.config.methodNameModifier != nil {
 		toolManager.withMethodNameModifier(s.config.methodNameModifier)
 	}
-	// Only set tool list filter if not nil.
 	if s.config.toolListFilter != nil {
 		toolManager.withToolListFilter(s.config.toolListFilter)
 	}
@@ -202,7 +252,6 @@ func (s *Server) initComponents() {
 	resourceManager := newResourceManager()
 	s.resourceManager = resourceManager
 
-	// Create prompt manager.
 	promptManager := newPromptManager()
 	s.promptManager = promptManager
 
@@ -244,32 +293,34 @@ func (s *Server) initComponents() {
 
 	// Inject logger into httpServerHandler if provided.
 	if s.logger != nil {
-		// This is the httpServerHandler option version.
 		httpOptions = append(httpOptions, withServerTransportLogger(s.logger))
 	}
 
 	// Create HTTP handler.
 	s.httpHandler = newHTTPServerHandler(s.mcpHandler, s.config.path, httpOptions...)
+	core := http.Handler(s.httpHandler)
 
-	// By default, the server only exposes the core MCP handler.
-	// If additional route installers were provided via ServerOptions
-	// (e.g. WithOAuthRoutes, WithOAuthMetadata, or WithHTTPRoutes),
-	// build a new mux that mounts the MCP endpoint under the configured
-	// path (e.g. /mcp/) and then installs the extra routes.
-	// The mux becomes the rootHandler exposed by Handler().
-	s.rootHandler = s.httpHandler
-
-	if len(s.config.routerInstallers) > 0 {
-		mux := http.NewServeMux()
-		// Mount the MCP core handler under the configured path (e.g. /mcp/).
-		mux.Handle(s.config.path+"/", s.httpHandler)
-		// Apply each user-provided installer to add extra endpoints
-		// such as /authorize, /token, /revoke, /register, or .well-known.
-		for _, install := range s.config.routerInstallers {
-			_ = install(mux) // consider logging errors in production
-		}
-		s.rootHandler = mux
+	if s.config.bearerAuth != nil && s.config.bearerAuth.Enabled {
+		core = middleware.RequireBearerAuth(middleware.BearerAuthMiddlewareOptions{
+			Verifier:            s.config.bearerAuth.Verifier,
+			RequiredScopes:      s.config.bearerAuth.RequiredScopes,
+			ResourceMetadataURL: s.config.bearerAuth.ResourceMetadataURL,
+		})(core)
 	}
+	mux := http.NewServeMux()
+	mux.Handle(s.config.path+"/", core)
+
+	for _, install := range s.config.routerInstallers {
+		_ = install(mux)
+	}
+
+	root := http.Handler(mux)
+	if s.config.auditConfig != nil && s.config.auditConfig.Enabled {
+		auditOptions := convertToMiddlewareOptions(s.config.auditConfig)
+		root = middleware.AuditMiddleware(auditOptions)(root)
+	}
+
+	s.rootHandler = root
 }
 
 // ServerOption server option function.
@@ -347,6 +398,15 @@ func WithAudit(config *AuditConfig) ServerOption {
 	}
 }
 
+// WithBearerAuth configures the server to use Bearer token authentication.
+// The provided BearerAuthConfig specifies how tokens are verified,
+// what scopes are required, and optionally, metadata for WWW-Authenticate responses.
+func WithBearerAuth(config *BearerAuthConfig) ServerOption {
+	return func(s *Server) {
+		s.config.bearerAuth = config
+	}
+}
+
 // WithStatelessMode sets whether the server uses stateless mode
 // In stateless mode, the server won't generate session IDs and won't validate session IDs in client requests
 // Each request will use a temporary session, which is only valid during request processing
@@ -389,6 +449,14 @@ func WithServerAddress(addr string) ServerOption {
 	}
 }
 
+func WithProxyOAuthProvider(proxyOpts providers.ProxyOptions, cfg OAuthRoutesConfig) ServerOption {
+	return func(s *Server) {
+		prov := providers.NewProxyOAuthServerProvider(proxyOpts)
+		cfg.Provider = prov
+		WithOAuthRoutes(cfg)(s)
+	}
+}
+
 // WithHTTPRoutes registers a custom installer function that can
 // attach additional HTTP routes to the server's root mux.
 func WithHTTPRoutes(install func(*http.ServeMux) error) ServerOption {
@@ -400,8 +468,39 @@ func WithHTTPRoutes(install func(*http.ServeMux) error) ServerOption {
 // WithOAuthRoutes installs standard OAuth 2.1 endpoints into the server,
 // such as /authorize, /token, /revoke, and /register, depending on the
 // provided AuthRouterOptions and the provider's capabilities.
-func WithOAuthRoutes(opts router.AuthRouterOptions) ServerOption {
+func WithOAuthRoutes(cfg OAuthRoutesConfig) ServerOption {
 	return WithHTTPRoutes(func(mux *http.ServeMux) error {
+		base := cfg.BaseURL
+		if base == nil {
+			base = cfg.IssuerURL
+		}
+
+		opts := router.AuthRouterOptions{
+			Provider:                cfg.Provider,
+			IssuerUrl:               cfg.IssuerURL,
+			BaseUrl:                 base,
+			ServiceDocumentationUrl: cfg.ServiceDocumentationURL,
+			ScopesSupported:         cfg.ScopesSupported,
+			ResourceName:            cfg.ResourceName,
+
+			AuthorizationOptions: &sh.AuthorizationHandlerOptions{
+				Provider:  cfg.Provider,
+				RateLimit: cfg.AuthorizationRateLimit,
+			},
+			TokenOptions: &sh.TokenHandlerOptions{
+				Provider:                        cfg.Provider,
+				RateLimit:                       cfg.TokenRateLimit,
+				ResolveClientIDFromRefreshToken: cfg.ResolveClientIDFromRT,
+			},
+			ClientRegistrationOptions: &sh.ClientRegistrationHandlerOptions{
+				ClientsStore: cfg.Provider.ClientsStore(), // 若 provider 支持动态注册则生效
+				RateLimit:    cfg.RegistrationRateLimit,
+			},
+			RevocationOptions: &sh.RevocationHandlerOptions{
+				Provider:  cfg.Provider,
+				RateLimit: cfg.RevocationRateLimit,
+			},
+		}
 		return router.McpAuthRouter(mux, opts)
 	})
 }
@@ -410,8 +509,16 @@ func WithOAuthRoutes(opts router.AuthRouterOptions) ServerOption {
 // (e.g. /.well-known/oauth-authorization-server and
 // /.well-known/oauth-protected-resource) into the server.
 // The returned metadata is constructed from the given AuthMetadataOptions.
-func WithOAuthMetadata(opts router.AuthMetadataOptions) ServerOption {
+func WithOAuthMetadata(cfg OAuthMetadataConfig) ServerOption {
 	return WithHTTPRoutes(func(mux *http.ServeMux) error {
+		// 直接把对外的 MetadataConfig 转为内部的 router.AuthMetadataOptions
+		opts := router.AuthMetadataOptions{
+			OAuthMetadata:           cfg.OAuthMetadata,
+			ResourceServerUrl:       cfg.ResourceServerURL,
+			ServiceDocumentationUrl: cfg.ServiceDocumentationURL,
+			ScopesSupported:         cfg.ScopesSupported,
+			ResourceName:            cfg.ResourceName,
+		}
 		return router.McpAuthMetadataRouter(mux, opts)
 	})
 }
@@ -737,4 +844,25 @@ func (s *Server) handleServerNotification(ctx context.Context, notification *JSO
 		s.logger.Debugf("No handler registered for notification method: %s", notification.Method)
 	}
 	return nil
+}
+
+func convertToMiddlewareOptions(config *AuditConfig) *middleware.AuditMiddlewareOptions {
+	level := middleware.AuditLevelBasic
+	switch config.Level {
+	case "detailed":
+		level = middleware.AuditLevelDetailed
+	case "full":
+		level = middleware.AuditLevelFull
+	}
+
+	return &middleware.AuditMiddlewareOptions{
+		Level:               level,
+		HashSensitiveData:   config.HashSensitiveData,
+		IncludeRequestBody:  config.IncludeRequestBody,
+		IncludeResponseBody: config.IncludeResponseBody,
+		EndpointPatterns:    config.EndpointPatterns,
+		ExcludePatterns:     config.ExcludePatterns,
+		MetadataExtractor:   config.MetadataExtractor,
+		// Convert RiskAssessor function signature if needed
+	}
 }

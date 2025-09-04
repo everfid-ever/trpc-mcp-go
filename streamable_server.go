@@ -102,7 +102,7 @@ type ServerAuthConfig struct {
 }
 
 // NewAuthHTTPContextFunc creates an authenticated HTTPContextFunc
-func NewAuthHTTPContextFunc(verifier server.TokenVerifier, cfg ServerAuthConfig) HTTPContextFunc {
+func NewAuthHTTPContextFunc(verifier server.TokenVerifierInterface, cfg ServerAuthConfig) HTTPContextFunc {
 	return func(ctx context.Context, r *http.Request) context.Context {
 		// Exact Authorization: Bearer <token>
 		raw, err := extractBearerFromHeader(r.Header.Get("Authorization"))
@@ -415,6 +415,9 @@ func (h *httpServerHandler) handlePostRequest(ctx context.Context, w http.Respon
 		if session != nil {
 			reqCtx = setSessionToContext(reqCtx, session)
 		}
+		if authInfo, ok := server.GetAuthInfo(ctx); ok {
+			reqCtx = server.WithAuthInfo(reqCtx, authInfo)
+		}
 		resp, err := h.requestHandler.handleRequest(reqCtx, &req, session)
 		if err != nil {
 			h.logger.Infof("Request processing failed: %v", err)
@@ -441,6 +444,9 @@ func (h *httpServerHandler) handlePostRequest(ctx context.Context, w http.Respon
 	reqCtx := withNotificationSender(ctx, noopSender)
 	if session != nil {
 		reqCtx = setSessionToContext(reqCtx, session)
+	}
+	if authInfo, ok := server.GetAuthInfo(ctx); ok {
+		reqCtx = server.WithAuthInfo(reqCtx, authInfo)
 	}
 	resp, err := h.requestHandler.handleRequest(reqCtx, &req, session)
 	if err != nil {
@@ -881,7 +887,10 @@ func (h *httpServerHandler) isValidPath(requestPath string) bool {
 	if h.serverPath == "" {
 		return true
 	}
-	return requestPath == h.serverPath
+	sp := strings.TrimSuffix(h.serverPath, "/")
+	rp := strings.TrimSuffix(requestPath, "/")
+
+	return rp == sp || strings.HasPrefix(requestPath, sp+"/")
 }
 
 // responseManager manages pending requests and their response channels.

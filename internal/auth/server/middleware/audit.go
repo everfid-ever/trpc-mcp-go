@@ -330,6 +330,13 @@ func extractOAuthInfo(r *http.Request) OAuthInfo {
 		if len(info.Scopes) == 0 {
 			info.Scopes = authInfo.Scopes
 		}
+		if cid, ok := authInfo.Extra["client_id"].(string); ok && info.ClientID == "" {
+			info.ClientID = cid
+		}
+		// 兜底：有的 Verifier 会直接把 client_id 放到 AuthInfo.ClientID
+		if info.ClientID == "" && authInfo.ClientID != "" {
+			info.ClientID = authInfo.ClientID
+		}
 	}
 	return info
 }
@@ -519,7 +526,7 @@ func extractSubject(authInfo server.AuthInfo) string {
 
 // GetAuthInfo 从请求上下文中提取 AuthInfo
 func GetAuthInfo(ctx context.Context) (server.AuthInfo, bool) {
-	if authInfo, ok := ctx.Value(authInfoKeyType{}).(server.AuthInfo); ok {
+	if authInfo, ok := ctx.Value(AuthInfoKey).(server.AuthInfo); ok {
 		return authInfo, true
 	}
 	return server.AuthInfo{}, false
