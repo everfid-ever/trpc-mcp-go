@@ -492,9 +492,8 @@ func WithOAuthRoutes(cfg OAuthRoutesConfig) ServerOption {
 				RateLimit: cfg.AuthorizationRateLimit,
 			},
 			TokenOptions: &sh.TokenHandlerOptions{
-				Provider:                        cfg.Provider,
-				RateLimit:                       cfg.TokenRateLimit,
-				ResolveClientIDFromRefreshToken: cfg.ResolveClientIDFromRT,
+				Provider:  cfg.Provider,
+				RateLimit: cfg.TokenRateLimit,
 			},
 			ClientRegistrationOptions: &sh.ClientRegistrationHandlerOptions{
 				ClientsStore: cfg.Provider.ClientsStore(), // 若 provider 支持动态注册则生效
