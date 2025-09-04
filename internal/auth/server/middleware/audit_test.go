@@ -24,6 +24,21 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
+type captureLogger struct {
+	last AuditEvent
+}
+
+func (c *captureLogger) LogEvent(e AuditEvent) error {
+	c.last = e
+	return nil
+}
+
+func (c *captureLogger) LogError(e AuditEvent, err error) error {
+	e.ErrorMessage = err.Error()
+	c.last = e
+	return nil
+}
+
 func TestAuditLevelConstants(t *testing.T) {
 	// 测试审计级别常量值
 	if AuditLevelNone != 0 {
@@ -898,5 +913,58 @@ func BenchmarkSanitizeMap(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = sanitizeQueryParams(queryParams, sensitiveKeys)
+	}
+}
+
+func TestAuditWriter_DefaultStatusOnWrite(t *testing.T) {
+	rec := httptest.NewRecorder()
+	aw := &auditResponseWriter{ResponseWriter: rec, body: make([]byte, 0)}
+	_, _ = aw.Write([]byte("hi"))
+	if aw.statusCode != http.StatusOK {
+		t.Fatalf("status should default to 200 on Write, got %d", aw.statusCode)
+	}
+}
+
+func TestSSE_DisablesCapture(t *testing.T) {
+	cl := &captureLogger{}
+	opts := NewAuditOptionsBuilder().Build()
+	opts.Logger = cl
+	opts.IncludeResponseBody = true // 即便配置为 true，SSE 也应禁用
+	mw := AuditMiddleware(opts)
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 模拟 SSE 输出
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		w.Write([]byte("data: ping\n\n"))
+	})
+
+	req := httptest.NewRequest("GET", "/oauth2/authorize", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	mw(h).ServeHTTP(w, req)
+
+	if cl.last.ResponseBody != "" {
+		t.Fatalf("SSE responses should not be captured")
+	}
+}
+
+func TestRequestBody_CapturedWhenEnabled(t *testing.T) {
+	cl := &captureLogger{}
+	opts := NewAuditOptionsBuilder().Build()
+	opts.Logger = cl
+	opts.IncludeRequestBody = true
+
+	mw := AuditMiddleware(opts)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	req := httptest.NewRequest("POST", "/oauth2/token", strings.NewReader("grant_type=client_credentials"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	w := httptest.NewRecorder()
+	mw(h).ServeHTTP(w, req)
+
+	if cl.last.RequestBody == "" || !strings.Contains(cl.last.RequestBody, "grant_type=client_credentials") {
+		t.Fatalf("request body should be captured when IncludeRequestBody=true")
 	}
 }

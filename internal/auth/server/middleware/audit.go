@@ -297,7 +297,7 @@ func (w *auditResponseWriter) Write(b []byte) (int, error) {
 	if w.statusCode == 0 {
 		w.statusCode = http.StatusOK
 	}
-	if w.captured {
+	if w.captured || w.body != nil {
 		w.body = append(w.body, b...)
 	}
 	return w.ResponseWriter.Write(b)
@@ -574,7 +574,7 @@ func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *Audit
 	// Determines whether to capture the response body according to the configuration
 	wrappedWriter := &auditResponseWriter{
 		ResponseWriter: w,
-		captured:       (options.Level >= AuditLevelFull || options.IncludeRequestBody),
+		captured:       (options.Level >= AuditLevelFull || options.IncludeResponseBody),
 	}
 	oauthInfo := extractOAuthInfo(r)
 
