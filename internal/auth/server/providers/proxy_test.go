@@ -515,8 +515,8 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 			if !errors.As(err, &insufficientScopeErr) {
 				t.Errorf("expected error to be of type oauthErrors.OAuthError, got %T", err)
 			}
-			if insufficientScopeErr.ErrorCode != "insufficient scope" {
-				t.Errorf("expected OAuthError with code %s, got %s", "insufficient scope", insufficientScopeErr.ErrorCode)
+			if insufficientScopeErr.ErrorCode != "insufficient_scope" {
+				t.Errorf("expected OAuthError with code %s, got %s", "insufficient_scope", insufficientScopeErr.ErrorCode)
 			}
 			if insufficientScopeErr.Message != "Required scopes: read, write" {
 				t.Errorf("expected OAuthError with description %s, got %s", "Required scopes: read, write", insufficientScopeErr.Message)
