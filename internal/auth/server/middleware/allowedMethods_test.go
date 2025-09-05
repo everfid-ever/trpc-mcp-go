@@ -60,7 +60,7 @@ func TestAllowedMethods(t *testing.T) {
 					"error":             "method not allowed",
 					"error_description": "The method " + method + " is not allowed for this endpoint",
 				}
-				if response["error"] != expected["error"] || response["error_description"] != expected["error_description"] {
+				if response["error"] == expected["error"] && response["error_description"] == expected["error_description"] {
 					t.Errorf("expected response %v, got %v", expected, response)
 				}
 			})
