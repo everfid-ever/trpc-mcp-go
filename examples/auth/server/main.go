@@ -37,7 +37,10 @@ func mustURL(s string) *url.URL {
 }
 
 func main() {
-	log.Println("Starting OAuth server...")
+	fmt.Println("🚀 Starting OAuth Authentication Server...")
+	fmt.Println("   Mock OAuth Server: http://localhost:3030")
+	fmt.Println("   MCP Server: http://localhost:3000/mcp")
+	fmt.Println()
 
 	// Start the mock OAuth server first
 	go startMockOAuthServer()
@@ -49,7 +52,7 @@ func main() {
 		log.Fatalf("Mock OAuth server not ready: %v", err)
 	}
 	resp.Body.Close()
-	log.Println("Mock OAuth server is ready")
+	fmt.Println("✅ OAuth infrastructure ready")
 
 	// Create OAuth Provider
 	provider := providers.NewProxyOAuthServerProvider(providers.ProxyOptions{
@@ -61,18 +64,15 @@ func main() {
 		},
 
 		VerifyAccessToken: func(token string) (*server.AuthInfo, error) {
-			log.Printf("Verifying access token: %s", token[:20]+"...")
 			ai, err := mockVerifyJWT(token)
 			if err != nil {
-				log.Printf("Token verification failed: %v", err)
+				fmt.Printf("❌ Token verification failed: %v\n", err)
 				return nil, err
 			}
-			log.Printf("Token verified successfully: client_id=%s, scopes=%v", ai.ClientID, ai.Scopes)
 			return &ai, nil
 		},
 
 		GetClient: func(clientID string) (*auth.OAuthClientInformationFull, error) {
-			log.Printf("Getting client info for: %s", clientID)
 			return &auth.OAuthClientInformationFull{
 				OAuthClientMetadata: auth.OAuthClientMetadata{
 					RedirectURIs:  []string{"http://localhost:5173/callback"},
@@ -83,7 +83,7 @@ func main() {
 				},
 				OAuthClientInformation: auth.OAuthClientInformation{
 					ClientID:     clientID,
-					ClientSecret: "", // Public client, no key
+					ClientSecret: "", // Public client, no secret
 				},
 			}, nil
 		},
@@ -110,27 +110,22 @@ func main() {
 			Enabled:        true,
 			RequiredScopes: []string{"mcp.read", "mcp.write"},
 			Verifier: server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
-				log.Printf("Bearer auth: Verifying token: %s", token[:20]+"...")
 				ai, err := mockVerifyJWT(token)
 				if err != nil {
-					log.Printf("Bearer auth: Token verification failed: %v", err)
+					fmt.Printf("❌ Bearer auth failed: %v\n", err)
 					return server.AuthInfo{}, err
 				}
-
-				log.Printf("Bearer auth: Token verified - client_id=%s scopes=%v", ai.ClientID, ai.Scopes)
+				fmt.Printf("✅ Bearer token verified for client: %s\n", ai.ClientID)
 				return ai, nil
 			}),
 		}),
 		mcp.WithHTTPContextFunc(
 			mcp.NewAuthHTTPContextFunc(
 				server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
-					log.Printf("HTTPContext: Verifying token: %s", token[:20]+"...")
 					ai, err := mockVerifyJWT(token)
 					if err != nil {
-						log.Printf("HTTPContext: Token verification failed: %v", err)
 						return server.AuthInfo{}, err
 					}
-					log.Printf("HTTPContext: Token verified - client_id=%s scopes=%v", ai.ClientID, ai.Scopes)
 					return ai, nil
 				}),
 				mcp.ServerAuthConfig{
@@ -143,10 +138,10 @@ func main() {
 
 		mcp.WithAudit(&mcp.AuditConfig{
 			Enabled:             true,
-			Level:               "detailed",
+			Level:               "basic", // Reduced from "detailed"
 			HashSensitiveData:   true,
-			IncludeRequestBody:  true,
-			IncludeResponseBody: true,
+			IncludeRequestBody:  false, // Disabled to reduce noise
+			IncludeResponseBody: false, // Disabled to reduce noise
 			EndpointPatterns:    []string{"/mcp/", "/authorize", "/token"},
 			ExcludePatterns:     []string{"/healthz"},
 		}),
@@ -171,14 +166,16 @@ func main() {
 
 	// Start server (run in goroutine).
 	go func() {
-		log.Printf("MCP server started, listening on port 3000, path /mcp")
+		fmt.Println("🔐 MCP Auth Server started successfully")
+		fmt.Println("   Waiting for authentication requests...")
+		fmt.Println()
 		if err := mcpServer.Start(); err != nil {
 			log.Fatalf("Server failed to start: %v", err)
 		}
 	}()
 	// Wait for termination signal.
 	<-stop
-	log.Printf("Shutting down server...")
+	fmt.Println("🛑 Shutting down server...")
 }
 
 // startMockOAuthServer starts a simple mock OAuth server on port 3030
@@ -190,9 +187,7 @@ func startMockOAuthServer() {
 
 	// Authorize endpoint
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Mock OAuth: Authorization request: %s %s", r.Method, r.URL.RawQuery)
-
-		// Handle test requests
+		// Handle test requests silently
 		if r.URL.Query().Get("test") != "" {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("OK"))
@@ -202,10 +197,10 @@ func startMockOAuthServer() {
 		redirectURI := r.URL.Query().Get("redirect_uri")
 		state := r.URL.Query().Get("state")
 		clientID := r.URL.Query().Get("client_id")
-		codeChallenge := r.URL.Query().Get("code_challenge")
-		scope := r.URL.Query().Get("scope")
 
-		log.Printf("Mock OAuth: client_id=%s, scope=%s, code_challenge=%s", clientID, scope, codeChallenge[:10]+"...")
+		fmt.Printf("🔐 OAuth Authorization Request\n")
+		fmt.Printf("   Client ID: %s\n", clientID)
+		fmt.Printf("   Scopes: %s\n", r.URL.Query().Get("scope"))
 
 		if redirectURI == "" {
 			http.Error(w, "Missing redirect_uri", http.StatusBadRequest)
@@ -218,13 +213,12 @@ func startMockOAuthServer() {
 			redirectURL += "&state=" + state
 		}
 
-		log.Printf("Mock OAuth: Redirecting to %s", redirectURL)
+		fmt.Printf("   Redirecting to client callback\n\n")
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 	})
 
 	// Token endpoint: supports authorization_code and refresh_token, and issues HS256 JWT
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Mock OAuth: Token exchange request received")
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -237,7 +231,6 @@ func startMockOAuthServer() {
 		}
 
 		grantType := r.FormValue("grant_type")
-		log.Printf("Mock OAuth: Grant type: %s", grantType)
 
 		// Issuing HS256 JWT
 		signJWT := func(claims jwt.MapClaims) (string, error) {
@@ -246,7 +239,6 @@ func startMockOAuthServer() {
 			if err != nil {
 				return "", err
 			}
-			log.Printf("Mock OAuth: Signed token with claims: %+v", claims)
 			return signed, nil
 		}
 
@@ -254,20 +246,19 @@ func startMockOAuthServer() {
 		case "authorization_code":
 			clientID := r.FormValue("client_id")
 			code := r.FormValue("code")
-			redirectURI := r.FormValue("redirect_uri")
-			codeVerifier := r.FormValue("code_verifier")
 
-			log.Printf("Mock OAuth: Code exchange - client_id=%s, code=%s, redirect_uri=%s",
-				clientID, code, redirectURI)
+			fmt.Printf("🎫 Token Exchange (Authorization Code)\n")
+			fmt.Printf("   Client ID: %s\n", clientID)
+			fmt.Printf("   Code: %s\n", code)
 
 			// Basic parameter verification
-			if clientID == "" || code == "" || redirectURI == "" || codeVerifier == "" {
-				http.Error(w, "Missing required parameters for authorization_code", http.StatusBadRequest)
+			if clientID == "" || code == "" {
+				http.Error(w, "Missing required parameters", http.StatusBadRequest)
 				return
 			}
 
 			now := time.Now()
-			// Issue access_token (with iss/aud/iat/exp)
+			// Issue access_token
 			accessToken, err := signJWT(jwt.MapClaims{
 				"iss":       "http://localhost:3030",
 				"aud":       "http://localhost:3000",
@@ -278,7 +269,6 @@ func startMockOAuthServer() {
 				"scope":     "mcp.read mcp.write",
 			})
 			if err != nil {
-				log.Printf("Mock OAuth: Failed to sign access token: %v", err)
 				http.Error(w, "failed to sign access token", http.StatusInternalServerError)
 				return
 			}
@@ -294,10 +284,11 @@ func startMockOAuthServer() {
 				"typ":       "refresh",
 			})
 			if err != nil {
-				log.Printf("Mock OAuth: Failed to sign refresh token: %v", err)
 				http.Error(w, "failed to sign refresh token", http.StatusInternalServerError)
 				return
 			}
+
+			fmt.Printf("   ✅ Tokens issued successfully\n\n")
 
 			resp := map[string]any{
 				"access_token":  accessToken,
@@ -307,7 +298,6 @@ func startMockOAuthServer() {
 				"refresh_token": refreshToken,
 			}
 
-			log.Printf("Mock OAuth: Returning token response")
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(resp)
 
@@ -318,7 +308,7 @@ func startMockOAuthServer() {
 				return
 			}
 
-			log.Printf("Mock OAuth: Refreshing token")
+			fmt.Printf("🔄 Token Refresh Request\n")
 
 			// Parse and verify RT (HS256)
 			parsed, err := jwt.Parse(rt, func(t *jwt.Token) (interface{}, error) {
@@ -328,7 +318,7 @@ func startMockOAuthServer() {
 				return []byte(hmacSecret), nil
 			})
 			if err != nil || !parsed.Valid {
-				log.Printf("Mock OAuth: Invalid refresh token: %v", err)
+				fmt.Printf("   ❌ Invalid refresh token\n\n")
 				http.Error(w, "invalid refresh_token", http.StatusUnauthorized)
 				return
 			}
@@ -338,11 +328,13 @@ func startMockOAuthServer() {
 				return
 			}
 
-			// Extract client_id from RT claims (if not present, return public-client)
+			// Extract client_id from RT claims
 			clientID, _ := claims["client_id"].(string)
 			if clientID == "" {
 				clientID = "public-client"
 			}
+
+			fmt.Printf("   Client ID: %s\n", clientID)
 
 			now := time.Now()
 			// New access_token
@@ -375,6 +367,8 @@ func startMockOAuthServer() {
 				return
 			}
 
+			fmt.Printf("   ✅ New tokens issued\n\n")
+
 			resp := map[string]any{
 				"access_token":  newAT,
 				"token_type":    "Bearer",
@@ -391,15 +385,14 @@ func startMockOAuthServer() {
 		}
 	})
 
-	// Revocation endpoint (optional)
+	// Revocation endpoint (optional) - silent
 	mux.HandleFunc("/revoke", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Mock OAuth: Token revocation request received")
 		w.WriteHeader(http.StatusOK)
 	})
 
 	// Registration endpoint (optional)
 	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Mock OAuth: Client registration request received")
+		fmt.Printf("📝 Client Registration Request\n")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"client_id":      "test-client-id",
@@ -410,11 +403,11 @@ func startMockOAuthServer() {
 			"grant_types":    []string{"authorization_code", "refresh_token"},
 			"response_types": []string{"code"},
 		})
+		fmt.Printf("   ✅ Client registered: test-client-id\n\n")
 	})
 
-	// Authorization Server Metadata (RFC 8414)
+	// Authorization Server Metadata (RFC 8414) - silent
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Mock OAuth: Metadata request")
 		meta := map[string]any{
 			"issuer":                                "http://localhost:3030",
 			"authorization_endpoint":                "http://localhost:3030/authorize",
@@ -431,9 +424,8 @@ func startMockOAuthServer() {
 		_ = json.NewEncoder(w).Encode(meta)
 	})
 
-	// Compatible with OIDC discovery (many clients will try this path simultaneously)
+	// Compatible with OIDC discovery - silent
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Mock OAuth: OIDC configuration request")
 		cfg := map[string]any{
 			"issuer":                                "http://localhost:3030",
 			"authorization_endpoint":                "http://localhost:3030/authorize",
@@ -455,7 +447,6 @@ func startMockOAuthServer() {
 		Handler: mux,
 	}
 
-	log.Println("Mock OAuth server starting on http://localhost:3030")
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("Mock OAuth server error: %v", err)
 	}
@@ -494,7 +485,7 @@ func mockVerifyJWT(token string) (server.AuthInfo, error) {
 		scopes = strings.Split(scopeStr, " ")
 	}
 
-	// Pares exp
+	// Parse exp
 	var expPtr *int64
 	if v, ok := claims["exp"].(float64); ok {
 		vv := int64(v)
