@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -555,10 +554,11 @@ func TestExtractOAuthInfo(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// Set the authentication information in the context
-	ctx := context.WithValue(req.Context(), authInfoKeyType{}, server.AuthInfo{
+	ctx := server.WithAuthInfo(req.Context(), &server.AuthInfo{
 		Scopes: []string{"read", "write"},
 		Extra: map[string]interface{}{
-			"sub": "test_user",
+			"sub":       "test_user",
+			"client_id": "ctx_client_id",
 		},
 	})
 	req = req.WithContext(ctx)
