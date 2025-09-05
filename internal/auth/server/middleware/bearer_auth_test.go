@@ -101,11 +101,11 @@ func TestRequireBearerAuth_ExpiredToken(t *testing.T) {
 				t.Fatalf("expected 401, got %d", rec.Code)
 			}
 			hdr := rec.Header().Get("WWW-Authenticate")
-			if !strings.Contains(hdr, `error="invalid token"`) || !strings.Contains(hdr, "Token has expired") {
+			if !strings.Contains(hdr, `error="invalid_token"`) || !strings.Contains(hdr, "Token has expired") {
 				t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
 			}
 			body := decodeOAuthResp(t, rec)
-			if body.Error != "invalid token" || body.ErrorDescription != "Token has expired" {
+			if body.Error != "invalid_token" || body.ErrorDescription != "Token has expired" {
 				t.Fatalf("unexpected body: %+v", body)
 			}
 		})
@@ -121,11 +121,11 @@ func TestRequireBearerAuth_NoExpiration(t *testing.T) {
 		if nextCalled || rec.Code != http.StatusUnauthorized {
 			t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
 		}
-		if hdr := rec.Header().Get("WWW-Authenticate"); !strings.Contains(hdr, `error="invalid token"`) || !strings.Contains(hdr, "Token has no expiration time") {
+		if hdr := rec.Header().Get("WWW-Authenticate"); !strings.Contains(hdr, `error="invalid_token"`) || !strings.Contains(hdr, "Token has no expiration time") {
 			t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
 		}
 		body := decodeOAuthResp(t, rec)
-		if body.Error != "invalid token" || body.ErrorDescription != "Token has no expiration time" {
+		if body.Error != "invalid_token" || body.ErrorDescription != "Token has no expiration time" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
 	})
@@ -139,11 +139,11 @@ func TestRequireBearerAuth_NoExpiration(t *testing.T) {
 		if nextCalled2 || rec2.Code != http.StatusUnauthorized {
 			t.Fatalf("expected 401 without next, got %d next=%v", rec2.Code, nextCalled2)
 		}
-		if hdr := rec2.Header().Get("WWW-Authenticate"); !strings.Contains(hdr, `error="invalid token"`) || !strings.Contains(hdr, "Token has no expiration time") {
+		if hdr := rec2.Header().Get("WWW-Authenticate"); !strings.Contains(hdr, `error="invalid_token"`) || !strings.Contains(hdr, "Token has no expiration time") {
 			t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
 		}
 		body := decodeOAuthResp(t, rec2)
-		if body.Error != "invalid token" || body.ErrorDescription != "Token has no expiration time" {
+		if body.Error != "invalid_token" || body.ErrorDescription != "Token has no expiration time" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
 	})
@@ -171,11 +171,11 @@ func TestRequireBearerAuth_RequiredScopes(t *testing.T) {
 		t.Fatalf("expected 403 and next not called, got %d next=%v", rec.Code, nextCalled)
 	}
 	hdr := rec.Header().Get("WWW-Authenticate")
-	if !strings.Contains(hdr, `error="insufficient scope"`) {
+	if !strings.Contains(hdr, `error="insufficient_scope"`) {
 		t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
 	}
 	body := decodeOAuthResp(t, rec)
-	if body.Error != "insufficient scope" || body.ErrorDescription != "Insufficient scope" {
+	if body.Error != "insufficient_scope" || body.ErrorDescription != "Insufficient scope" {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 }
@@ -200,14 +200,14 @@ func TestRequireBearerAuth_MissingAuthorization(t *testing.T) {
 		t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
 	}
 	// 检查完整的 WWW-Authenticate 头
-	expectedHeader := `Bearer error="invalid token", error_description="Missing Authorization header"`
+	expectedHeader := `Bearer error="invalid_token", error_description="Missing Authorization header"`
 	hdr := rec.Header().Get("WWW-Authenticate")
 	if hdr != expectedHeader {
 		t.Fatalf("expected WWW-Authenticate: %q, got %q", expectedHeader, hdr)
 	}
 	// 检查响应体
 	body := decodeOAuthResp(t, rec)
-	if body.Error != "invalid token" || body.ErrorDescription != "Missing Authorization header" {
+	if body.Error != "invalid_token" || body.ErrorDescription != "Missing Authorization header" {
 		t.Fatalf("expected body error=\"invalid_token\", error_description=\"Missing Authorization header\", got %+v", body)
 	}
 }
@@ -222,13 +222,13 @@ func TestRequireBearerAuth_InvalidAuthorizationFormat(t *testing.T) {
 		t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
 	}
 	// 验证 WWW-Authenticate 头的完整字符串
-	expectedHeader := `Bearer error="invalid token", error_description="Invalid Authorization header format, expected 'Bearer TOKEN'"`
+	expectedHeader := `Bearer error="invalid_token", error_description="Invalid Authorization header format, expected 'Bearer TOKEN'"`
 	if hdr := rec.Header().Get("WWW-Authenticate"); hdr != expectedHeader {
 		t.Fatalf("expected WWW-Authenticate: %q, got %q", expectedHeader, hdr)
 	}
 	// 验证响应体
 	body := decodeOAuthResp(t, rec)
-	if body.Error != "invalid token" || body.ErrorDescription != "Invalid Authorization header format, expected 'Bearer TOKEN'" {
+	if body.Error != "invalid_token" || body.ErrorDescription != "Invalid Authorization header format, expected 'Bearer TOKEN'" {
 		t.Fatalf("unexpected body: %+v", body)
 	}
 }
@@ -246,7 +246,7 @@ func TestRequireBearerAuth_VerifierErrors(t *testing.T) {
 			t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
 		}
 		hdr := rec.Header().Get("WWW-Authenticate")
-		if !strings.Contains(hdr, `error="invalid token"`) || !strings.Contains(hdr, "Token expired") {
+		if !strings.Contains(hdr, `error="invalid_token"`) || !strings.Contains(hdr, "Token expired") {
 			t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
 		}
 	})
@@ -263,11 +263,11 @@ func TestRequireBearerAuth_VerifierErrors(t *testing.T) {
 			t.Fatalf("expected 403 without next, got %d next=%v", rec.Code, nextCalled)
 		}
 		hdr := rec.Header().Get("WWW-Authenticate")
-		if !strings.Contains(hdr, `error="insufficient scope"`) {
+		if !strings.Contains(hdr, `error="insufficient_scope"`) {
 			t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
 		}
 		body := decodeOAuthResp(t, rec)
-		if body.Error != "insufficient scope" || body.ErrorDescription != "Required scopes: read, write" {
+		if body.Error != "insufficient_scope" || body.ErrorDescription != "Required scopes: read, write" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
 	})
@@ -287,7 +287,7 @@ func TestRequireBearerAuth_VerifierErrors(t *testing.T) {
 			t.Fatalf("expected no WWW-Authenticate header, got %q", hdr)
 		}
 		body := decodeOAuthResp(t, rec)
-		if body.Error != "server error" || body.ErrorDescription != "Internal server issue" {
+		if body.Error != "server_error" || body.ErrorDescription != "Internal server issue" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
 	})
@@ -304,7 +304,7 @@ func TestRequireBearerAuth_VerifierErrors(t *testing.T) {
 			t.Fatalf("expected token 'valid-token', got %q", mv.last)
 		}
 		body := decodeOAuthResp(t, rec)
-		if body.Error != "invalid request" || body.ErrorDescription != "Some OAuth error" {
+		if body.Error != "invalid_request" || body.ErrorDescription != "Some OAuth error" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
 	})
@@ -324,7 +324,7 @@ func TestRequireBearerAuth_VerifierErrors(t *testing.T) {
 			t.Fatalf("expected 500, got %d", rec.Code)
 		}
 		body := decodeOAuthResp(t, rec)
-		if body.Error != "server error" || body.ErrorDescription != "Internal Server Error" {
+		if body.Error != "server_error" || body.ErrorDescription != "Internal Server Error" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
 		if hdr := rec.Header().Get("WWW-Authenticate"); hdr != "" {
@@ -346,7 +346,7 @@ func TestRequireBearerAuth_WithResourceMetadata(t *testing.T) {
 			t.Fatalf("verifier should not be called, got token %q", mv.last)
 		}
 		hdr := rec.Header().Get("WWW-Authenticate")
-		expectedHdr := `Bearer error="invalid token", error_description="Missing Authorization header", resource_metadata="` + url + `"`
+		expectedHdr := `Bearer error="invalid_token", error_description="Missing Authorization header", resource_metadata="` + url + `"`
 		if hdr != expectedHdr {
 			t.Fatalf("expected WWW-Authenticate: %q, got %q", expectedHdr, hdr)
 		}
@@ -424,7 +424,7 @@ func TestRequireBearerAuth_WithResourceMetadata(t *testing.T) {
 			t.Fatalf("expected no WWW-Authenticate header, got %q", hdr)
 		}
 		body := decodeOAuthResp(t, rec)
-		if body.Error != "server error" || body.ErrorDescription != "Internal server issue" {
+		if body.Error != "server_error" || body.ErrorDescription != "Internal server issue" {
 			t.Fatalf("expected body {error: \"server_error\", error_description: \"Internal server issue\"}, got %+v", body)
 		}
 	})
