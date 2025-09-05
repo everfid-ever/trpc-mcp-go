@@ -14,23 +14,28 @@ import (
 	oauth "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
+// mockVerifier is a test double for TokenVerifierInterface that records the
+// last token and delegates verification to a provided function
 type mockVerifier struct {
 	verify func(ctx context.Context, token string) (srv.AuthInfo, error)
 	last   string
 }
 
+// VerifyAccessToken records the token and forwards verification to the mock function
 func (m *mockVerifier) VerifyAccessToken(ctx context.Context, token string) (srv.AuthInfo, error) {
 	m.last = token
 	return m.verify(ctx, token)
 }
 
-// helper: build a request, run middleware, and capture response/next-called
+// runWithMiddleware builds a request, executes the BearerAuth middleware with the
+// provided options and Authorization header, and returns the recorder and whether
+// the next handler was called
 func runWithMiddleware(t *testing.T, options BearerAuthMiddlewareOptions, authHeader string) (rec *httptest.ResponseRecorder, nextCalled bool) {
 	t.Helper()
 	nextCalled = false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
-		// 返回 200 用于断言中间件放行
+		// return 200 to assert the middleware allowed the reques
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -45,6 +50,7 @@ func runWithMiddleware(t *testing.T, options BearerAuthMiddlewareOptions, authHe
 	return rec, nextCalled
 }
 
+// decodeOAuthResp parses the OAuth error response body into OAuthErrorResponse
 func decodeOAuthResp(t *testing.T, rec *httptest.ResponseRecorder) *oauth.OAuthErrorResponse {
 	t.Helper()
 	var body oauth.OAuthErrorResponse
@@ -75,7 +81,7 @@ func TestRequireBearerAuth_ExpiredToken(t *testing.T) {
 
 	for _, seconds := range expiredSeconds {
 		t.Run(fmt.Sprintf("expired_%d_seconds_ago", seconds), func(t *testing.T) {
-			// 设置过期时间为当前时间减去指定秒数
+			// Set the expiration time to the current time minus the specified number of seconds
 			exp := time.Now().Add(time.Duration(-seconds) * time.Second).Unix()
 			expired := srv.AuthInfo{
 				Token:     "expired-token",

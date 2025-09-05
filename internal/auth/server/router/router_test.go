@@ -13,8 +13,10 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
 
+// fullProvider implements a fuller OAuthServerProvider used to exercise all router endpoints in tests
 type fullProvider struct{}
 
+// ClientsStore returns a store that supports dynamic registration for tests
 func (p *fullProvider) ClientsStore() *server.OAuthClientsStore {
 	return server.NewOAuthClientStoreSupportDynamicRegistration(
 		func(clientID string) (*auth.OAuthClientInformationFull, error) {
@@ -30,6 +32,7 @@ func (p *fullProvider) ClientsStore() *server.OAuthClientsStore {
 	)
 }
 
+// Authorize simulates a successful authorization response by redirecting with a mock code
 func (p *fullProvider) Authorize(client auth.OAuthClientInformationFull, params server.AuthorizationParams, w http.ResponseWriter, r *http.Request) error {
 	u, _ := url.Parse(params.RedirectURI)
 	q := u.Query()
@@ -42,10 +45,12 @@ func (p *fullProvider) Authorize(client auth.OAuthClientInformationFull, params 
 	return nil
 }
 
+// ChallengeForAuthorizationCode returns a fixed PKCE challenge for testing
 func (p *fullProvider) ChallengeForAuthorizationCode(client auth.OAuthClientInformationFull, code string) (string, error) {
 	return "mock_challenge", nil
 }
 
+// ExchangeAuthorizationCode returns mock tokens for a valid authorization code exchange
 func (p *fullProvider) ExchangeAuthorizationCode(client auth.OAuthClientInformationFull, code string, verifier *string, redirect *string, resource *url.URL) (*auth.OAuthTokens, error) {
 	expires := int64(3600)
 	rt := "mock_refresh_token"
@@ -57,6 +62,7 @@ func (p *fullProvider) ExchangeAuthorizationCode(client auth.OAuthClientInformat
 	}, nil
 }
 
+// ExchangeRefreshToken returns mock tokens for a valid refresh token exchange
 func (p *fullProvider) ExchangeRefreshToken(client auth.OAuthClientInformationFull, rt string, scopes []string, resource *url.URL) (*auth.OAuthTokens, error) {
 	expires := int64(3600)
 	newRT := "new_mock_refresh_token"
@@ -68,6 +74,7 @@ func (p *fullProvider) ExchangeRefreshToken(client auth.OAuthClientInformationFu
 	}, nil
 }
 
+// VerifyAccessToken validates a token and returns mock auth info or an error
 func (p *fullProvider) VerifyAccessToken(token string) (*server.AuthInfo, error) {
 	if token == "valid_token" {
 		exp := time.Now().Add(time.Hour).Unix()
@@ -81,15 +88,18 @@ func (p *fullProvider) VerifyAccessToken(token string) (*server.AuthInfo, error)
 	return nil, ErrInvalid
 }
 
-// Supports revocation: satisfies OAuthServerProvider interface requirement
+// RevokeToken implements token revocation to satisfy the interface
 func (p *fullProvider) RevokeToken(client auth.OAuthClientInformationFull, req auth.OAuthTokenRevocationRequest) error {
 	return nil
 }
 
+// minimalProvider implements the minimal surface needed for router tests without dynamic registration
 type minimalProvider struct{}
 
+// ClientsStore returns nil to indicate no dynamic client registration in minimal mode
 func (p *minimalProvider) ClientsStore() *server.OAuthClientsStore { return nil }
 
+// Authorize simulates a basic authorization redirect with a mock code
 func (p *minimalProvider) Authorize(client auth.OAuthClientInformationFull, params server.AuthorizationParams, w http.ResponseWriter, r *http.Request) error {
 	u, _ := url.Parse(params.RedirectURI)
 	q := u.Query()
@@ -98,25 +108,33 @@ func (p *minimalProvider) Authorize(client auth.OAuthClientInformationFull, para
 	http.Redirect(w, r, u.String(), http.StatusFound)
 	return nil
 }
+
+// ChallengeForAuthorizationCode returns a fixed PKCE challenge in minimal mode
 func (p *minimalProvider) ChallengeForAuthorizationCode(client auth.OAuthClientInformationFull, code string) (string, error) {
 	return "mock_challenge", nil
 }
+
+// ExchangeAuthorizationCode returns a basic mock access token for code exchange
 func (p *minimalProvider) ExchangeAuthorizationCode(client auth.OAuthClientInformationFull, code string, verifier *string, redirect *string, resource *url.URL) (*auth.OAuthTokens, error) {
 	expires := int64(3600)
 	return &auth.OAuthTokens{AccessToken: "mock_access_token", TokenType: "bearer", ExpiresIn: &expires}, nil
 }
+
+// ExchangeRefreshToken returns a basic mock access token for refresh exchange
 func (p *minimalProvider) ExchangeRefreshToken(client auth.OAuthClientInformationFull, rt string, scopes []string, resource *url.URL) (*auth.OAuthTokens, error) {
 	expires := int64(3600)
 	return &auth.OAuthTokens{AccessToken: "new_mock_access_token", TokenType: "bearer", ExpiresIn: &expires}, nil
 }
+
+// VerifyAccessToken always returns a valid mock auth info in minimal mode
 func (p *minimalProvider) VerifyAccessToken(token string) (*server.AuthInfo, error) {
 	exp := time.Now().Add(time.Hour).Unix()
 	return &server.AuthInfo{Token: token, ClientID: "valid-client", Scopes: []string{"read"}, ExpiresAt: &exp}, nil
 }
 
-// Must implement (because OAuthServerProvider embeds SupportTokenRevocation)
+// RevokeToken implements a no-op revocation to satisfy the embedded interface
 func (p *minimalProvider) RevokeToken(client auth.OAuthClientInformationFull, req auth.OAuthTokenRevocationRequest) error {
-	return nil // no-op
+	return nil
 }
 
 func Test_McpAuthRouter_RouterCreation_Validation(t *testing.T) {
@@ -303,13 +321,16 @@ func Test_Routes_Register_And_Revoke_Presence_MinimalVsFull(t *testing.T) {
 	}
 }
 
-// ====== helpers ======
-
+// ErrInvalid is a sentinel error used by tests to simulate token verification failures
 var ErrInvalid = &struct{ error }{}
 
+// mustParseURL parses a URL and panics on error for test setup convenience
 func mustParseURL(s string) *url.URL { u, _ := url.Parse(s); return u }
-func strPtr(s string) *string        { return &s }
 
+// strPtr returns a pointer to the provided string
+func strPtr(s string) *string { return &s }
+
+// expectStr asserts a string field in a metadata map
 func expectStr(t *testing.T, m map[string]any, key, want string) {
 	t.Helper()
 	v, ok := m[key]
@@ -322,6 +343,7 @@ func expectStr(t *testing.T, m map[string]any, key, want string) {
 	}
 }
 
+// expectArr asserts a string slice field in a metadata map
 func expectArr(t *testing.T, m map[string]any, key string, want []string) {
 	t.Helper()
 	v, ok := m[key]
@@ -362,6 +384,7 @@ func expectArr(t *testing.T, m map[string]any, key string, want []string) {
 	}
 }
 
+// containsAny encodes a loose expectation for any one of the provided values
 func containsAny(values ...string) []string {
 	if len(values) == 0 {
 		return nil

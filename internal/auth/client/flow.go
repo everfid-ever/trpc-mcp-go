@@ -17,6 +17,7 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
+// AuthResult describes the outcome of an OAuth flow
 type AuthResult string
 
 const (
@@ -24,6 +25,7 @@ const (
 	AuthResultRedirect   AuthResult = "REDIRECT"
 )
 
+// ClientAuthMethod lists supported client authentication methods for token endpoint
 type ClientAuthMethod string
 
 const (
@@ -32,18 +34,21 @@ const (
 	ClientAuthMethodNone  ClientAuthMethod = "none"
 )
 
+// metadataDiscoveryOptions carries optional knobs for metadata discovery behavior
 type metadataDiscoveryOptions struct {
 	ProtocolVersion   *string
 	MetadataUrl       *string
 	MetadataServerUrl *string
 }
 
+// RegisterClientOptions configures dynamic client registration
 type RegisterClientOptions struct {
 	Metadata       auth.AuthorizationServerMetadata
 	ClientMetadata auth.OAuthClientMetadata
 	FetchFn        auth.FetchFunc
 }
 
+// discoveryUrlType distinguishes between OAuth and OIDC discovery endpoints
 type discoveryUrlType string
 
 const (
@@ -51,6 +56,7 @@ const (
 	discoveryTypeOIDC  discoveryUrlType = "oidc"
 )
 
+// discoveryUrl pairs a URL with its discovery type
 type discoveryUrl struct {
 	URL  *url.URL
 	Type discoveryUrlType
@@ -60,14 +66,19 @@ type discoveryUrl struct {
 type StartAuthorizationOptions struct {
 	// Metadata contains authorization server configuration (optional)
 	Metadata auth.AuthorizationServerMetadata
+
 	// ClientInformation holds the OAuth client credentials
 	ClientInformation auth.OAuthClientInformation
+
 	// RedirectURL specifies where to redirect after authorization
 	RedirectURL string
+
 	// Scope defines the requested access permissions (optional)
 	Scope *string
+
 	// State provides CSRF protection (optional)
 	State *string
+
 	// Resource specifies the target resource URL (optional)
 	Resource *url.URL
 }
@@ -76,9 +87,12 @@ type StartAuthorizationOptions struct {
 type StartAuthorizationResult struct {
 	// AuthorizationURL is where the user should be redirected for authorization
 	AuthorizationURL *url.URL
+
 	// CodeVerifier must be stored securely for the token exchange step
 	CodeVerifier string
 }
+
+// ExchangeAuthorizationOptions configures exchanging an authorization code for tokens
 type ExchangeAuthorizationOptions struct {
 	Metadata                auth.AuthorizationServerMetadata            // server config (optional)
 	ClientInformation       *auth.OAuthClientInformation                // client credentials
@@ -90,6 +104,7 @@ type ExchangeAuthorizationOptions struct {
 	FetchFn                 auth.FetchFunc                              // custom HTTP client (optional)
 }
 
+// RefreshAuthorizationOptions configures exchanging a refresh token for new tokens
 type RefreshAuthorizationOptions struct {
 	Metadata                auth.AuthorizationServerMetadata            // server config (optional)
 	ClientInformation       *auth.OAuthClientInformation                // client credentials
@@ -99,10 +114,12 @@ type RefreshAuthorizationOptions struct {
 	FetchFn                 auth.FetchFunc                              // custom HTTP client (optional)
 }
 
+// UnauthorizedError represents an authorization failure that should be surfaced to callers
 type UnauthorizedError struct {
 	message string
 }
 
+// NewUnauthorizedError constructs an UnauthorizedError with a friendly message
 func NewUnauthorizedError(message string) *UnauthorizedError {
 	if message == "" {
 		message = "Unauthorized"
@@ -110,10 +127,12 @@ func NewUnauthorizedError(message string) *UnauthorizedError {
 	return &UnauthorizedError{message: message}
 }
 
+// Error returns the error message for UnauthorizedError
 func (e *UnauthorizedError) Error() string {
 	return e.message
 }
 
+// selectClientAuthMethod chooses a client auth method based on server support and client secrets
 func selectClientAuthMethod(
 	clientInformation auth.OAuthClientInformation,
 	supportedMethods []string,
@@ -144,6 +163,7 @@ func selectClientAuthMethod(
 	}
 }
 
+// applyClientAuthentication applies the chosen client auth to headers and or form parameters
 func applyClientAuthentication(
 	method ClientAuthMethod,
 	clientInformation auth.OAuthClientInformation,
@@ -167,6 +187,7 @@ func applyClientAuthentication(
 	}
 }
 
+// applyBasicAuth adds HTTP Basic Authorization using client id and secret
 func applyBasicAuth(clientID, clientSecret string, headers http.Header) error {
 	if clientSecret == "" {
 		return fmt.Errorf("client_secret_basic authentication requires a client_secret")
@@ -177,6 +198,7 @@ func applyBasicAuth(clientID, clientSecret string, headers http.Header) error {
 	return nil
 }
 
+// applyPostAuth writes client credentials into the token form payload
 func applyPostAuth(clientID, clientSecret string, params url.Values) {
 	params.Set("client_id", clientID)
 	if clientSecret != "" {
@@ -184,9 +206,12 @@ func applyPostAuth(clientID, clientSecret string, params url.Values) {
 	}
 }
 
+// applyPublicAuth writes public client id into the token form payload
 func applyPublicAuth(clientID string, params url.Values) {
 	params.Set("client_id", clientID)
 }
+
+// parseErrorResponse converts an OAuth style JSON error payload into an OAuthError
 func parseErrorResponse(input interface{}) (*errors.OAuthError, error) {
 	var responseBody []byte
 	var err error
@@ -230,6 +255,8 @@ func parseErrorResponse(input interface{}) (*errors.OAuthError, error) {
 	oauthError := errors.NewOAuthError(errorCode, oauthErrorResp.ErrorDescription, oauthErrorResp.ErrorURI)
 	return &oauthError, nil
 }
+
+// Auth performs high level authentication with retries and credential invalidation on specific errors
 func Auth(provider OAuthClientProvider, options auth.AuthOptions) (*AuthResult, error) {
 	result, err := authInternal(provider, options)
 	if err != nil {
@@ -253,6 +280,7 @@ func Auth(provider OAuthClientProvider, options auth.AuthOptions) (*AuthResult, 
 	return result, err
 }
 
+// authInternal runs the core auth logic including discovery registration refresh and redirect setup
 func authInternal(provider OAuthClientProvider, options auth.AuthOptions) (*AuthResult, error) {
 	var resourceMetadata *auth.OAuthProtectedResourceMetadata
 	var authorizationServerUrl string
@@ -382,6 +410,7 @@ func authInternal(provider OAuthClientProvider, options auth.AuthOptions) (*Auth
 	return &result, nil
 }
 
+// selectResourceURL determines the resource parameter to use validating against protected resource metadata
 func selectResourceURL(serverUrl string, provider OAuthClientProvider, resourceMetadata *auth.OAuthProtectedResourceMetadata) (*url.URL, error) {
 	defaultResource, err := auth.ResourceURLFromServerURL(serverUrl)
 	if err != nil {
@@ -415,6 +444,7 @@ func selectResourceURL(serverUrl string, provider OAuthClientProvider, resourceM
 	return url.Parse(resourceMetadata.Resource)
 }
 
+// DiscoverOAuthProtectedResourceMetadata loads OAuth Protected Resource metadata with path aware fallback
 func DiscoverOAuthProtectedResourceMetadata(serverUrl string, opts *auth.DiscoveryOptions, fetchFn auth.FetchFunc) (*auth.OAuthProtectedResourceMetadata, error) {
 	if fetchFn == nil {
 		fetchFn = func(urlStr string, req *http.Request) (*http.Response, error) {
@@ -452,6 +482,7 @@ func DiscoverOAuthProtectedResourceMetadata(serverUrl string, opts *auth.Discove
 	return &metadata, nil
 }
 
+// discoverMetadataWithFallback tries path aware discovery then falls back to root well known when applicable
 func discoverMetadataWithFallback(
 	serverUrl interface{},
 	wellKnownType string, // "oauth-authorization-server" or "oauth-protected-resource"
@@ -506,6 +537,8 @@ func discoverMetadataWithFallback(
 
 	return response, nil
 }
+
+// tryMetadataDiscovery issues a discovery request with protocol headers and returns the HTTP response
 func tryMetadataDiscovery(targetUrl *url.URL, protocolVersion string, fetchFn auth.FetchFunc) (*http.Response, error) {
 	req, err := http.NewRequest("GET", targetUrl.String(), nil)
 	if err != nil {
@@ -556,7 +589,7 @@ func buildWellKnownPath(wellKnownPrefix, pathname string) string {
 	return fmt.Sprintf("/.well-known/%s%s", wellKnownPrefix, pathname)
 }
 
-// Helper functions
+// parseURL accepts string or *url.URL and returns a parsed URL
 func parseURL(u interface{}) (*url.URL, error) {
 	switch v := u.(type) {
 	case string:
@@ -568,6 +601,7 @@ func parseURL(u interface{}) (*url.URL, error) {
 	}
 }
 
+// getProtocolVersion resolves the requested protocol version from options if provided
 func getProtocolVersion(opts *auth.DiscoveryOptions) *string {
 	if opts != nil && opts.ProtocolVersion != nil {
 		return opts.ProtocolVersion
@@ -575,6 +609,7 @@ func getProtocolVersion(opts *auth.DiscoveryOptions) *string {
 	return nil
 }
 
+// getResourceMetadataUrl resolves an explicit resource metadata URL from options if provided
 func getResourceMetadataUrl(opts *auth.DiscoveryOptions) *string {
 	if opts != nil && opts.ResourceMetadataUrl != nil {
 		return opts.ResourceMetadataUrl
@@ -591,6 +626,8 @@ func isNetworkError(err error) bool {
 		strings.Contains(errorStr, "timeout") ||
 		strings.Contains(errorStr, "refused")
 }
+
+// buildDiscoveryUrls generates candidate OAuth and OIDC discovery URLs for a given authorization server URL
 func buildDiscoveryUrls(authorizationServerURL string) ([]discoveryUrl, error) {
 	parsedURL, err := url.Parse(authorizationServerURL)
 	if err != nil {
@@ -645,6 +682,7 @@ type DiscoveryURL struct {
 	Type string // "oauth" or "oidc"
 }
 
+// DiscoverAuthorizationServerMetadata discovers OAuth or OIDC metadata and verifies minimal capabilities
 func DiscoverAuthorizationServerMetadata(ctx context.Context, authServerUrl string, options *auth.DiscoveryOptions) (auth.AuthorizationServerMetadata, error) {
 	// Build discovery URLs
 	discoveryUrls, err := buildDiscoveryUrls(authServerUrl)
@@ -732,6 +770,8 @@ func DiscoverAuthorizationServerMetadata(ctx context.Context, authServerUrl stri
 
 	return nil, fmt.Errorf("failed to discover authorization server metadata from %s", authServerUrl)
 }
+
+// RegisterClient performs dynamic client registration and returns full client information
 func RegisterClient(
 	ctx context.Context,
 	authorizationServerUrl string,
@@ -950,6 +990,8 @@ func StartAuthorization(
 		CodeVerifier:     challenge.CodeVerifier,
 	}, nil
 }
+
+// ExchangeAuthorization exchanges an authorization code for tokens applying appropriate client authentication
 func ExchangeAuthorization(
 	authorizationServerUrl string,
 	options ExchangeAuthorizationOptions,
@@ -1076,6 +1118,8 @@ func ExchangeAuthorization(
 
 	return &tokens, nil
 }
+
+// RefreshAuthorization exchanges a refresh token for a new access token and propagates refresh token when absent
 func RefreshAuthorization(
 	authorizationServerUrl string,
 	options RefreshAuthorizationOptions,

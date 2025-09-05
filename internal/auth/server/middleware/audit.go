@@ -18,7 +18,7 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
 
-// AuditLevel 定义审计日志级别
+// AuditLevel defines audit log verbosity levels
 type AuditLevel int
 
 const (
@@ -28,7 +28,7 @@ const (
 	AuditLevelFull
 )
 
-// AuditEvent 表示 OAuth2.1 操作的审计事件
+// AuditEvent represents an OAuth 2.1 operation audit record
 type AuditEvent struct {
 	EventID      string                 `json:"event_id"`
 	Timestamp    time.Time              `json:"timestamp"`
@@ -62,19 +62,20 @@ type AuditEvent struct {
 	ResponseBody string                 `json:"response_body,omitempty"`
 }
 
-// AuditLogger 定义审计日志接口
+// AuditLogger defines an interface for emitting audit logs
 type AuditLogger interface {
 	LogEvent(event AuditEvent) error
 	LogError(event AuditEvent, err error) error
 }
 
-// DefaultAuditLogger 使用 zap 实现审计日志
+// DefaultAuditLogger provides a zap based implementation of AuditLogger
 type DefaultAuditLogger struct {
 	logger *zap.Logger
 }
 
-// NewAuditLogger 创建审计日志器，支持默认或自定义 zap logger
+// NewAuditLogger creates a DefaultAuditLogger using the provided zap logger or sensible defaults
 func NewAuditLogger(logger *zap.Logger) *DefaultAuditLogger {
+	// Build a production logger by default and fall back to development if needed
 	if logger == nil {
 		var err error
 		logger, err = zap.NewProduction()
@@ -85,22 +86,25 @@ func NewAuditLogger(logger *zap.Logger) *DefaultAuditLogger {
 	return &DefaultAuditLogger{logger: logger}
 }
 
-// GetZapLogger 返回底层 zap logger
+// GetZapLogger exposes the underlying zap logger for advanced usage
 func (l *DefaultAuditLogger) GetZapLogger() *zap.Logger {
 	return l.logger
 }
 
-// LogEvent 记录审计事件
+// LogEvent writes a structured audit event at info level
 func (l *DefaultAuditLogger) LogEvent(event AuditEvent) error {
+	// Guard against uninitialized logger
 	if l.logger == nil {
 		return fmt.Errorf("zap logger not initialized")
 	}
 
+	// Marshal full event payload for a single structured field
 	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal audit event: %w", err)
 	}
 
+	// Emit event with a compact summary sub-structure for quick filtering
 	l.logger.Info("[AUDIT]",
 		zap.ByteString("event", data),
 		zap.Any("audit", struct {
@@ -126,13 +130,14 @@ func (l *DefaultAuditLogger) LogEvent(event AuditEvent) error {
 	return nil
 }
 
-// LogError 记录带有错误的审计事件
+// LogError writes an audit event including the provided error message
 func (l *DefaultAuditLogger) LogError(event AuditEvent, err error) error {
+	// Attach error message then delegate to LogEvent
 	event.ErrorMessage = err.Error()
 	return l.LogEvent(event)
 }
 
-// AuditMiddlewareOptions 定义审计中间件配置
+// AuditMiddlewareOptions configures what and how the middleware audits
 type AuditMiddlewareOptions struct {
 	Logger              AuditLogger
 	Level               AuditLevel
@@ -146,8 +151,9 @@ type AuditMiddlewareOptions struct {
 	SensitiveKeys       []string
 }
 
-// DefaultAuditMiddlewareOptions 返回默认审计配置
+// DefaultAuditMiddlewareOptions returns a sane default configuration for OAuth endpoints
 func DefaultAuditMiddlewareOptions() *AuditMiddlewareOptions {
+	// Default to detailed level with hashing and common OAuth endpoint patterns
 	return &AuditMiddlewareOptions{
 		Logger:            NewAuditLogger(nil),
 		Level:             AuditLevelDetailed,
@@ -163,124 +169,135 @@ func DefaultAuditMiddlewareOptions() *AuditMiddlewareOptions {
 	}
 }
 
-// AuditOptionsBuilder 用于构建审计中间件选项
+// AuditOptionsBuilder helps compose AuditMiddlewareOptions with a fluent API
 type AuditOptionsBuilder struct {
 	options *AuditMiddlewareOptions
 }
 
-// NewAuditOptionsBuilder 创建配置构建器
+// NewAuditOptionsBuilder creates a builder initialized with default options
 func NewAuditOptionsBuilder() *AuditOptionsBuilder {
 	return &AuditOptionsBuilder{options: DefaultAuditMiddlewareOptions()}
 }
 
-// WithLogger 设置自定义 logger
+// WithLogger sets a custom zap logger for audit output
 func (b *AuditOptionsBuilder) WithLogger(logger *zap.Logger) *AuditOptionsBuilder {
 	b.options.Logger = NewAuditLogger(logger)
 	return b
 }
 
-// WithLevel 设置审计级别
+// WithLevel sets the audit verbosity level
 func (b *AuditOptionsBuilder) WithLevel(level AuditLevel) *AuditOptionsBuilder {
 	b.options.Level = level
 	return b
 }
 
-// WithHashSensitiveData 设置是否哈希敏感数据
+// WithHashSensitiveData toggles hashing of sensitive fields before logging
 func (b *AuditOptionsBuilder) WithHashSensitiveData(hash bool) *AuditOptionsBuilder {
 	b.options.HashSensitiveData = hash
 	return b
 }
 
-// WithRequestBody 设置是否包含请求体
+// WithRequestBody toggles inclusion of request body in audit events
 func (b *AuditOptionsBuilder) WithRequestBody(include bool) *AuditOptionsBuilder {
 	b.options.IncludeRequestBody = include
 	return b
 }
 
-// WithResponseBody 设置是否包含响应体
+// WithResponseBody toggles inclusion of response body in audit events
 func (b *AuditOptionsBuilder) WithResponseBody(include bool) *AuditOptionsBuilder {
 	b.options.IncludeResponseBody = include
 	return b
 }
 
-// WithRiskAssessor 设置风险评估函数
+// WithRiskAssessor sets a custom risk assessment function
 func (b *AuditOptionsBuilder) WithRiskAssessor(assessor func(AuditEvent) (string, []string)) *AuditOptionsBuilder {
 	b.options.RiskAssessor = assessor
 	return b
 }
 
-// WithMetadataExtractor 设置元数据提取函数
+// WithMetadataExtractor sets a function to extract extra metadata from requests
 func (b *AuditOptionsBuilder) WithMetadataExtractor(extractor func(*http.Request) map[string]interface{}) *AuditOptionsBuilder {
 	b.options.MetadataExtractor = extractor
 	return b
 }
 
-// WithEndpointPatterns 设置审计端点模式
+// WithEndpointPatterns sets regex patterns for endpoints to include in auditing
 func (b *AuditOptionsBuilder) WithEndpointPatterns(patterns []string) *AuditOptionsBuilder {
 	b.options.EndpointPatterns = patterns
 	return b
 }
 
-// WithExcludePatterns 设置排除模式
+// WithExcludePatterns sets regex patterns for endpoints to exclude from auditing
 func (b *AuditOptionsBuilder) WithExcludePatterns(patterns []string) *AuditOptionsBuilder {
 	b.options.ExcludePatterns = patterns
 	return b
 }
 
-// WithSensitiveKeys 设置敏感字段
+// WithSensitiveKeys sets keys that should be redacted in headers and queries
 func (b *AuditOptionsBuilder) WithSensitiveKeys(keys []string) *AuditOptionsBuilder {
 	b.options.SensitiveKeys = keys
 	return b
 }
 
-// Build 返回最终配置
+// Build finalizes and returns the configured options
 func (b *AuditOptionsBuilder) Build() *AuditMiddlewareOptions {
 	return b.options
 }
 
-// AuditMiddleware 创建审计中间件
+// AuditMiddleware returns an HTTP middleware that emits audit events based on the provided options
 func AuditMiddleware(options *AuditMiddlewareOptions) func(http.Handler) http.Handler {
+	// Initialize default options and logger as needed
 	if options == nil {
 		options = DefaultAuditMiddlewareOptions()
 	}
 	if options.Logger == nil {
 		options.Logger = NewAuditLogger(nil)
 	}
+	// Validate configuration early and fail fast for programmer errors
 	if err := validateOptions(options); err != nil {
 		panic(fmt.Sprintf("invalid audit middleware options: %v", err))
 	}
 
+	// Wrap the next handler with auditing behavior
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip auditing if path does not match include/exclude rules
 			if !shouldAuditPath(r.URL.Path, options.EndpointPatterns, options.ExcludePatterns) {
 				next.ServeHTTP(w, r)
 				return
 			}
-			// Check if it is an SSE request
+
+			// Detect Server-Sent Events and avoid capturing streaming bodies
 			acceptHeader := r.Header.Get("Accept")
 			isSSE := strings.Contains(acceptHeader, "text/event-stream")
 
+			// Initialize event and wrap writer for status and body capture
 			event, wrappedWriter := initializeAuditEvent(w, r, options)
 
-			// For SSE requests, the response body is not captured to avoid interfering with streaming.
+			// Disable response capture for SSE to prevent interference with streaming
 			if isSSE {
 				wrappedWriter.captured = false
 			}
+
+			// Ensure event is logged even if downstream panics or early returns
 			defer logAuditEvent(event, wrappedWriter, options)
+
+			// Continue to next handler with wrapped writer
 			next.ServeHTTP(wrappedWriter, r)
 		})
 	}
 }
 
-// validateOptions 验证配置
+// validateOptions ensures the options contain at least one include or exclude pattern
 func validateOptions(options *AuditMiddlewareOptions) error {
+	// Must define what to include or exclude to avoid auditing everything by accident
 	if len(options.EndpointPatterns) == 0 && len(options.ExcludePatterns) == 0 {
 		return fmt.Errorf("at least one endpoint pattern or exclude pattern must be specified")
 	}
 	return nil
 }
 
-// auditResponseWriter 包装 ResponseWriter 以捕获状态码和响应体
+// auditResponseWriter wraps ResponseWriter to capture status and response body
 type auditResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -288,33 +305,38 @@ type auditResponseWriter struct {
 	captured   bool
 }
 
+// WriteHeader intercepts status codes for auditing
 func (w *auditResponseWriter) WriteHeader(code int) {
 	w.statusCode = code
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Write intercepts response body bytes when capture is enabled
 func (w *auditResponseWriter) Write(b []byte) (int, error) {
+	// Default status to 200 OK if not set
 	if w.statusCode == 0 {
 		w.statusCode = http.StatusOK
 	}
+	// Append to buffer only when capture is enabled
 	if w.captured || w.body != nil {
 		w.body = append(w.body, b...)
 	}
 	return w.ResponseWriter.Write(b)
 }
 
+// Flush forwards flush calls for streaming responses
 func (w *auditResponseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
 }
 
-// Unwrap 返回底层的 ResponseWriter
+// Unwrap returns the underlying ResponseWriter
 func (w *auditResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-// OAuthInfo 包含从请求中提取的 OAuth2.1 信息
+// OAuthInfo carries OAuth 2.1 specific request attributes extracted for auditing
 type OAuthInfo struct {
 	ClientID     string
 	Subject      string
@@ -327,9 +349,11 @@ type OAuthInfo struct {
 	Code         string
 }
 
-// extractOAuthInfo 提取 OAuth2.1 特定信息
+// extractOAuthInfo pulls OAuth related fields from URL query, form body, headers, and context
 func extractOAuthInfo(r *http.Request) OAuthInfo {
 	info := OAuthInfo{}
+
+	// Extract from query parameters
 	if r.URL != nil {
 		query := r.URL.Query()
 		info.ClientID = query.Get("client_id")
@@ -340,6 +364,8 @@ func extractOAuthInfo(r *http.Request) OAuthInfo {
 			info.Scopes = strings.Split(scope, " ")
 		}
 	}
+
+	// Extract from form body when present
 	if err := r.ParseForm(); err == nil {
 		if info.GrantType == "" {
 			info.GrantType = r.FormValue("grant_type")
@@ -349,9 +375,13 @@ func extractOAuthInfo(r *http.Request) OAuthInfo {
 			info.Scopes = strings.Split(scope, " ")
 		}
 	}
+
+	// Extract bearer token from Authorization header
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		info.Token = strings.TrimPrefix(auth, "Bearer ")
 	}
+
+	// Extract subject and fallback client_id from verified auth info when available
 	if authInfo, ok := GetAuthInfo(r.Context()); ok {
 		info.Subject = extractSubject(authInfo)
 		if len(info.Scopes) == 0 {
@@ -360,7 +390,7 @@ func extractOAuthInfo(r *http.Request) OAuthInfo {
 		if cid, ok := authInfo.Extra["client_id"].(string); ok && info.ClientID == "" {
 			info.ClientID = cid
 		}
-		// 兜底：有的 Verifier 会直接把 client_id 放到 AuthInfo.ClientID
+		// Fallback to AuthInfo.ClientID if Extra does not contain client_id
 		if info.ClientID == "" && authInfo.ClientID != "" {
 			info.ClientID = authInfo.ClientID
 		}
@@ -368,16 +398,19 @@ func extractOAuthInfo(r *http.Request) OAuthInfo {
 	return info
 }
 
-// shouldAuditPath 判断路径是否需要审计
+// shouldAuditPath checks include and exclude regex patterns to decide auditing
 func shouldAuditPath(path string, includePatterns, excludePatterns []string) bool {
+	// Exclude takes precedence when matched
 	for _, pattern := range excludePatterns {
 		if matched, _ := regexp.MatchString(pattern, path); matched {
 			return false
 		}
 	}
+	// If no include patterns set then audit all non excluded paths
 	if len(includePatterns) == 0 {
 		return true
 	}
+	// Audit when any include pattern matches
 	for _, pattern := range includePatterns {
 		if matched, _ := regexp.MatchString(pattern, path); matched {
 			return true
@@ -386,7 +419,7 @@ func shouldAuditPath(path string, includePatterns, excludePatterns []string) boo
 	return false
 }
 
-// determineEventType 确定事件类型
+// determineEventType maps path and method to a coarse event category
 func determineEventType(path, method string) string {
 	switch {
 	case strings.Contains(path, "/authorize"):
@@ -404,15 +437,17 @@ func determineEventType(path, method string) string {
 	}
 }
 
-// generateEventID 生成唯一事件 ID
+// generateEventID builds a unique event identifier based on time and random suffix
 func generateEventID() string {
 	return fmt.Sprintf("audit_%d_%s", time.Now().UnixNano(), randomString(8))
 }
 
-// randomString 生成随机字符串
+// randomString generates a pseudo random lowercase alphanumeric string
 func randomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, length)
+
+	// Try cryptographic randomness first and fall back to time based selection
 	if _, err := rand.Read(b); err != nil {
 		for i := range b {
 			b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
@@ -425,9 +460,11 @@ func randomString(length int) string {
 	return string(b)
 }
 
-// sanitizeMap 清理敏感键值对
+// sanitizeMap redacts configured sensitive keys and normalizes values to a single string
 func sanitizeMap[T string | []string](data map[string]T, sensitiveKeys []string) map[string]string {
 	sanitized := make(map[string]string)
+
+	// Iterate keys and redact any that match configured sensitive keys
 	for key, value := range data {
 		isSensitive := false
 		for _, sensitiveKey := range sensitiveKeys {
@@ -439,6 +476,7 @@ func sanitizeMap[T string | []string](data map[string]T, sensitiveKeys []string)
 		if isSensitive {
 			sanitized[key] = "[REDACTED]"
 		} else {
+			// Normalize to first value for slice and direct string otherwise
 			switch v := any(value).(type) {
 			case string:
 				sanitized[key] = v
@@ -452,17 +490,17 @@ func sanitizeMap[T string | []string](data map[string]T, sensitiveKeys []string)
 	return sanitized
 }
 
-// sanitizeQueryParams 清理查询参数
+// sanitizeQueryParams applies redaction and normalization to URL query parameters
 func sanitizeQueryParams(query map[string][]string, sensitiveKeys []string) map[string]string {
 	return sanitizeMap(query, sensitiveKeys)
 }
 
-// sanitizeHeaders 清理头部信息
+// sanitizeHeaders applies redaction and normalization to HTTP headers
 func sanitizeHeaders(headers map[string][]string, sensitiveKeys []string) map[string]string {
 	return sanitizeMap(headers, sensitiveKeys)
 }
 
-// hashSensitiveData 创建敏感数据的 SHA256 哈希
+// hashSensitiveData returns a hex encoded SHA256 hash for a sensitive string
 func hashSensitiveData(data string) string {
 	if data == "" {
 		return ""
@@ -471,25 +509,35 @@ func hashSensitiveData(data string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// defaultRiskAssessment 默认风险评估逻辑
+// defaultRiskAssessment computes a simple risk score and contributing factors
 func defaultRiskAssessment(event AuditEvent) (string, []string) {
 	var riskFactors []string
 	riskLevel := "low"
+
+	// Client side error increases risk
 	if event.StatusCode >= 400 {
 		riskFactors = append(riskFactors, "client_error")
 	}
+
+	// Server side error increases risk more
 	if event.StatusCode >= 500 {
 		riskFactors = append(riskFactors, "server_error")
 		riskLevel = "medium"
 	}
+
+	// Slow responses may indicate issues
 	if event.ResponseTime > 5*time.Second {
 		riskFactors = append(riskFactors, "slow_response")
 		riskLevel = "medium"
 	}
+
+	// Missing client identifier is suspicious
 	if event.ClientID == "" {
 		riskFactors = append(riskFactors, "missing_client_id")
 		riskLevel = "high"
 	}
+
+	// Specific endpoint categories slightly elevate risk
 	if strings.Contains(event.Path, "/revoke") {
 		riskFactors = append(riskFactors, "token_revocation")
 		riskLevel = "medium"
@@ -501,7 +549,7 @@ func defaultRiskAssessment(event AuditEvent) (string, []string) {
 	return riskLevel, riskFactors
 }
 
-// determineErrorCode 确定错误代码
+// determineErrorCode maps HTTP status codes to OAuth style error codes
 func determineErrorCode(statusCode int) string {
 	switch {
 	case statusCode == 400:
@@ -521,7 +569,7 @@ func determineErrorCode(statusCode int) string {
 	}
 }
 
-// determineErrorMessage 从响应体提取错误信息
+// determineErrorMessage extracts error text from a JSON error response or falls back to status text
 func determineErrorMessage(statusCode int, body []byte) string {
 	if len(body) == 0 {
 		return ""
@@ -530,6 +578,7 @@ func determineErrorMessage(statusCode int, body []byte) string {
 		Error            string `json:"error"`
 		ErrorDescription string `json:"error_description"`
 	}
+	// Try decode standard OAuth error response
 	if err := json.Unmarshal(body, &errorResponse); err == nil {
 		if errorResponse.ErrorDescription != "" {
 			return errorResponse.ErrorDescription
@@ -538,10 +587,11 @@ func determineErrorMessage(statusCode int, body []byte) string {
 			return errorResponse.Error
 		}
 	}
+	// Fallback to generic status text when payload is not structured
 	return http.StatusText(statusCode)
 }
 
-// extractSubject 从 AuthInfo 提取 subject
+// extractSubject reads the subject claim from AuthInfo.Extra
 func extractSubject(authInfo server.AuthInfo) string {
 	if authInfo.Extra != nil {
 		if sub, ok := authInfo.Extra["sub"].(string); ok {
@@ -551,19 +601,20 @@ func extractSubject(authInfo server.AuthInfo) string {
 	return ""
 }
 
-// GetAuthInfo 从请求上下文中提取 AuthInfo
+// GetAuthInfo extracts AuthInfo from the request context
 func GetAuthInfo(ctx context.Context) (server.AuthInfo, bool) {
+	// The context key is expected to be provided by upstream auth middleware
 	if authInfo, ok := ctx.Value(AuthInfoKey).(server.AuthInfo); ok {
 		return authInfo, true
 	}
 	return server.AuthInfo{}, false
 }
 
-// initializeAuditEvent 初始化审计事件
+// initializeAuditEvent constructs an AuditEvent and wraps the ResponseWriter for capture
 func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *AuditMiddlewareOptions) (AuditEvent, *auditResponseWriter) {
 	start := time.Now()
 
-	// Read and reset the request body
+	// Optionally read and restore the request body for logging
 	var reqBody []byte
 	if (options.Level >= AuditLevelFull || options.IncludeRequestBody) && r.Body != nil {
 		reqBody, _ = io.ReadAll(r.Body)
@@ -571,13 +622,16 @@ func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *Audit
 		r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
 	}
 
-	// Determines whether to capture the response body according to the configuration
+	// Configure wrapped writer to capture response body when enabled
 	wrappedWriter := &auditResponseWriter{
 		ResponseWriter: w,
 		captured:       (options.Level >= AuditLevelFull || options.IncludeResponseBody),
 	}
+
+	// Gather OAuth specific attributes for context
 	oauthInfo := extractOAuthInfo(r)
 
+	// Seed the event with request metadata and extracted OAuth fields
 	event := AuditEvent{
 		EventID:      generateEventID(),
 		Timestamp:    start,
@@ -598,26 +652,30 @@ func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *Audit
 		Metadata:     make(map[string]interface{}),
 	}
 
+	// At detailed level and above include sanitized query params and headers
 	if options.Level >= AuditLevelDetailed {
 		event.QueryParams = sanitizeQueryParams(r.URL.Query(), options.SensitiveKeys)
 		event.Headers = sanitizeHeaders(r.Header, options.SensitiveKeys)
 	}
 
+	// Hash tokens and IP address when configured to avoid leaking PII
 	if options.HashSensitiveData {
 		event.TokenHash = hashSensitiveData(oauthInfo.Token)
 		event.CodeHash = hashSensitiveData(oauthInfo.Code)
 		event.IPHash = hashSensitiveData(r.RemoteAddr)
 	}
 
-	// If request body logging is enabled, write
+	// Include request body when configured
 	if (options.Level >= AuditLevelFull || options.IncludeRequestBody) && len(reqBody) > 0 {
 		event.RequestBody = string(reqBody)
 	}
 
+	// Extract custom metadata when a provider is supplied
 	if options.MetadataExtractor != nil {
 		event.Metadata = options.MetadataExtractor(r)
 	}
 
+	// Assess risk using custom function or defaults
 	if options.RiskAssessor != nil {
 		event.RiskLevel, event.RiskFactors = options.RiskAssessor(event)
 	} else {
@@ -627,46 +685,49 @@ func initializeAuditEvent(w http.ResponseWriter, r *http.Request, options *Audit
 	return event, wrappedWriter
 }
 
-// logAuditEvent 记录审计事件
+// logAuditEvent finalizes timing and status then emits the audit event via the configured logger
 func logAuditEvent(event AuditEvent, w *auditResponseWriter, options *AuditMiddlewareOptions) {
+	// Compute latency and attach final status code
 	event.ResponseTime = time.Since(event.Timestamp)
 	event.StatusCode = w.statusCode
 
-	// To log the response body
+	// Optionally include captured response body
 	if w.captured && len(w.body) > 0 && (options.Level >= AuditLevelFull || options.IncludeResponseBody) {
 		event.ResponseBody = string(w.body)
 	}
 
+	// Derive error details for non successful responses
 	if event.StatusCode >= 400 {
 		event.ErrorCode = determineErrorCode(event.StatusCode)
 		event.ErrorMessage = determineErrorMessage(event.StatusCode, w.body)
 	}
 
+	// Emit the event and log any failure to stdout as a last resort
 	if err := options.Logger.LogEvent(event); err != nil {
 		fmt.Printf("[AUDIT ERROR] Failed to log audit event: %v\n", err)
 	}
 }
 
-// WithOAuthAudit 创建 OAuth2.1 特定审计中间件
+// WithOAuthAudit returns an OAuth specific audit middleware using provided options
 func WithOAuthAudit(options *AuditMiddlewareOptions) func(http.Handler) http.Handler {
 	return AuditMiddleware(options)
 }
 
-// WithBasicAudit 创建基础审计中间件
+// WithBasicAudit returns a middleware configured for basic auditing
 func WithBasicAudit() func(http.Handler) http.Handler {
 	return AuditMiddleware(NewAuditOptionsBuilder().
 		WithLevel(AuditLevelBasic).
 		Build())
 }
 
-// WithDetailedAudit 创建详细审计中间件
+// WithDetailedAudit returns a middleware configured for detailed auditing
 func WithDetailedAudit() func(http.Handler) http.Handler {
 	return AuditMiddleware(NewAuditOptionsBuilder().
 		WithLevel(AuditLevelDetailed).
 		Build())
 }
 
-// WithFullAudit 创建完整审计中间件
+// WithFullAudit returns a middleware configured for full auditing including bodies
 func WithFullAudit() func(http.Handler) http.Handler {
 	return AuditMiddleware(NewAuditOptionsBuilder().
 		WithLevel(AuditLevelFull).
@@ -675,14 +736,14 @@ func WithFullAudit() func(http.Handler) http.Handler {
 		Build())
 }
 
-// WithZapLogger 创建带自定义 zap logger 的审计配置
+// WithZapLogger returns options pre configured with a custom zap logger
 func WithZapLogger(logger *zap.Logger) *AuditMiddlewareOptions {
 	return NewAuditOptionsBuilder().
 		WithLogger(logger).
 		Build()
 }
 
-// WithCustomZapLogger 创建带自定义 zap logger 和配置的审计配置
+// WithCustomZapLogger returns options configured with a custom zap logger and core toggles
 func WithCustomZapLogger(logger *zap.Logger, level AuditLevel, hashSensitive bool) *AuditMiddlewareOptions {
 	return NewAuditOptionsBuilder().
 		WithLogger(logger).

@@ -25,21 +25,28 @@ const (
 	testClientSecret = "s3cr3t"
 )
 
+// mockRevokeProvider is a fake implementation of OAuthServerProvider used for revocation tests
+// It tracks calls to RevokeToken and allows simulating errors
 type mockRevokeProvider struct {
-	store        *as.OAuthClientsStore
-	lastReq      *auth.OAuthTokenRevocationRequest
-	revokeErr    error
-	calledRevoke int
+	store        *as.OAuthClientsStore             // backing client store
+	lastReq      *auth.OAuthTokenRevocationRequest // last revocation request captured
+	revokeErr    error                             // error to return from RevokeToken
+	calledRevoke int                               // number of times RevokeToken was invoked
 }
 
-func (m *mockRevokeProvider) ClientsStore() *as.OAuthClientsStore { return m.store }
+func (m *mockRevokeProvider) ClientsStore() *as.OAuthClientsStore {
+	return m.store
+}
+
 func (m *mockRevokeProvider) RevokeToken(client auth.OAuthClientInformationFull, request auth.OAuthTokenRevocationRequest) error {
 	m.calledRevoke++
+	// capture the request for assertions
 	tmp := request
 	m.lastReq = &tmp
 	return m.revokeErr
 }
 
+// The remaining interface methods are no-ops since they are not used in revocation tests
 func (m *mockRevokeProvider) Authorize(client auth.OAuthClientInformationFull, params as.AuthorizationParams, w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
@@ -54,6 +61,7 @@ func (m *mockRevokeProvider) ExchangeRefreshToken(client auth.OAuthClientInforma
 }
 func (m *mockRevokeProvider) VerifyAccessToken(token string) (*as.AuthInfo, error) { return nil, nil }
 
+// makeClientBasic constructs a client using client_secret_basic authentication
 func makeClientBasic(id string) *auth.OAuthClientInformationFull {
 	return &auth.OAuthClientInformationFull{
 		OAuthClientInformation: auth.OAuthClientInformation{
@@ -67,6 +75,7 @@ func makeClientBasic(id string) *auth.OAuthClientInformationFull {
 	}
 }
 
+// makeClientPost constructs a client using client_secret_post authentication
 func makeClientPost(id string) *auth.OAuthClientInformationFull {
 	return &auth.OAuthClientInformationFull{
 		OAuthClientInformation: auth.OAuthClientInformation{
@@ -80,7 +89,7 @@ func makeClientPost(id string) *auth.OAuthClientInformationFull {
 	}
 }
 
-// Basic + x-www-form-urlencoded
+// postFormBasicAuth helper submits a POST form request using HTTP Basic authentication
 func postFormBasicAuth(t *testing.T, h http.Handler, path, clientID, clientSecret string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	if form == nil {
@@ -94,7 +103,7 @@ func postFormBasicAuth(t *testing.T, h http.Handler, path, clientID, clientSecre
 	return rr
 }
 
-// client_secret_post + x-www-form-urlencoded
+// postFormClientSecretPost helper submits a POST form request using client_secret_post authentication
 func postFormClientSecretPost(t *testing.T, h http.Handler, path, clientID, clientSecret string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	if form == nil {
@@ -110,7 +119,6 @@ func postFormClientSecretPost(t *testing.T, h http.Handler, path, clientID, clie
 	return rr
 }
 
-// Prioritize Basic; if it fails, fall back to Post; if all else fails, skip (indicates misalignment of authentication on the environment side)
 func TestRevocation_Success_200(t *testing.T) {
 	mpBasic := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	hBasic := RevocationHandler(RevocationHandlerOptions{Provider: mpBasic})
@@ -142,7 +150,6 @@ func TestRevocation_Success_200(t *testing.T) {
 	assert.Equal(t, "at-123", mpBasic.lastReq.Token)
 }
 
-// Missing token -> 400
 func TestRevocation_MissingToken_400(t *testing.T) {
 	mp := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	h := RevocationHandler(RevocationHandlerOptions{Provider: mp})
@@ -152,7 +159,6 @@ func TestRevocation_MissingToken_400(t *testing.T) {
 	assert.Contains(t, strings.ToLower(rr.Body.String()), "invalid_request")
 }
 
-// Unknown hint should still be 200; if authentication fails, skip
 func TestRevocation_UnsupportedTokenHint_Still200(t *testing.T) {
 	mpBasic := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	hBasic := RevocationHandler(RevocationHandlerOptions{Provider: mpBasic})
@@ -182,7 +188,6 @@ func TestRevocation_UnsupportedTokenHint_Still200(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 }
 
-// GET not allowed -> 405
 func TestRevocation_MethodNotAllowed_405(t *testing.T) {
 	mp := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	h := RevocationHandler(RevocationHandlerOptions{Provider: mp})
@@ -193,7 +198,6 @@ func TestRevocation_MethodNotAllowed_405(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
-// Current limiting: only assert the second 429; the first status is not limited
 func TestRevocation_RateLimit_429(t *testing.T) {
 	mp := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	h := RevocationHandler(RevocationHandlerOptions{
@@ -210,7 +214,6 @@ func TestRevocation_RateLimit_429(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, rr2.Code)
 }
 
-// OPTIONS -> 405 when CORS preflight is not enabled
 func TestRevocation_OPTIONS_405(t *testing.T) {
 	mp := &mockRevokeProvider{store: makeStoreWithClient(makeClientBasic(testClientID))}
 	h := RevocationHandler(RevocationHandlerOptions{Provider: mp})

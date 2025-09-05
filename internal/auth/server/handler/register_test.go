@@ -21,36 +21,52 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 )
 
+// mockDynClientStore is a test double implementation of a dynamic client store
+// It captures inputs, simulates errors, and returns controlled responses for testing
 type mockDynClientStore struct {
-	wantErr        error
-	lastRegistered *auth.OAuthClientInformationFull
-	returnedClient *auth.OAuthClientInformationFull
-	callCount      int
+	wantErr        error                            // optional error to return on RegisterClient
+	lastRegistered *auth.OAuthClientInformationFull // last registered client captured during call
+	returnedClient *auth.OAuthClientInformationFull // client to return instead of echoing input
+	callCount      int                              // number of times RegisterClient was invoked
 }
 
+// RegisterClient mocks the dynamic client registration behavior
 func (m *mockDynClientStore) RegisterClient(in auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
 	m.callCount++
 	// capture input
 	tmp := in
 	m.lastRegistered = &tmp
+
+	// if configured, return a forced error
 	if m.wantErr != nil {
 		return nil, m.wantErr
 	}
+
+	// if configured, return a pre-set client
 	if m.returnedClient != nil {
 		return m.returnedClient, nil
 	}
+
 	// by default echo back
 	return &in, nil
 }
 
+// postJSONBody is a helper that sends an HTTP POST request with a JSON body
 func postJSONBody(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+
 	var buf bytes.Buffer
+
+	// encode request body as JSON if provided
 	if body != nil {
 		require.NoError(t, json.NewEncoder(&buf).Encode(body))
 	}
+
+	// build POST request
 	req := httptest.NewRequest(http.MethodPost, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
+
+	// record the response
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr

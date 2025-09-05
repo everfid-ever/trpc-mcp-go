@@ -14,19 +14,24 @@ import (
 	oauth "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
+// mockClientsStore is a test double for OAuthClientsStoreInterface that lets tests
+// control lookups via a provided function
 type mockClientsStore struct {
 	get func(clientID string) (*auth.OAuthClientInformationFull, error)
 }
 
+// GetClient returns the mocked client info for the given client ID
 func (m *mockClientsStore) GetClient(clientID string) (*auth.OAuthClientInformationFull, error) {
 	return m.get(clientID)
 }
 
+// RegisterClient indicates dynamic client registration is not supported in this mock
 func (m *mockClientsStore) RegisterClient(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
 	return nil, fmt.Errorf("dynamic client registration is not supported")
 }
 
-// helper to perform request through middleware and capture response
+// runClientAuth executes a request through the client-authentication middleware and
+// returns the recorder and whether the next handler was called
 func runClientAuth(t *testing.T, store srv.OAuthClientsStoreInterface, body interface{}, contentType string) (rec *httptest.ResponseRecorder, nextCalled bool) {
 	t.Helper()
 
@@ -70,6 +75,7 @@ func runClientAuth(t *testing.T, store srv.OAuthClientsStoreInterface, body inte
 	return rec, handlerCalled
 }
 
+// decodeOAuthError parses an OAuthErrorResponse from the test recorder body
 func decodeOAuthError(t *testing.T, rec *httptest.ResponseRecorder) *oauth.OAuthErrorResponse {
 	t.Helper()
 	var v oauth.OAuthErrorResponse

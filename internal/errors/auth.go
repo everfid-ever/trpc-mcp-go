@@ -4,40 +4,63 @@ import (
 	"errors"
 )
 
+// OAuthErrorCode represents an OAuth 2.1 error code
 type OAuthErrorCode error
 
-// OAuthError OAuth 2.1草案标准错误响应。
+// OAuthError represents a structured OAuth 2.1 error
 type OAuthError struct {
 	ErrorCode string
 	Message   string
 	ErrorURI  string
 }
 
+// OAuthErrorResponse represents the JSON response for OAuth errors
 type OAuthErrorResponse struct {
 	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description,omitempty"`
 	ErrorURI         string `json:"error_uri,omitempty"`
 }
 
+// Standard OAuth error codes
 var (
-	// OAuth Errors
-	ErrInvalidRequest          OAuthErrorCode = errors.New("invalid request")
-	ErrInvalidClient           OAuthErrorCode = errors.New("invalid client")
-	ErrInvalidGrant            OAuthErrorCode = errors.New("invalid grant")
-	ErrUnauthorizedClient      OAuthErrorCode = errors.New("unauthorized client")
-	ErrUnsupportedGrantType    OAuthErrorCode = errors.New("unsupported grant type")
-	ErrInvalidScope            OAuthErrorCode = errors.New("invalid scope")
-	ErrAccessDenied            OAuthErrorCode = errors.New("access denied")
-	ErrServerError             OAuthErrorCode = errors.New("server error")
-	ErrTemporarilyUnavailable  OAuthErrorCode = errors.New("temporarily unavailable")
-	ErrUnsupportedResponseType OAuthErrorCode = errors.New("unsupported response type")
-	ErrUnsupportedTokenType    OAuthErrorCode = errors.New("unsupported token type")
-	ErrInvalidToken            OAuthErrorCode = errors.New("invalid token")
-	ErrMethodNotAllowed        OAuthErrorCode = errors.New("method not allowed")
-	ErrTooManyRequests         OAuthErrorCode = errors.New("too many requests")
-	ErrInvalidClientMetadata   OAuthErrorCode = errors.New("invalid client metadata")
-	ErrInsufficientScope       OAuthErrorCode = errors.New("insufficient scope")
+	ErrInvalidRequest          OAuthErrorCode = errors.New("invalid_request")
+	ErrInvalidClient           OAuthErrorCode = errors.New("invalid_client")
+	ErrInvalidGrant            OAuthErrorCode = errors.New("invalid_grant")
+	ErrUnauthorizedClient      OAuthErrorCode = errors.New("unauthorized_client")
+	ErrUnsupportedGrantType    OAuthErrorCode = errors.New("unsupported_grant_type")
+	ErrInvalidScope            OAuthErrorCode = errors.New("invalid_scope")
+	ErrAccessDenied            OAuthErrorCode = errors.New("access_denied")
+	ErrServerError             OAuthErrorCode = errors.New("server_error")
+	ErrTemporarilyUnavailable  OAuthErrorCode = errors.New("temporarily_unavailable")
+	ErrUnsupportedResponseType OAuthErrorCode = errors.New("unsupported_response_type")
+	ErrUnsupportedTokenType    OAuthErrorCode = errors.New("unsupported_token_type")
+	ErrInvalidToken            OAuthErrorCode = errors.New("invalid_token")
+	ErrMethodNotAllowed        OAuthErrorCode = errors.New("method_not_allowed")
+	ErrTooManyRequests         OAuthErrorCode = errors.New("too_many_requests")
+	ErrInvalidClientMetadata   OAuthErrorCode = errors.New("invalid_client_metadata")
+	ErrInsufficientScope       OAuthErrorCode = errors.New("insufficient_scope")
 )
+
+// OAuthErrorMapping maps error strings to their corresponding OAuthErrorCode
+// This replaces the need for large switch statements when parsing error responses
+var OAuthErrorMapping = map[string]OAuthErrorCode{
+	"invalid_request":           ErrInvalidRequest,
+	"invalid_client":            ErrInvalidClient,
+	"invalid_grant":             ErrInvalidGrant,
+	"unauthorized_client":       ErrUnauthorizedClient,
+	"unsupported_grant_type":    ErrUnsupportedGrantType,
+	"invalid_scope":             ErrInvalidScope,
+	"access_denied":             ErrAccessDenied,
+	"server_error":              ErrServerError,
+	"temporarily_unavailable":   ErrTemporarilyUnavailable,
+	"unsupported_response_type": ErrUnsupportedResponseType,
+	"unsupported_token_type":    ErrUnsupportedTokenType,
+	"invalid_token":             ErrInvalidToken,
+	"method_not_allowed":        ErrMethodNotAllowed,
+	"too_many_requests":         ErrTooManyRequests,
+	"invalid_client_metadata":   ErrInvalidClientMetadata,
+	"insufficient_scope":        ErrInsufficientScope,
+}
 
 // NewOAuthError creates a new OAuthError
 func NewOAuthError(errCode OAuthErrorCode, message string, uri string) OAuthError {
@@ -53,6 +76,7 @@ func NewOAuthError(errCode OAuthErrorCode, message string, uri string) OAuthErro
 	return err
 }
 
+// ToResponseStruct converts OAuthError into OAuthErrorResponse for JSON encoding
 func (o OAuthError) ToResponseStruct() *OAuthErrorResponse {
 	return &OAuthErrorResponse{
 		Error:            o.ErrorCode,
@@ -61,6 +85,7 @@ func (o OAuthError) ToResponseStruct() *OAuthErrorResponse {
 	}
 }
 
+// Error implements the error interface
 func (o OAuthError) Error() string {
 	return o.ErrorCode
 }

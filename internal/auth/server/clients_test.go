@@ -13,14 +13,14 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 )
 
-// Test errors
+// Test errors used by mocks
 var (
 	ErrClientNotFound       = errors.New("client not found")
 	ErrGetClientFailed      = errors.New("get client failed")
 	ErrRegisterClientFailed = errors.New("register client failed")
 )
 
-// Mock functions for testing
+// mockGetClientSuccess returns a known client for id existing-client or ErrClientNotFound
 func mockGetClientSuccess(clientID string) (*auth.OAuthClientInformationFull, error) {
 	if clientID == "existing-client" {
 		return &auth.OAuthClientInformationFull{
@@ -36,17 +36,19 @@ func mockGetClientSuccess(clientID string) (*auth.OAuthClientInformationFull, er
 	return nil, ErrClientNotFound
 }
 
+// mockGetClientError always returns ErrGetClientFailed
 func mockGetClientError(clientID string) (*auth.OAuthClientInformationFull, error) {
 	return nil, ErrGetClientFailed
 }
 
+// mockRegisterClientSuccess simulates server generating client_id and client_secret
 func mockRegisterClientSuccess(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
-	// Simulate server-generated client ID and secret
 	client.ClientID = "generated-client-id"
 	client.ClientSecret = "generated-secret"
 	return &client, nil
 }
 
+// mockRegisterClientError always returns ErrRegisterClientFailed
 func mockRegisterClientError(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
 	return nil, ErrRegisterClientFailed
 }
@@ -315,7 +317,7 @@ func TestOAuthClientsStore_EdgeCases(t *testing.T) {
 	})
 }
 
-// Helper function
+// stringPtr returns a pointer to s
 func stringPtr(s string) *string {
 	return &s
 }

@@ -1,7 +1,8 @@
 package middleware
 
-// authInfoKeyType 用于在上下文中存储和检索 AuthInfo 的键类型
+// authInfoKeyType is an unexported empty struct used as a context key to prevent collisions with other packages
 type authInfoKeyType struct{}
 
-// AuthInfoKey 是用于存储 AuthInfo 的上下文键
+// AuthInfoKey is the context key for storing and retrieving authentication information on requests
+// Use context.WithValue(ctx, AuthInfoKey, authInfo) to attach and ctx.Value(AuthInfoKey) to read
 var AuthInfoKey = authInfoKeyType{}
