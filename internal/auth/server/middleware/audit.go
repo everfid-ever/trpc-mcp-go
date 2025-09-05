@@ -381,16 +381,25 @@ func extractOAuthInfo(r *http.Request) OAuthInfo {
 		info.Token = strings.TrimPrefix(auth, "Bearer ")
 	}
 
-	// Extract subject and fallback client_id from verified auth info when available
-	if authInfo, ok := GetAuthInfo(r.Context()); ok {
-		info.Subject = extractSubject(authInfo)
-		if len(info.Scopes) == 0 {
+	if authInfo, ok := server.GetAuthInfo(r.Context()); ok {
+		// Extract subject from the Extra claims
+		if authInfo.Extra != nil {
+			if sub, ok := authInfo.Extra["sub"].(string); ok {
+				info.Subject = sub
+			}
+		}
+
+		// Use scopes from authInfo if not already populated
+		if len(info.Scopes) == 0 && len(authInfo.Scopes) > 0 {
 			info.Scopes = authInfo.Scopes
 		}
+
+		// Extract client_id from Extra claims first
 		if cid, ok := authInfo.Extra["client_id"].(string); ok && info.ClientID == "" {
 			info.ClientID = cid
 		}
-		// Fallback to AuthInfo.ClientID if Extra does not contain client_id
+
+		// Fallback to AuthInfo.ClientID field if Extra doesn't contain client_id
 		if info.ClientID == "" && authInfo.ClientID != "" {
 			info.ClientID = authInfo.ClientID
 		}

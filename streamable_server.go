@@ -258,6 +258,14 @@ func withTransportHTTPContextFuncs(funcs []HTTPContextFunc) func(*httpServerHand
 
 // ServeHTTP implements the http.Handler interface
 func (h *httpServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if len(h.httpContextFuncs) > 0 {
+		enriched := r.Context()
+		for _, fn := range h.httpContextFuncs {
+			enriched = fn(enriched, r)
+		}
+		r = r.WithContext(enriched)
+	}
+
 	var core http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !h.isValidPath(r.URL.Path) {
 			if h.serverPath == "" {
