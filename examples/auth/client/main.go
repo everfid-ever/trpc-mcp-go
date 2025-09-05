@@ -13,18 +13,29 @@ import (
 )
 
 const (
-	serverURL           = "http://localhost:3000" // MCP 资源服务器（origin）
+	// Base origin of the MCP resource server
+	serverURL = "http://localhost:3000"
+
+	// Well-known OAuth protected resource metadata endpoint
 	resourceMetadataURL = "http://localhost:3000/.well-known/oauth-protected-resource"
-	redirectURL         = "http://localhost:5173/callback" // 本地回调
-	scope               = "mcp.read mcp.write"
-	callbackListenAddr  = ":5173"                      // 回调监听端口
-	mcpEndpoint         = "http://localhost:3000/mcp/" // MCP 入口
+
+	// Local redirect URI that receives the authorization code
+	redirectURL = "http://localhost:5173/callback"
+
+	// Requested scopes for this demo
+	scope = "mcp.read mcp.write"
+
+	// HTTP listen address for the local callback server
+	callbackListenAddr = ":5173"
+
+	// MCP entry endpoint used by the SDK client
+	mcpEndpoint = "http://localhost:3000/mcp/"
 )
 
 func main() {
 	log.Println("Starting OAuth client...")
 
-	// 配置 AuthFlow
+	// Configure the auth flow used by the MCP SDK
 	authFlow := mcp.AuthFlowConfig{
 		ServerURL: serverURL,
 		ClientMetadata: auth.OAuthClientMetadata{
@@ -43,7 +54,7 @@ func main() {
 		},
 	}
 
-	// 创建 MCP 客户端
+	// Create the MCP client with auth flow enabled
 	client, err := mcp.NewClient(
 		mcpEndpoint,
 		mcp.Implementation{Name: "Auth-Example-Client", Version: "0.1.0"},
@@ -53,12 +64,12 @@ func main() {
 		log.Fatalf("failed to create MCP client: %v", err)
 	}
 
-	// 启动本地回调：拿到 code -> 调用 CompleteAuthFlow
+	// Start the local HTTP callback server to capture the authorization code
 	authDone := make(chan struct{}, 1)
 	cbServer := startCallbackServer(client, authDone)
 	defer shutdownServer(cbServer)
 
-	// 第一次尝试初始化预期会触发授权重定向
+	// First initialize will typically request user authorization
 	log.Println("Initialize #1 (triggering authorization flow) ...")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -67,18 +78,18 @@ func main() {
 		log.Printf("Initialize #1 returned (expected): %v", err)
 	}
 
-	// 等回调完成拿到 token
+	// Wait for the browser redirect to complete the code exchange
 	select {
 	case <-authDone:
-		log.Println("Authorization completed via callback.")
+		log.Println("Authorization completed via callback")
 	case <-time.After(3 * time.Minute):
 		log.Fatal("timeout waiting for OAuth callback")
 	}
 
-	// 给一点时间让token完全生效
+	// Small delay to ensure token persistence
 	time.Sleep(2 * time.Second)
 
-	// 7) 再次初始化此时 TokenStore 已有 token，应成功
+	// Second initialize should succeed using the stored tokens
 	log.Println("Initialize #2 (with valid tokens) ...")
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel2()
@@ -90,7 +101,7 @@ func main() {
 	log.Printf("MCP initialization successful. Server info: %+v", initResp.ServerInfo)
 }
 
-// 回调服务：/callback?code=...
+// startCallbackServer runs an HTTP server that handles /callback and completes the OAuth flow via the SDK
 func startCallbackServer(c *mcp.Client, done chan<- struct{}) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +117,6 @@ func startCallbackServer(c *mcp.Client, done chan<- struct{}) *http.Server {
 		state := r.URL.Query().Get("state")
 		log.Printf("Received callback with code: %s, state: %s", code[:10]+"...", state[:10]+"...")
 
-		// 用 SDK 提供的 CompleteAuthFlow 完成换 token
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 
@@ -117,9 +127,9 @@ func startCallbackServer(c *mcp.Client, done chan<- struct{}) *http.Server {
 		}
 
 		log.Println("Auth flow completed successfully")
-		_, _ = w.Write([]byte("Authorization complete. You can close this tab."))
+		_, _ = w.Write([]byte("Authorization complete!"))
 
-		// 通知主协程
+		// Notify the main goroutine
 		select {
 		case done <- struct{}{}:
 		default:
@@ -143,6 +153,7 @@ func startCallbackServer(c *mcp.Client, done chan<- struct{}) *http.Server {
 	return srv
 }
 
+// shutdownServer gracefully stops the HTTP server within a short timeout
 func shutdownServer(srv *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -151,6 +162,7 @@ func shutdownServer(srv *http.Server) {
 	}
 }
 
+// strPtr returns a pointer to s
 func strPtr(s string) *string {
 	return &s
 }
