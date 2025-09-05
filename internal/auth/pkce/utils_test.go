@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// helper to generate a valid base64url-encoded SHA256 digest (32 bytes decoded)
+// genValidBase64URLDigest generates a valid base64url-encoded SHA256 digest
 func genValidBase64URLDigest(t *testing.T) string {
 	t.Helper()
 	buf := make([]byte, 32)

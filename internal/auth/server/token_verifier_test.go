@@ -21,8 +21,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Test helper functions
-
 // generateRSAKey generates a new RSA key pair for testing
 func generateRSAKey() (*rsa.PrivateKey, error) {
 	return rsa.GenerateKey(rand.Reader, 2048)
@@ -101,7 +99,7 @@ func createTestJWKS(keys ...jwk.Key) string {
 	return string(buf)
 }
 
-// Test fixtures
+// setupTestKeys generates a test RSA private key, corresponding JWK, and JWKS JSON
 func setupTestKeys(t *testing.T) (*rsa.PrivateKey, jwk.Key, string) {
 	privateKey, err := generateRSAKey()
 	require.NoError(t, err)
@@ -117,7 +115,7 @@ func setupTestKeys(t *testing.T) (*rsa.PrivateKey, jwk.Key, string) {
 func TestTokenVerifierFunc_VerifyAccessToken(t *testing.T) {
 	ctx := context.Background()
 
-	// 定义一个假的 verifier 函数
+	// Define a fake verifier function
 	fn := TokenVerifierFunc(func(ctx context.Context, token string) (AuthInfo, error) {
 		if token == "valid" {
 			return AuthInfo{Token: token, ClientID: "test-client"}, nil
@@ -125,19 +123,17 @@ func TestTokenVerifierFunc_VerifyAccessToken(t *testing.T) {
 		return AuthInfo{}, errors.New("invalid token")
 	})
 
-	// 成功路径
+	// Success path
 	authInfo, err := fn.VerifyAccessToken(ctx, "valid")
 	assert.NoError(t, err)
 	assert.Equal(t, "valid", authInfo.Token)
 	assert.Equal(t, "test-client", authInfo.ClientID)
 
-	// 失败路径
+	// Failure path
 	authInfo, err = fn.VerifyAccessToken(ctx, "invalid")
 	assert.Error(t, err)
 	assert.Empty(t, authInfo.Token)
 }
-
-// Tests for NewLocalTokenVerifier
 
 func TestNewLocalTokenVerifier_WithJWKSString(t *testing.T) {
 	ctx := context.Background()
@@ -232,8 +228,6 @@ func TestNewLocalTokenVerifier_InvalidJWKS(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to parse local JWKS")
 }
 
-// Tests for NewRemoteTokenVerifier
-
 func TestNewRemoteTokenVerifier_Success(t *testing.T) {
 	ctx := context.Background()
 	_, _, jwksJSON := setupTestKeys(t)
@@ -290,8 +284,6 @@ func TestNewRemoteTokenVerifier_DefaultRefreshInterval(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, verifier)
 }
-
-// Tests for NewTokenVerifier
 
 func TestNewTokenVerifier_LocalOnly(t *testing.T) {
 	ctx := context.Background()
@@ -369,8 +361,6 @@ func TestNewTokenVerifier_EmptyConfig(t *testing.T) {
 	assert.Nil(t, verifier)
 	assert.Contains(t, err.Error(), "must provide either Local or Remote configuration")
 }
-
-// Tests for VerifyAccessToken
 
 func TestVerifyAccessToken_LocalSuccess(t *testing.T) {
 	ctx := context.Background()
@@ -505,8 +495,6 @@ func TestVerifyAccessToken_NoMatchingKey(t *testing.T) {
 	assert.Empty(t, authInfo)
 }
 
-// Tests for extractScopes
-
 func TestExtractScopes_StringFormat(t *testing.T) {
 	token := jwt.New()
 	token.Set("scope", "read write admin")
@@ -581,8 +569,6 @@ func TestExtractResource_MissingAudience(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, resource)
 }
-
-// Tests for extractExtra
 
 func TestExtractExtra_WithCustomClaims(t *testing.T) {
 	token := jwt.New()
@@ -703,8 +689,6 @@ func TestAddIssuerURL_NonHTTPS(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "JWKS URL must use HTTPS")
 }
-
-// Tests for ClearLocalKeys
 
 func TestClearLocalKeys(t *testing.T) {
 	ctx := context.Background()

@@ -24,7 +24,7 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
-// Helper function to send POST requests with form data and Basic Auth
+// postFormWithBasicAuth sends a POST request with x-www-form-urlencoded body and HTTP Basic auth
 func postFormWithBasicAuth(t *testing.T, h http.Handler, path string, form url.Values, clientID, clientSecret string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
@@ -36,7 +36,7 @@ func postFormWithBasicAuth(t *testing.T, h http.Handler, path string, form url.V
 	return rr
 }
 
-// Helper function to send POST requests with form data
+// postForm sends a POST request with x-www-form-urlencoded body (no client auth)
 func postForm(t *testing.T, h http.Handler, path string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
@@ -46,7 +46,7 @@ func postForm(t *testing.T, h http.Handler, path string, form url.Values) *httpt
 	return rr
 }
 
-// Helper function to send requests with Origin header for CORS testing
+// postFormWithOrigin sends a POST request with x-www-form-urlencoded body, Basic auth, and Origin header for CORS tests
 func postFormWithOrigin(t *testing.T, h http.Handler, path string, form url.Values, clientID, clientSecret, origin string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
@@ -59,11 +59,12 @@ func postFormWithOrigin(t *testing.T, h http.Handler, path string, form url.Valu
 	return rr
 }
 
-// Enhanced Mock OAuth Clients Store implementation
+// enhancedMockOAuthClientsStore is a simple in-memory clients store used in tests
 type enhancedMockOAuthClientsStore struct {
-	clients map[string]*auth.OAuthClientInformationFull
+	clients map[string]*auth.OAuthClientInformationFull // client_id -> client record
 }
 
+// GetClient returns the client by id or an error if not found.
 func (m *enhancedMockOAuthClientsStore) GetClient(clientID string) (*auth.OAuthClientInformationFull, error) {
 	client, exists := m.clients[clientID]
 	if !exists {
@@ -72,31 +73,36 @@ func (m *enhancedMockOAuthClientsStore) GetClient(clientID string) (*auth.OAuthC
 	return client, nil
 }
 
-// Enhanced Mock OAuth Server Provider implementation
+// enhancedMockOAuthServerProvider simulates an OAuth server provider with toggles for different paths
 type enhancedMockOAuthServerProvider struct {
-	clientStore               *enhancedMockOAuthClientsStore
-	skipLocalPkceValidation   bool
-	shouldReturnIdToken       bool
-	shouldFailCodeChallenge   bool
-	shouldFailCodeExchange    bool
-	shouldFailRefreshExchange bool
-	supportedScopes           []string
+	clientStore               *enhancedMockOAuthClientsStore // backing store for clients
+	skipLocalPkceValidation   bool                           // when true, PKCE is not validated locally
+	shouldReturnIdToken       bool                           // when true, adds id_token to token response
+	shouldFailCodeChallenge   bool                           // when true, ChallengeForAuthorizationCode fails
+	shouldFailCodeExchange    bool                           // when true, ExchangeAuthorizationCode fails with invalid_grant
+	shouldFailRefreshExchange bool                           // when true, ExchangeRefreshToken fails with invalid_grant
+	supportedScopes           []string                       // list of supported scopes (for tests that depend on scope echo)
 }
 
+// GetSkipLocalPkceValidation exposes whether local PKCE verification should be skipped
 func (m *enhancedMockOAuthServerProvider) GetSkipLocalPkceValidation() bool {
 	return m.skipLocalPkceValidation
 }
 
+// ClientsStore returns a thin adapter around the in-memory store to satisfy the interface
 func (m *enhancedMockOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
 	return server.NewOAuthClientStore(m.clientStore.GetClient)
 }
 
+// Authorize simulates authorization success by redirecting with code and echoing state
 func (m *enhancedMockOAuthServerProvider) Authorize(client auth.OAuthClientInformationFull, params server.AuthorizationParams, res http.ResponseWriter, req *http.Request) error {
+	// Compose a 302 redirect with code + state
 	res.Header().Set("Location", "https://redirect-uri.com?code=valid-code&state="+params.State)
 	res.WriteHeader(http.StatusFound)
 	return nil
 }
 
+// ChallengeForAuthorizationCode returns a fixed S256 challenge for "valid-code" and errors otherwise
 func (m *enhancedMockOAuthServerProvider) ChallengeForAuthorizationCode(
 	client auth.OAuthClientInformationFull,
 	authorizationCode string,
@@ -106,7 +112,7 @@ func (m *enhancedMockOAuthServerProvider) ChallengeForAuthorizationCode(
 	}
 	switch authorizationCode {
 	case "valid-code":
-		// Returns an S256 challenge that matches code_verifier="valid-verifier"
+		// Matches code_verifier = "valid-verifier"
 		return "A_DCKa0ei4rJGhNfKEbwNpiuHzQP7skGQPZ4CBTkJdQ", nil
 	case "expired-code":
 		return "", fmt.Errorf("authorization code has expired")
@@ -117,6 +123,7 @@ func (m *enhancedMockOAuthServerProvider) ChallengeForAuthorizationCode(
 	}
 }
 
+// ExchangeAuthorizationCode returns mock tokens for "valid-code" and errors for others
 func (m *enhancedMockOAuthServerProvider) ExchangeAuthorizationCode(
 	client auth.OAuthClientInformationFull,
 	authorizationCode string,
@@ -124,6 +131,7 @@ func (m *enhancedMockOAuthServerProvider) ExchangeAuthorizationCode(
 	redirectUri *string,
 	resource *url.URL,
 ) (*auth.OAuthTokens, error) {
+	// Simulate upstream failure toggle
 	if m.shouldFailCodeExchange {
 		return nil, errors.ErrInvalidGrant
 	}
@@ -139,6 +147,7 @@ func (m *enhancedMockOAuthServerProvider) ExchangeAuthorizationCode(
 			ExpiresIn:    &expiresIn,
 			RefreshToken: &refreshToken,
 		}
+		// Optionally attach an ID token for OIDC scenarios
 		if m.shouldReturnIdToken {
 			idToken := "mock-id-token"
 			tokens.IDToken = &idToken
@@ -153,6 +162,7 @@ func (m *enhancedMockOAuthServerProvider) ExchangeAuthorizationCode(
 	}
 }
 
+// ExchangeRefreshToken returns a new access/refresh token pair for a valid refresh token
 func (m *enhancedMockOAuthServerProvider) ExchangeRefreshToken(
 	client auth.OAuthClientInformationFull,
 	refreshToken string,
@@ -186,6 +196,7 @@ func (m *enhancedMockOAuthServerProvider) ExchangeRefreshToken(
 	}
 }
 
+// VerifyAccessToken returns a stubbed AuthInfo when token == "valid-token"
 func (m *enhancedMockOAuthServerProvider) VerifyAccessToken(token string) (*server.AuthInfo, error) {
 	if token == "valid-token" {
 		return &server.AuthInfo{
@@ -196,11 +207,12 @@ func (m *enhancedMockOAuthServerProvider) VerifyAccessToken(token string) (*serv
 	return nil, fmt.Errorf("invalid token")
 }
 
+// RevokeToken is a no-op in this mock; revocation success is implied
 func (m *enhancedMockOAuthServerProvider) RevokeToken(client auth.OAuthClientInformationFull, request auth.OAuthTokenRevocationRequest) error {
 	return nil
 }
 
-// Create mock client
+// createMockClient builds a confidential client (client_secret_basic) with a fixed secret
 func createMockClient(id string) *auth.OAuthClientInformationFull {
 	return &auth.OAuthClientInformationFull{
 		OAuthClientInformation: auth.OAuthClientInformation{
@@ -214,7 +226,7 @@ func createMockClient(id string) *auth.OAuthClientInformationFull {
 	}
 }
 
-// Create enhanced mock provider
+// createEnhancedMockProvider wires the in-memory clients store and returns a preconfigured provider
 func createEnhancedMockProvider() *enhancedMockOAuthServerProvider {
 	clients := make(map[string]*auth.OAuthClientInformationFull)
 	clients["valid-client"] = createMockClient("valid-client")
@@ -226,7 +238,6 @@ func createEnhancedMockProvider() *enhancedMockOAuthServerProvider {
 	}
 }
 
-// Test Basic Request Validation
 func TestToken_RequiresPostMethod(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -280,7 +291,6 @@ func TestToken_RejectsUnsupportedGrantTypes(t *testing.T) {
 	assert.Equal(t, "The grant type is not supported by this authorization server.", errResp["error_description"])
 }
 
-// Test Client Authentication
 func TestToken_RequiresValidClientCredentials_CurrentBehavior(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -322,7 +332,6 @@ func TestToken_AcceptsValidClientCredentials(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
 
-// Test Authorization Code Grant
 func TestToken_AuthorizationCode_RequiresCodeParameter(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -481,7 +490,6 @@ func TestToken_AuthorizationCode_ReturnsIdTokenWhenProvided(t *testing.T) {
 	assert.Equal(t, "mock-id-token", tokens["id_token"])
 }
 
-// Test Refresh Token Grant
 func TestToken_RefreshToken_RequiresRefreshTokenParameter(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -569,7 +577,6 @@ func TestToken_RefreshToken_RespectsRequestedScopes(t *testing.T) {
 	assert.Equal(t, "profile email", tokens["scope"])
 }
 
-// Test CORS Support
 func TestToken_IncludesCORSHeaders(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -591,7 +598,6 @@ func TestToken_IncludesCORSHeaders(t *testing.T) {
 	assert.Contains(t, rr.Header().Get("Access-Control-Allow-Origin"), "*")
 }
 
-// Test Rate Limiting
 func TestToken_RateLimiting(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -614,7 +620,6 @@ func TestToken_RateLimiting(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, rr2.Code)
 }
 
-// Test Response Headers
 func TestToken_SetsCacheControlHeaders(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -634,7 +639,6 @@ func TestToken_SetsCacheControlHeaders(t *testing.T) {
 	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
 }
 
-// Test OPTIONS method (should be rejected)
 func TestToken_RejectsOPTIONSMethod(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -649,7 +653,6 @@ func TestToken_RejectsOPTIONSMethod(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
-// Test Resource Parameter Validation
 func TestToken_ValidatesResourceParameter(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	handler := TokenHandler(TokenHandlerOptions{
@@ -673,7 +676,6 @@ func TestToken_ValidatesResourceParameter(t *testing.T) {
 	assert.Contains(t, errResp["error_description"], "resource")
 }
 
-// Test Skip Local PKCE Validation
 func TestToken_SkipLocalPKCEValidation(t *testing.T) {
 	provider := createEnhancedMockProvider()
 	provider.skipLocalPkceValidation = true

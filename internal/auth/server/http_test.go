@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAuthInfoFields tests the access of the AuthInfo field normally
 func TestAuthInfoFields(t *testing.T) {
 	// Setting authInfo data
 	token := "mock-token"
@@ -37,7 +36,6 @@ func TestAuthInfoFields(t *testing.T) {
 	assert.Equal(t, extra, authInfo.Extra)
 }
 
-// TestAuthInfoWithNilExpiresAt tests the behavior when ExpiresAt is nil
 func TestAuthInfoWithNilExpiresAt(t *testing.T) {
 	authInfo := &AuthInfo{
 		Token:     "mock-token",
@@ -50,7 +48,6 @@ func TestAuthInfoWithNilExpiresAt(t *testing.T) {
 	assert.Nil(t, authInfo.ExpiresAt)
 }
 
-// TestAuthInfoResourceValidation tests whether Resource is processed correctly
 func TestAuthInfoResourceValidation(t *testing.T) {
 	validURL, err := url.Parse("https://example.com/resource")
 	require.NoError(t, err)
@@ -72,7 +69,6 @@ func TestAuthInfoResourceValidation(t *testing.T) {
 	assert.Equal(t, invalidURL.String(), authInfo.Resource.String())
 }
 
-// TestAuthInfoExtraData tests access to Extra data
 func TestAuthInfoExtraData(t *testing.T) {
 	extraData := map[string]interface{}{"key1": "value1", "key2": 1234}
 

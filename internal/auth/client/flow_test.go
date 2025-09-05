@@ -12,7 +12,7 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 )
 
-// Mock implementation with all required methods
+// mockOAuthClientProvider provides a test double implementing the OAuth client provider interfaces
 type mockOAuthClientProvider struct {
 	clientInfo    *auth.OAuthClientInformation
 	tokens        *auth.OAuthTokens
@@ -27,44 +27,54 @@ type mockOAuthClientProvider struct {
 	stateErr      error
 }
 
+// ClientInformation returns the current OAuth client credentials used by the client
 func (m *mockOAuthClientProvider) ClientInformation() *auth.OAuthClientInformation {
 	return m.clientInfo
 }
 
+// Tokens returns the currently stored OAuth tokens
 func (m *mockOAuthClientProvider) Tokens() (*auth.OAuthTokens, error) {
 	return m.tokens, nil
 }
 
+// SaveTokens persists newly issued OAuth tokens
 func (m *mockOAuthClientProvider) SaveTokens(tokens auth.OAuthTokens) error {
 	m.tokens = &tokens
 	return m.saveTokensErr
 }
 
+// SaveCodeVerifier persists the PKCE code verifier for later token exchange
 func (m *mockOAuthClientProvider) SaveCodeVerifier(verifier string) error {
 	m.codeVerifier = verifier
 	return m.saveCodeErr
 }
 
+// CodeVerifier returns the stored PKCE code verifier
 func (m *mockOAuthClientProvider) CodeVerifier() (string, error) {
 	return m.codeVerifier, nil
 }
 
+// RedirectURL returns the client redirect URL registered with the authorization server
 func (m *mockOAuthClientProvider) RedirectURL() string {
 	return m.redirectURL
 }
 
+// ClientMetadata returns the OAuth client metadata used for dynamic registration
 func (m *mockOAuthClientProvider) ClientMetadata() auth.OAuthClientMetadata {
 	return m.clientMeta
 }
 
+// RedirectToAuthorization performs a redirect to the authorization URL in real implementations
 func (m *mockOAuthClientProvider) RedirectToAuthorization(authURL *url.URL) error {
 	return m.redirectErr
 }
 
+// InvalidateCredentials invalidates cached credentials according to the provided scope
 func (m *mockOAuthClientProvider) InvalidateCredentials(scope string) error {
 	return m.invalidateErr
 }
 
+// SaveClientInformation persists full client information returned by dynamic registration
 func (m *mockOAuthClientProvider) SaveClientInformation(info auth.OAuthClientInformationFull) error {
 	m.clientInfo = &auth.OAuthClientInformation{
 		ClientID:     info.ClientID,
@@ -73,19 +83,21 @@ func (m *mockOAuthClientProvider) SaveClientInformation(info auth.OAuthClientInf
 	return nil
 }
 
+// AddClientAuthentication attaches client authentication to token requests
 func (m *mockOAuthClientProvider) AddClientAuthentication(headers http.Header, params url.Values, serverUrl string) error {
 	return nil
 }
 
+// State returns a CSRF protection state value for authorization requests
 func (m *mockOAuthClientProvider) State() (string, error) {
 	return m.stateValue, m.stateErr
 }
 
+// ValidateResourceURL validates or adjusts the default resource URL using optional metadata
 func (m *mockOAuthClientProvider) ValidateResourceURL(defaultResource *url.URL, metadata *auth.OAuthProtectedResourceMetadata) (*url.URL, error) {
 	return defaultResource, nil
 }
 
-// Test selectClientAuthMethod
 func TestSelectClientAuthMethod(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -131,7 +143,6 @@ func TestSelectClientAuthMethod(t *testing.T) {
 	}
 }
 
-// Test applyClientAuthentication
 func TestApplyClientAuthentication(t *testing.T) {
 	clientInfo := auth.OAuthClientInformation{
 		ClientID:     "test-client",
@@ -171,7 +182,6 @@ func TestApplyClientAuthentication(t *testing.T) {
 	})
 }
 
-// Test parseErrorResponse
 func TestParseErrorResponse(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -219,7 +229,6 @@ func TestParseErrorResponse(t *testing.T) {
 	}
 }
 
-// Test buildDiscoveryUrls
 func TestBuildDiscoveryUrls(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -266,7 +275,6 @@ func TestBuildDiscoveryUrls(t *testing.T) {
 	}
 }
 
-// Test startAuthorization
 func TestStartAuthorization(t *testing.T) {
 	metadata := &auth.OAuthMetadata{
 		Issuer:                        "https://auth.example.com",
@@ -307,7 +315,6 @@ func TestStartAuthorization(t *testing.T) {
 	}
 }
 
-// Test DiscoverAuthorizationServerMetadata
 func TestDiscoverAuthorizationServerMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metadata := auth.OAuthMetadata{
@@ -332,7 +339,6 @@ func TestDiscoverAuthorizationServerMetadata(t *testing.T) {
 	}
 }
 
-// Test Auth function with existing tokens
 func TestAuthWithExistingTokens(t *testing.T) {
 	provider := &mockOAuthClientProvider{
 		clientInfo: &auth.OAuthClientInformation{
@@ -407,7 +413,6 @@ func TestAuthWithExistingTokens(t *testing.T) {
 	}
 }
 
-// Test RegisterClient
 func TestRegisterClient(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -450,7 +455,6 @@ func TestRegisterClient(t *testing.T) {
 	}
 }
 
-// Test error scenarios - using mock server instead of hardcoded domain
 func TestAuthWithoutClientInfo(t *testing.T) {
 	provider := &mockOAuthClientProvider{
 		clientInfo:  nil, // No existing client info
@@ -460,7 +464,7 @@ func TestAuthWithoutClientInfo(t *testing.T) {
 		},
 	}
 
-	// 方案1: 使用变量捕获服务器URL
+	// Capture the server URL using a variable
 	var serverURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -522,7 +526,6 @@ func TestAuthWithoutClientInfo(t *testing.T) {
 	}
 }
 
-// Test Auth function without refresh token (should redirect)
 func TestAuthWithoutRefreshToken(t *testing.T) {
 	provider := &mockOAuthClientProvider{
 		clientInfo: &auth.OAuthClientInformation{
@@ -580,7 +583,6 @@ func TestAuthWithoutRefreshToken(t *testing.T) {
 	}
 }
 
-// Benchmark tests
 func BenchmarkSelectClientAuthMethod(b *testing.B) {
 	clientInfo := auth.OAuthClientInformation{
 		ClientID:     "test-client",
