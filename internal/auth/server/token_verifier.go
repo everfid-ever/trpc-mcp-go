@@ -2,16 +2,22 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lestrrat-go/httprc/v3"
 	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 
 	"github.com/lestrrat-go/jwx/v3/jwk"
+	"github.com/lestrrat-go/jwx/v3/jws"
 	"github.com/lestrrat-go/jwx/v3/jwt"
 )
 
@@ -40,8 +46,37 @@ type RemoteJWKSConfig struct {
 
 // TokenVerifierConfig TokenVerifier 的配置
 type TokenVerifierConfig struct {
-	Local  *LocalJWKSConfig  // 本地 JWKS 配置
-	Remote *RemoteJWKSConfig // 远程 JWKS 配置
+	Local         *LocalJWKSConfig     // 本地 JWKS 配置
+	Remote        *RemoteJWKSConfig    // 远程 JWKS 配置
+	Introspection *IntrospectionConfig // 远程 introspection 配置（RFC7662）
+}
+
+// IntrospectionCredentials introspection 客户端凭据
+type IntrospectionCredentials struct {
+	ClientID     string
+	ClientSecret string
+}
+
+// IntrospectionConfig 远程 introspection 配置
+type IntrospectionConfig struct {
+	// 默认 introspection 端点（可选）。当找不到与 issuer 绑定的端点时使用。
+	Endpoint string
+	// 根据 issuer 选择不同端点（多租户）。
+	IssuerToEndpoint map[string]string
+
+	// 默认凭据以及每个 issuer 的凭据（可选）。
+	DefaultCredentials *IntrospectionCredentials
+	IssuerCredentials  map[string]IntrospectionCredentials
+
+	// HTTP 超时
+	Timeout time.Duration
+
+	// 缓存 TTL（正向）与负缓存 TTL（inactive 或 4xx/401 等）。
+	CacheTTL         time.Duration
+	NegativeCacheTTL time.Duration
+
+	// 当 JWT 验签失败时是否回退到 introspection。
+	UseOnJWTFail bool
 }
 
 // TokenVerifier 结构体
@@ -50,6 +85,21 @@ type TokenVerifier struct {
 	cache       *jwk.Cache        // 远程模式缓存
 	issuerToURL map[string]string // iss 到远程 URL 的映射
 	isRemote    bool              // 是否使用远程模式
+
+	// RFC7662 introspection
+	introspectionEnabled   bool
+	httpClient             *http.Client
+	defaultIntrospectEP    string
+	issuerToIntrospectEP   map[string]string
+	defaultCreds           *IntrospectionCredentials
+	issuerCreds            map[string]IntrospectionCredentials
+	useIntrospectionOnFail bool
+
+	// 简单内存缓存
+	introspectCache   map[string]introspectionCacheEntry
+	introspectCacheMu sync.RWMutex
+	cacheTTL          time.Duration
+	negativeCacheTTL  time.Duration
 }
 
 type TokenVerifierFunc func(ctx context.Context, token string) (AuthInfo, error)
@@ -119,9 +169,18 @@ func NewRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVe
 	}
 
 	return &TokenVerifier{
-		cache:       cache,
-		issuerToURL: cfg.IssuerToURL,
-		isRemote:    true,
+		cache: cache,
+		issuerToURL: func() map[string]string {
+			if cfg.IssuerToURL == nil {
+				return nil
+			}
+			m := make(map[string]string, len(cfg.IssuerToURL))
+			for k, v := range cfg.IssuerToURL {
+				m[k] = v
+			}
+			return m
+		}(),
+		isRemote: true,
 	}, nil
 }
 
@@ -154,15 +213,60 @@ func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerif
 		return nil, errors.New("must provide either Local or Remote configuration")
 	}
 
+	// 初始化 introspection（可选）
+	if cfg.Introspection != nil {
+		to := cfg.Introspection.Timeout
+		if to <= 0 {
+			to = 5 * time.Second
+		}
+		verifier.httpClient = &http.Client{Timeout: to}
+		verifier.defaultIntrospectEP = cfg.Introspection.Endpoint
+		// 复制 IssuerToEndpoint，防止外部后续修改
+		if cfg.Introspection.IssuerToEndpoint != nil {
+			verifier.issuerToIntrospectEP = make(map[string]string, len(cfg.Introspection.IssuerToEndpoint))
+			for k, v := range cfg.Introspection.IssuerToEndpoint {
+				verifier.issuerToIntrospectEP[k] = v
+			}
+		}
+		// 复制 DefaultCredentials
+		if cfg.Introspection.DefaultCredentials != nil {
+			dc := *cfg.Introspection.DefaultCredentials
+			verifier.defaultCreds = &dc
+		}
+		// 复制 IssuerCredentials
+		if cfg.Introspection.IssuerCredentials != nil {
+			verifier.issuerCreds = make(map[string]IntrospectionCredentials, len(cfg.Introspection.IssuerCredentials))
+			for k, v := range cfg.Introspection.IssuerCredentials {
+				verifier.issuerCreds[k] = v
+			}
+		}
+		verifier.useIntrospectionOnFail = cfg.Introspection.UseOnJWTFail
+		verifier.cacheTTL = cfg.Introspection.CacheTTL
+		if verifier.cacheTTL <= 0 {
+			verifier.cacheTTL = 60 * time.Second
+		}
+		verifier.negativeCacheTTL = cfg.Introspection.NegativeCacheTTL
+		if verifier.negativeCacheTTL <= 0 {
+			verifier.negativeCacheTTL = 15 * time.Second
+		}
+		verifier.introspectionEnabled = true
+		verifier.introspectCache = make(map[string]introspectionCacheEntry)
+	}
+
 	return verifier, nil
 }
 
 // VerifyAccessToken 验证 JWT token，返回解析后的 token 或错误
 func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) (AuthInfo, error) {
-	// 先解析 token（不验证签名）以获取 iss
+	// 先解析 token（不验证签名）以获取 iss；若失败且启用 introspection，则直接尝试 introspection（支持 opaque token）。
 	unverifiedToken, err := jwt.ParseInsecure([]byte(tokenStr))
 	if err != nil {
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrServerError, fmt.Sprintf("failed to parse token: %v", err.Error()), "")
+		if v.introspectionEnabled {
+			if ai, ierr := v.introspectAccessToken(ctx, tokenStr, ""); ierr == nil {
+				return ai, nil
+			}
+		}
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to verify token", "")
 	}
 
 	// 获取 iss
@@ -171,10 +275,16 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get iss from token", "")
 	}
 
-	// 获取 kid
-	var kid string
-	if err := unverifiedToken.Get("kid", &kid); err != nil {
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get kid from token", "")
+	// 从 JWS Header 中获取 kid
+	kid, err := extractKIDFromHeader(tokenStr)
+	if err != nil || kid == "" {
+		// 尝试 introspection 回退
+		if v.introspectionEnabled && v.useIntrospectionOnFail {
+			if ai, ierr := v.introspectAccessToken(ctx, tokenStr, iss); ierr == nil {
+				return ai, nil
+			}
+		}
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get kid from token header", "")
 	}
 
 	// 尝试获取目标 keySet
@@ -192,12 +302,15 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 		jwt.WithRequiredClaim("exp"),
 		jwt.WithRequiredClaim("aud"),
 		jwt.WithRequiredClaim("sub"),
-		jwt.WithRequiredClaim("client_id"),
 		jwt.WithRequiredClaim("iat"),
-		jwt.WithRequiredClaim("jti"),
-		jwt.WithRequiredClaim("scope"),
 	)
 	if err != nil || token == nil {
+		// JWT 验签失败，策略化回退到 introspection（若启用）
+		if v.introspectionEnabled && v.useIntrospectionOnFail {
+			if ai, ierr := v.introspectAccessToken(ctx, tokenStr, iss); ierr == nil {
+				return ai, nil
+			}
+		}
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to verify token", "")
 	}
 
@@ -228,12 +341,278 @@ func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (j
 			if err != nil {
 				return nil, fmt.Errorf("failed to lookup remote JWKS for issuer %s: %w", iss, err)
 			}
+			// 若 kid 未命中，则触发一次性强制刷新并重试（应对密钥轮换）
+			if _, ok := keySet.LookupKeyID(kid); !ok {
+				if refreshed, ferr := jwk.Fetch(ctx, url_); ferr == nil {
+					if _, ok2 := refreshed.LookupKeyID(kid); ok2 {
+						return refreshed, nil
+					}
+				}
+			}
 			return keySet, nil
 		}
 		return nil, fmt.Errorf("no remote JWKS URL found for issuer %s", iss)
 	}
 
 	return nil, fmt.Errorf("no JWKS found for issuer %s", iss)
+}
+
+// ---- RFC7662 introspection 实现 ----
+
+type introspectionCacheEntry struct {
+	authInfo  AuthInfo
+	inactive  bool
+	expiresAt time.Time
+}
+
+func (v *TokenVerifier) resolveIntrospectionEndpoint(issuer string) (string, *IntrospectionCredentials) {
+	ep := ""
+	if issuer != "" && v.issuerToIntrospectEP != nil {
+		if e, ok := v.issuerToIntrospectEP[issuer]; ok {
+			ep = e
+		}
+	}
+	if ep == "" {
+		ep = v.defaultIntrospectEP
+	}
+	var creds *IntrospectionCredentials
+	if issuer != "" && v.issuerCreds != nil {
+		if c, ok := v.issuerCreds[issuer]; ok {
+			cc := c
+			creds = &cc
+		}
+	}
+	if creds == nil {
+		creds = v.defaultCreds
+	}
+	return ep, creds
+}
+
+func (v *TokenVerifier) introspectionCacheKey(endpoint, token string) string {
+	return endpoint + "|" + token
+}
+
+func (v *TokenVerifier) loadFromIntrospectionCache(key string) (introspectionCacheEntry, bool) {
+	v.introspectCacheMu.RLock()
+	defer v.introspectCacheMu.RUnlock()
+	entry, ok := v.introspectCache[key]
+	if !ok {
+		return introspectionCacheEntry{}, false
+	}
+	if time.Now().After(entry.expiresAt) {
+		return introspectionCacheEntry{}, false
+	}
+	return entry, true
+}
+
+func (v *TokenVerifier) storeToIntrospectionCache(key string, entry introspectionCacheEntry) {
+	v.introspectCacheMu.Lock()
+	v.introspectCache[key] = entry
+	v.introspectCacheMu.Unlock()
+}
+
+func (v *TokenVerifier) introspectAccessToken(ctx context.Context, tokenStr, issuer string) (AuthInfo, error) {
+	if !v.introspectionEnabled {
+		return AuthInfo{}, errors.New("introspection not enabled")
+	}
+	endpoint, creds := v.resolveIntrospectionEndpoint(issuer)
+	if endpoint == "" {
+		return AuthInfo{}, errors.New("no introspection endpoint configured")
+	}
+
+	key := v.introspectionCacheKey(endpoint, tokenStr)
+	if entry, ok := v.loadFromIntrospectionCache(key); ok {
+		if entry.inactive {
+			return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "inactive token", "")
+		}
+		return entry.authInfo, nil
+	}
+
+	form := url.Values{}
+	form.Set("token", tokenStr)
+	form.Set("token_type_hint", "access_token")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return AuthInfo{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if creds != nil && creds.ClientID != "" {
+		basic := creds.ClientID + ":" + creds.ClientSecret
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(basic)))
+	}
+
+	resp, err := v.httpClient.Do(req)
+	if err != nil {
+		return AuthInfo{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		v.storeToIntrospectionCache(key, introspectionCacheEntry{inactive: true, expiresAt: time.Now().Add(v.negativeCacheTTL)})
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "introspection request failed", "")
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return AuthInfo{}, err
+	}
+	active, _ := payload["active"].(bool)
+	if !active {
+		v.storeToIntrospectionCache(key, introspectionCacheEntry{inactive: true, expiresAt: time.Now().Add(v.negativeCacheTTL)})
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "inactive token", "")
+	}
+
+	ai, err := v.convertIntrospectionToAuthInfo(payload, tokenStr)
+	if err != nil {
+		return AuthInfo{}, err
+	}
+
+	ttl := v.cacheTTL
+	if expV, ok := payload["exp"]; ok {
+		switch t := expV.(type) {
+		case float64:
+			expTs := time.Unix(int64(t), 0)
+			if expTs.After(time.Now()) {
+				rem := time.Until(expTs)
+				if rem < ttl {
+					ttl = rem
+				}
+			}
+		case json.Number:
+			if v, err2 := t.Int64(); err2 == nil {
+				expTs := time.Unix(v, 0)
+				if expTs.After(time.Now()) {
+					rem := time.Until(expTs)
+					if rem < ttl {
+						ttl = rem
+					}
+				}
+			}
+		}
+	}
+	v.storeToIntrospectionCache(key, introspectionCacheEntry{authInfo: ai, expiresAt: time.Now().Add(ttl)})
+	return ai, nil
+}
+
+func (v *TokenVerifier) convertIntrospectionToAuthInfo(payload map[string]interface{}, tokenStr string) (AuthInfo, error) {
+	var ai AuthInfo
+	ai.Token = tokenStr
+	if cid, _ := payload["client_id"].(string); cid != "" {
+		ai.ClientID = cid
+	}
+	if sc, ok := payload["scope"]; ok {
+		ai.Scopes = parseScopesFromRaw(sc)
+	}
+	switch exp := payload["exp"].(type) {
+	case float64:
+		ts := int64(exp)
+		ai.ExpiresAt = &ts
+	case json.Number:
+		if v, err := exp.Int64(); err == nil {
+			ai.ExpiresAt = &v
+		}
+	}
+	if r, err := extractResourceFromIntrospection(payload["aud"]); err == nil {
+		ai.Resource = r
+	}
+
+	extra := make(map[string]interface{})
+	for k, v := range payload {
+		if standardClaims[k] {
+			continue
+		}
+		switch k {
+		case "active", "username", "token_type", "token_type_hint":
+			continue
+		case "client_id", "scope", "exp", "aud", "iss", "sub", "iat", "jti":
+			continue
+		default:
+			extra[k] = v
+		}
+	}
+	if len(extra) > 0 {
+		ai.Extra = extra
+	}
+	return ai, nil
+}
+
+func parseScopesFromRaw(raw interface{}) []string {
+	switch s := raw.(type) {
+	case string:
+		if s == "" {
+			return nil
+		}
+		return strings.Split(s, " ")
+	case []interface{}:
+		var scopes []string
+		for _, v := range s {
+			if str, ok := v.(string); ok && str != "" {
+				scopes = append(scopes, str)
+			}
+		}
+		if len(scopes) == 0 {
+			return nil
+		}
+		return scopes
+	default:
+		return nil
+	}
+}
+
+func extractResourceFromIntrospection(audRaw interface{}) (*url.URL, error) {
+	if audRaw == nil {
+		return nil, nil
+	}
+	var candidates []string
+	switch v := audRaw.(type) {
+	case string:
+		if v != "" {
+			candidates = []string{v}
+		}
+	case []interface{}:
+		for _, it := range v {
+			if s, ok := it.(string); ok && s != "" {
+				candidates = append(candidates, s)
+			}
+		}
+	case []string:
+		candidates = v
+	}
+	for _, c := range candidates {
+		looksLikeURL := strings.HasPrefix(c, "http://") || strings.HasPrefix(c, "https://") || strings.Contains(c, "://")
+		if !looksLikeURL {
+			continue
+		}
+		u, err := url.Parse(c)
+		if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
+			continue
+		}
+		u.Fragment = ""
+		return u, nil
+	}
+	return nil, nil
+}
+
+// extractKIDFromHeader 从 JWS Header 提取 kid
+func extractKIDFromHeader(tokenStr string) (string, error) {
+	msg, err := jws.Parse([]byte(tokenStr))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse JWS: %w", err)
+	}
+	sigs := msg.Signatures()
+	if len(sigs) == 0 {
+		return "", errors.New("no signatures found in JWS")
+	}
+
+	// 优先从受保护头读取
+	if ph := sigs[0].ProtectedHeaders(); ph != nil {
+		var kid string
+		if err := ph.Get(jws.KeyIDKey, &kid); err == nil && kid != "" {
+			return kid, nil
+		}
+	}
+	return "", errors.New("missing kid in JWS header")
 }
 
 // convertJWTToAuthInfo converts jwt.Token to AuthInfo structure.
@@ -267,37 +646,49 @@ func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (
 	return authInfo, nil
 }
 
-// extractClientID extracts client ID with fallback chain
+// extractClientID extracts client ID (optional)
 func extractClientID(token jwt.Token) (string, error) {
+	// client_id is not mandatory for access tokens (RFC9068)
 	clientID := ""
-	if _ = token.Get("client_id", &clientID); clientID == "" {
-		return "", errors.New("token does not contain valid client_id")
+	if _ = token.Get("client_id", &clientID); clientID != "" {
+		return clientID, nil
 	}
-	return clientID, nil
+	// Fallback to azp (often used in OIDC)
+	if _ = token.Get("azp", &clientID); clientID != "" {
+		return clientID, nil
+	}
+	// Missing client identifier is acceptable
+	return "", nil
 }
 
-// extractScopes extracts scopes from various claim formats
+// extractScopes extracts scopes from various claim formats (scope/scp). Missing is acceptable.
 func extractScopes(token jwt.Token) ([]string, error) {
-	var tempScopes interface{}
-	if err := token.Get("scope", &tempScopes); err != nil {
-		return nil, errors.New("token does not contain scope claim")
+	var raw interface{}
+	// Prefer RFC6749 style "scope" (space-delimited string or array)
+	if err := token.Get("scope", &raw); err != nil {
+		// Fallback to "scp" (array of strings used by some providers)
+		var scp interface{}
+		if err2 := token.Get("scp", &scp); err2 != nil {
+			// No scopes present → treat as empty without error
+			return nil, nil
+		}
+		raw = scp
 	}
 
-	switch s := tempScopes.(type) {
+	switch s := raw.(type) {
 	case string:
 		if s == "" {
-			return nil, errors.New("token does not contain valid scope")
+			return nil, nil
 		}
 		return strings.Split(s, " "), nil
 	case []string:
 		if len(s) == 0 {
-			return nil, errors.New("token does not contain valid scope")
+			return nil, nil
 		}
 		return s, nil
 	case []interface{}:
-		// Handle case where JSON unmarshaling creates []interface{}
 		if len(s) == 0 {
-			return nil, errors.New("token does not contain valid scope")
+			return nil, nil
 		}
 		var scopes []string
 		for _, v := range s {
@@ -306,11 +697,12 @@ func extractScopes(token jwt.Token) ([]string, error) {
 			}
 		}
 		if len(scopes) == 0 {
-			return nil, errors.New("token does not contain valid scope")
+			return nil, nil
 		}
 		return scopes, nil
 	default:
-		return nil, errors.New("token scope claim has invalid type")
+		// Unknown format → ignore rather than failing hard for compatibility
+		return nil, nil
 	}
 }
 
@@ -321,23 +713,27 @@ func extractResource(token jwt.Token) (*url.URL, error) {
 		return nil, fmt.Errorf("missing required 'aud' claim")
 	}
 
-	resourceStr := aud[0] // 默认使用第一个audience作为资源服务器标识符
-	resourceURL, err := url.Parse(resourceStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid resource URL: %s", resourceStr)
+	// 遍历查找第一个看起来像 URL 并且可解析为 HTTP(S) 的值；
+	// 若都不是 URL，则返回 nil，表示未提供资源指示器。
+	for _, candidate := range aud {
+		if candidate == "" {
+			continue
+		}
+		looksLikeURL := strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") || strings.Contains(candidate, "://")
+		if !looksLikeURL {
+			continue
+		}
+		resourceURL, err := url.Parse(candidate)
+		if err != nil || resourceURL == nil {
+			continue
+		}
+		if resourceURL.Scheme == "" || resourceURL.Host == "" {
+			continue
+		}
+		resourceURL.Fragment = "" // 移除哈希片段（符合 RFC 8707）
+		return resourceURL, nil
 	}
-
-	if resourceURL == nil {
-		return nil, fmt.Errorf("invalid resource URL: %s", resourceStr)
-	}
-
-	// Validate that it's a proper HTTP(S) URL with scheme and host
-	if resourceURL.Scheme == "" || resourceURL.Host == "" {
-		return nil, fmt.Errorf("invalid resource URL: %s", resourceStr)
-	}
-
-	resourceURL.Fragment = "" // 移除哈希片段（符合 RFC 8707）
-	return resourceURL, nil
+	return nil, nil
 }
 
 // extractExtra extracts custom claims to Extra map
@@ -360,27 +756,4 @@ func extractExtra(token jwt.Token) map[string]interface{} {
 	return extra
 }
 
-// AddIssuerURL 动态添加或更新 issuer 到 JWKS URL 的映射,不提供动态删除功能
-func (v *TokenVerifier) AddIssuerURL(ctx context.Context, iss, url string, refreshInterval time.Duration) error {
-	if !v.isRemote {
-		return errors.New("cannot add issuer URL: remote JWKS support is disabled")
-	}
-	if url == "" {
-		return errors.New("JWKS URL cannot be empty")
-	}
-	if !strings.HasPrefix(url, "https://") {
-		return errors.New("JWKS URL must use HTTPS")
-	}
-
-	// 注册到 jwk.Cache
-	if err := v.cache.Register(ctx, url, jwk.WithConstantInterval(refreshInterval)); err != nil {
-		return fmt.Errorf("failed to register JWKS URL %s: %w", url, err)
-	}
-	v.issuerToURL[iss] = url
-	return nil
-}
-
-// ClearLocalKeys clears all locally cached keys.
-func (v *TokenVerifier) ClearLocalKeys() {
-	_ = v.localKeySet.Clear()
-}
+// 注意：TokenVerifier 为静态配置。初始化后不支持动态添加 issuer 映射或清空本地 KeySet。
