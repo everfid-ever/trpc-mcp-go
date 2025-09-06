@@ -65,19 +65,19 @@ func createTestToken(privateKey *rsa.PrivateKey, keyID string, claims map[string
 	token := jwt.New()
 
 	// Set standard claims
-	token.Set(jwt.IssuerKey, "https://example.com")
-	token.Set(jwt.SubjectKey, "user123")
-	token.Set(jwt.AudienceKey, []string{"https://api.example.com"})
-	token.Set(jwt.ExpirationKey, now.Add(time.Hour))
-	token.Set(jwt.IssuedAtKey, now)
-	token.Set(jwt.JwtIDKey, "jti-123")
-	token.Set("client_id", "test-client")
-	token.Set("scope", "read write")
-	token.Set("kid", keyID)
+	_ = token.Set(jwt.IssuerKey, "https://example.com")
+	_ = token.Set(jwt.SubjectKey, "user123")
+	_ = token.Set(jwt.AudienceKey, []string{"https://api.example.com"})
+	_ = token.Set(jwt.ExpirationKey, now.Add(time.Hour))
+	_ = token.Set(jwt.IssuedAtKey, now)
+	_ = token.Set(jwt.JwtIDKey, "jti-123")
+	_ = token.Set("client_id", "test-client")
+	_ = token.Set("scope", "read write")
+	_ = token.Set("kid", keyID)
 
 	// Set custom claims
 	for k, v := range claims {
-		token.Set(k, v)
+		_ = token.Set(k, v)
 	}
 
 	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256, key))
@@ -92,7 +92,7 @@ func createTestToken(privateKey *rsa.PrivateKey, keyID string, claims map[string
 func createTestJWKS(keys ...jwk.Key) string {
 	set := jwk.NewSet()
 	for _, key := range keys {
-		set.AddKey(key)
+		_ = set.AddKey(key)
 	}
 
 	buf, _ := json.Marshal(set)
@@ -164,7 +164,7 @@ func TestNewLocalTokenVerifier_WithFile(t *testing.T) {
 
 	_, err = tmpFile.WriteString(jwksJSON)
 	require.NoError(t, err)
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	cfg := LocalJWKSConfig{
 		File: tmpFile.Name(),
@@ -195,7 +195,7 @@ func TestNewLocalTokenVerifier_WithBothJWKSAndFile(t *testing.T) {
 
 	_, err = tmpFile.WriteString(jwksJSON2)
 	require.NoError(t, err)
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	cfg := LocalJWKSConfig{
 		JWKS: jwksJSON1,
@@ -239,7 +239,7 @@ func TestNewRemoteTokenVerifier_Success(t *testing.T) {
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(jwksJSON))
+		_, _ = w.Write([]byte(jwksJSON))
 	}))
 	defer server.Close()
 
@@ -275,7 +275,7 @@ func TestNewRemoteTokenVerifier_DefaultRefreshInterval(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(jwksJSON))
+		_, _ = w.Write([]byte(jwksJSON))
 	}))
 	defer server.Close()
 
@@ -314,7 +314,7 @@ func TestNewTokenVerifier_RemoteOnly(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(jwksJSON))
+		_, _ = w.Write([]byte(jwksJSON))
 	}))
 	defer server.Close()
 
@@ -337,7 +337,7 @@ func TestNewTokenVerifier_Combined(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(jwksJSON))
+		_, _ = w.Write([]byte(jwksJSON))
 	}))
 	defer server.Close()
 
@@ -424,15 +424,15 @@ func TestVerifyAccessToken_ExpiredToken(t *testing.T) {
 	now := time.Now()
 	token := jwt.New()
 
-	token.Set(jwt.IssuerKey, "https://example.com")
-	token.Set(jwt.SubjectKey, "user123")
-	token.Set(jwt.AudienceKey, []string{"https://api.example.com"})
-	token.Set(jwt.ExpirationKey, now.Add(-time.Hour)) // Expired 1 hour ago
-	token.Set(jwt.IssuedAtKey, now.Add(-2*time.Hour))
-	token.Set(jwt.JwtIDKey, "jti-123")
-	token.Set("client_id", "test-client")
-	token.Set("scope", "read write")
-	token.Set("kid", "test-key-1")
+	_ = token.Set(jwt.IssuerKey, "https://example.com")
+	_ = token.Set(jwt.SubjectKey, "user123")
+	_ = token.Set(jwt.AudienceKey, []string{"https://api.example.com"})
+	_ = token.Set(jwt.ExpirationKey, now.Add(-time.Hour)) // Expired 1 hour ago
+	_ = token.Set(jwt.IssuedAtKey, now.Add(-2*time.Hour))
+	_ = token.Set(jwt.JwtIDKey, "jti-123")
+	_ = token.Set("client_id", "test-client")
+	_ = token.Set("scope", "read write")
+	_ = token.Set("kid", "test-key-1")
 
 	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256, key))
 	require.NoError(t, err)
@@ -461,9 +461,9 @@ func TestVerifyAccessToken_MissingRequiredClaims(t *testing.T) {
 	require.NoError(t, err)
 
 	token := jwt.New()
-	token.Set(jwt.IssuerKey, "https://example.com")
+	_ = token.Set(jwt.IssuerKey, "https://example.com")
 	// Missing other required claims
-	token.Set("kid", "test-key-1")
+	_ = token.Set("kid", "test-key-1")
 
 	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256, key))
 	require.NoError(t, err)
@@ -497,7 +497,7 @@ func TestVerifyAccessToken_NoMatchingKey(t *testing.T) {
 
 func TestExtractScopes_StringFormat(t *testing.T) {
 	token := jwt.New()
-	token.Set("scope", "read write admin")
+	_ = token.Set("scope", "read write admin")
 
 	scopes, err := extractScopes(token)
 	assert.NoError(t, err)
@@ -506,7 +506,7 @@ func TestExtractScopes_StringFormat(t *testing.T) {
 
 func TestExtractScopes_ArrayFormat(t *testing.T) {
 	token := jwt.New()
-	token.Set("scope", []string{"read", "write", "admin"})
+	_ = token.Set("scope", []string{"read", "write", "admin"})
 
 	scopes, err := extractScopes(token)
 	assert.NoError(t, err)
@@ -515,7 +515,7 @@ func TestExtractScopes_ArrayFormat(t *testing.T) {
 
 func TestExtractScopes_EmptyString(t *testing.T) {
 	token := jwt.New()
-	token.Set("scope", "")
+	_ = token.Set("scope", "")
 
 	scopes, err := extractScopes(token)
 	assert.NoError(t, err)
@@ -524,7 +524,7 @@ func TestExtractScopes_EmptyString(t *testing.T) {
 
 func TestExtractScopes_EmptyArray(t *testing.T) {
 	token := jwt.New()
-	token.Set("scope", []string{})
+	_ = token.Set("scope", []string{})
 
 	scopes, err := extractScopes(token)
 	assert.NoError(t, err)
@@ -535,7 +535,7 @@ func TestExtractScopes_EmptyArray(t *testing.T) {
 
 func TestExtractResource_ValidURL(t *testing.T) {
 	token := jwt.New()
-	token.Set(jwt.AudienceKey, []string{"https://api.example.com/resource"})
+	_ = token.Set(jwt.AudienceKey, []string{"https://api.example.com/resource"})
 
 	resource, err := extractResource(token)
 	assert.NoError(t, err)
@@ -545,7 +545,7 @@ func TestExtractResource_ValidURL(t *testing.T) {
 
 func TestExtractResource_URLWithFragment(t *testing.T) {
 	token := jwt.New()
-	token.Set(jwt.AudienceKey, []string{"https://api.example.com/resource#fragment"})
+	_ = token.Set(jwt.AudienceKey, []string{"https://api.example.com/resource#fragment"})
 
 	resource, err := extractResource(token)
 	assert.NoError(t, err)
@@ -565,10 +565,10 @@ func TestExtractResource_MissingAudience(t *testing.T) {
 
 func TestExtractExtra_WithCustomClaims(t *testing.T) {
 	token := jwt.New()
-	token.Set(jwt.IssuerKey, "https://example.com") // Standard claim
-	token.Set("custom_claim1", "value1")            // Custom claim
-	token.Set("custom_claim2", 123)                 // Custom claim
-	token.Set("client_id", "test-client")           // Standard claim
+	_ = token.Set(jwt.IssuerKey, "https://example.com") // Standard claim
+	_ = token.Set("custom_claim1", "value1")            // Custom claim
+	_ = token.Set("custom_claim2", 123)                 // Custom claim
+	_ = token.Set("client_id", "test-client")           // Standard claim
 
 	extra := extractExtra(token)
 	assert.NotNil(t, extra)
@@ -580,8 +580,8 @@ func TestExtractExtra_WithCustomClaims(t *testing.T) {
 
 func TestExtractExtra_NoCustomClaims(t *testing.T) {
 	token := jwt.New()
-	token.Set(jwt.IssuerKey, "https://example.com")
-	token.Set("client_id", "test-client")
+	_ = token.Set(jwt.IssuerKey, "https://example.com")
+	_ = token.Set("client_id", "test-client")
 
 	extra := extractExtra(token)
 	assert.Nil(t, extra) // Should return nil for omitempty
@@ -596,7 +596,7 @@ func TestVerifyAccessToken_RemoteJWKS(t *testing.T) {
 	// Create test server for JWKS
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(jwksJSON))
+		_, _ = w.Write([]byte(jwksJSON))
 	}))
 	defer server.Close()
 
@@ -626,7 +626,7 @@ func TestVerifyAccessToken_MixedMode_LocalKeyFound(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(jwksJSON))
+		_, _ = w.Write([]byte(jwksJSON))
 	}))
 	defer server.Close()
 
@@ -730,9 +730,9 @@ func TestVerifyAccessToken_RemoteJWKS_KeyRotation_RefreshOnKidMiss(t *testing.T)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if callCount == 0 {
-			w.Write([]byte(jwksOld))
+			_, _ = w.Write([]byte(jwksOld))
 		} else {
-			w.Write([]byte(jwksNew))
+			_, _ = w.Write([]byte(jwksNew))
 		}
 		callCount++
 	}))
