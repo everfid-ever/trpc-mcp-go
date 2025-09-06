@@ -102,8 +102,9 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 						setErrorResponse(w, oauthErr, http.StatusBadRequest)
 					}
 				} else {
-					serverErr := errors.NewOAuthError(errors.ErrServerError, "Internal Server Error", "")
-					setErrorResponse(w, serverErr, http.StatusInternalServerError)
+					// Default unknown errors to invalid_token (401) to avoid leaking internals
+					invalid := errors.NewOAuthError(errors.ErrInvalidToken, "Invalid access token", "")
+					setErrorResponse(w, invalid, http.StatusUnauthorized)
 				}
 				return
 			}
