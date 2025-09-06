@@ -103,6 +103,12 @@ type BearerAuthConfig struct {
 
 	// Optional: Write resource_metadata for WWW-Authenticate
 	ResourceMetadataURL *string
+
+	// Optional: Restrict accepted issuer (extra authorization check)
+	Issuer string
+
+	// Optional: Restrict accepted audiences/resources (extra authorization check)
+	Audience []string
 }
 
 // OAuthRoutesConfig defines configuration for OAuth 2.1 server routes.
@@ -326,9 +332,10 @@ func (s *Server) initComponents() {
 		httpOptions = append(httpOptions, withServerTransportLogger(s.logger))
 	}
 
-	// Enable Bearer token auth if configured
-	if s.config.bearerAuth != nil {
-		httpOptions = append(httpOptions, withTransportRequireAuth(s.config.bearerAuth.Enabled))
+	// Enable Bearer token auth middleware if configured
+	if s.config.bearerAuth != nil && s.config.bearerAuth.Enabled {
+		authWrap := convertToAuthMiddleware(s.config.bearerAuth)
+		httpOptions = append(httpOptions, withTransportAuthEnabled(authWrap))
 	}
 
 	// Enable audit logging if configured
@@ -888,10 +895,38 @@ func convertToMiddlewareOptions(config *AuditConfig) *middleware.AuditMiddleware
 	}
 }
 
-// withTransportRequireAuth sets requireAuth flag to enforce Bearer token checks
-func withTransportRequireAuth(enabled bool) func(*httpServerHandler) {
-	return func(h *httpServerHandler) {
-		h.requireAuth = enabled
+// convertToAuthMiddleware converts BearerAuthConfig to an HTTP middleware wrapper using RequireBearerAuth
+// It also adapts the auth info stored by middleware into the server-level context so downstream code can use server.GetAuthInfo
+func convertToAuthMiddleware(config *BearerAuthConfig) func(http.Handler) http.Handler {
+	if config == nil || !config.Enabled || config.Verifier == nil {
+		return nil
+	}
+
+	opts := middleware.BearerAuthMiddlewareOptions{
+		Verifier:            config.Verifier,
+		RequiredScopes:      config.RequiredScopes,
+		ResourceMetadataURL: config.ResourceMetadataURL,
+		Issuer:              config.Issuer,
+		Audience:            config.Audience,
+	}
+
+	bearer := middleware.RequireBearerAuth(opts)
+
+	// Compose an adapter that maps middleware.AuthInfoKey -> server.WithAuthInfo
+	return func(next http.Handler) http.Handler {
+		// Wrap the downstream handler to translate context
+		adapter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if v := r.Context().Value(middleware.AuthInfoKey); v != nil {
+				if ai, ok := v.(server.AuthInfo); ok {
+					// Avoid token transparent transmission
+					aiCopy := ai
+					aiCopy.Token = ""
+					r = r.WithContext(server.WithAuthInfo(r.Context(), &aiCopy))
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+		return bearer(adapter)
 	}
 }
 
@@ -900,6 +935,14 @@ func withTransportAuditEnabled(wrap func(http.Handler) http.Handler) func(*httpS
 	return func(h *httpServerHandler) {
 		h.auditEnabled = (wrap != nil)
 		h.auditWrap = wrap
+	}
+}
+
+// withTransportAuthEnabled enables bearer authentication by wrapping the handler with given middleware
+func withTransportAuthEnabled(wrap func(http.Handler) http.Handler) func(*httpServerHandler) {
+	return func(h *httpServerHandler) {
+		h.authEnabled = (wrap != nil)
+		h.authWrap = wrap
 	}
 }
 

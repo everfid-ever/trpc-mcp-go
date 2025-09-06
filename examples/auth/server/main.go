@@ -126,23 +126,6 @@ func main() {
 			RequiredScopes: []string{"mcp.read", "mcp.write"},
 			Verifier:       v, // directly use TokenVerifier implementation
 		}),
-		mcp.WithHTTPContextFunc(
-			mcp.NewAuthHTTPContextFunc(
-				server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
-					ai, err := mockVerifyJWT(token)
-					if err != nil {
-						return server.AuthInfo{}, err
-					}
-					return ai, nil
-				}),
-				mcp.ServerAuthConfig{
-					Issuer:         "http://localhost:3030",
-					Audience:       []string{"http://localhost:3000"},
-					RequiredScopes: []string{"mcp.read", "mcp.write"},
-				},
-			),
-		),
-
 		mcp.WithAudit(&mcp.AuditConfig{
 			Enabled:             true,
 			Level:               "basic", // Reduced from "detailed"
