@@ -1,3 +1,9 @@
+// Tencent is pleased to support the open source community by making trpc-mcp-go available.
+//
+// Copyright (C) 2025 Tencent.  All rights reserved.
+//
+// trpc-mcp-go is licensed under the Apache License Version 2.0.
+
 package providers
 
 import (
@@ -326,7 +332,7 @@ func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthCl
 func (p *ProxyOAuthServerProvider) ExchangeRefreshToken(
 	client auth.OAuthClientInformationFull,
 	refreshToken string,
-	scopes []string, // Optional empty slice if not provided
+	scopes []string,   // Optional empty slice if not provided
 	resource *url.URL, // Optional nil if not provided
 ) (*auth.OAuthTokens, error) {
 	// Assemble form parameters for the refresh_token grant

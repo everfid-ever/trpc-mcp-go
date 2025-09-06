@@ -10,14 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/golang-jwt/jwt/v4"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/golang-jwt/jwt/v4"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -252,8 +251,6 @@ func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (str
 		mcp.WithBearerAuth(&mcp.BearerAuthConfig{
 			Enabled:        true,
 			RequiredScopes: []string{"mcp.read", "mcp.write"},
-			Issuer:         "http://localhost:3030",
-			Audience:       []string{"http://localhost:3000"},
 			Verifier: server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
 				authInfo, err := verifyTestJWT(token)
 				if err != nil {
@@ -262,6 +259,22 @@ func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (str
 				return *authInfo, nil
 			}),
 		}),
+		mcp.WithHTTPContextFunc(
+			mcp.NewAuthHTTPContextFunc(
+				server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
+					authInfo, err := verifyTestJWT(token)
+					if err != nil {
+						return server.AuthInfo{}, err
+					}
+					return *authInfo, nil
+				}),
+				mcp.ServerAuthConfig{
+					Issuer:         "http://localhost:3030",
+					Audience:       []string{"http://localhost:3000"},
+					RequiredScopes: []string{"mcp.read", "mcp.write"},
+				},
+			),
+		),
 	)
 
 	// Register test tools
@@ -722,62 +735,15 @@ func verifyTestJWT(tokenString string) (*server.AuthInfo, error) {
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		// Scopes
 		scopes := []string{}
 		if scope, ok := claims["scope"].(string); ok {
+			// Convert space-separated scope string to slice
 			scopes = strings.Fields(scope)
 		}
 
-		// ExpiresAt
-		var expiresAtPtr *int64
-		if v, ok := claims["exp"].(float64); ok {
-			vv := int64(v)
-			expiresAtPtr = &vv
-		}
-
-		// Audience -> Resource (first value)
-		var resourceURL *url.URL
-		if audVal, ok := claims["aud"]; ok {
-			switch v := audVal.(type) {
-			case string:
-				if u, err := url.Parse(v); err == nil {
-					resourceURL = u
-				}
-			case []interface{}:
-				if len(v) > 0 {
-					if s, ok := v[0].(string); ok {
-						if u, err := url.Parse(s); err == nil {
-							resourceURL = u
-						}
-					}
-				}
-			case []string:
-				if len(v) > 0 {
-					if u, err := url.Parse(v[0]); err == nil {
-						resourceURL = u
-					}
-				}
-			}
-		}
-
-		// ClientID
-		clientID, _ := claims["sub"].(string)
-
-		// Extra (include iss and client_id)
-		extra := map[string]interface{}{}
-		if iss, ok := claims["iss"].(string); ok {
-			extra["iss"] = iss
-		}
-		if clientID != "" {
-			extra["client_id"] = clientID
-		}
-
 		return &server.AuthInfo{
-			ClientID:  clientID,
-			Scopes:    scopes,
-			ExpiresAt: expiresAtPtr,
-			Resource:  resourceURL,
-			Extra:     extra,
+			ClientID: claims["sub"].(string),
+			Scopes:   scopes,
 		}, nil
 	}
 
