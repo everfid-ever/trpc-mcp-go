@@ -9,7 +9,6 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
-	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/httputil"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/sseutil"
 )
@@ -78,9 +76,12 @@ type httpServerHandler struct {
 	// Response manager for server-to-client requests.
 	responseManager *responseManager
 
-	// Enforce Bearer token authentication if true
-	requireAuth bool
-	
+	// Enable bearer auth middleware if true
+	authEnabled bool
+
+	// Auth middleware wrapper applied if authEnabled
+	authWrap func(http.Handler) http.Handler
+
 	// Enable audit logging if true
 	auditEnabled bool
 
@@ -103,55 +104,7 @@ type getSSEConnection struct {
 	sseResponder *sseResponder
 }
 
-// ServerAuthConfig defines server authentication configuration
-type ServerAuthConfig struct {
-	Issuer         string   `json:"issuer"`
-	Audience       []string `json:"audience"`
-	RequiredScopes []string `json:"required_scopes"`
-}
-
-// NewAuthHTTPContextFunc creates an authenticated HTTPContextFunc
-func NewAuthHTTPContextFunc(verifier server.TokenVerifierInterface, cfg ServerAuthConfig) HTTPContextFunc {
-	return func(ctx context.Context, r *http.Request) context.Context {
-		// Exact Authorization: Bearer <token>
-		raw, err := extractBearerFromHeader(r.Header.Get("Authorization"))
-		if err != nil {
-			return server.WithAuthErr(ctx, oauthErrors.ErrInvalidRequest)
-		}
-
-		// Verify token
-		info, verr := verifier.VerifyAccessToken(ctx, raw)
-		if verr != nil {
-			return server.WithAuthErr(ctx, fmt.Errorf("%w: %v", oauthErrors.ErrInvalidToken, verr))
-		}
-
-		// Issuer guarantee
-		if cfg.Issuer != "" {
-			if iss, _ := info.Extra["iss"].(string); iss != "" && iss != cfg.Issuer {
-				return server.WithAuthErr(ctx, oauthErrors.ErrInvalidToken)
-			}
-		}
-
-		// Check scope
-		if len(cfg.RequiredScopes) > 0 && !hasAll(info.Scopes, cfg.RequiredScopes) {
-			ctx = server.WithAuthErr(ctx, oauthErrors.ErrInsufficientScope)
-			return server.WithRequiredScope(ctx, strings.Join(cfg.RequiredScopes, " "))
-		}
-
-		//  Check Audience/Resource
-		if len(cfg.Audience) > 0 && info.Resource != nil {
-			if !audienceMatch(info.Resource.String(), cfg.Audience) {
-				return server.WithAuthErr(ctx, oauthErrors.ErrInvalidToken)
-			}
-		}
-
-		// Avoid token transparent transmission
-		info.Token = ""
-
-		// Injecting authentication information
-		return server.WithAuthInfo(ctx, &info)
-	}
-}
+// ServerAuthConfig and NewAuthHTTPContextFunc were removed (replaced by RequireBearerAuth middleware)
 
 // newHTTPServerHandler creates an HTTP server handler
 func newHTTPServerHandler(handler requestHandler, serverPath string, options ...func(*httpServerHandler)) *httpServerHandler {
@@ -292,6 +245,10 @@ func (h *httpServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 
+	// Apply auth middleware first, then audit middleware
+	if h.authEnabled && h.authWrap != nil {
+		core = h.authWrap(core)
+	}
 	if h.auditEnabled && h.auditWrap != nil {
 		core = h.auditWrap(core)
 	}
@@ -313,29 +270,7 @@ func (h *httpServerHandler) handlePost(ctx context.Context, w http.ResponseWrite
 		enrichedCtx = fn(enrichedCtx, r)
 	}
 
-	if h.requireAuth {
-		// Authentication error: write challenge header and return
-		if err := server.GetAuthErr(enrichedCtx); err != nil {
-			status, code, desc := server.DetermineAuthError(err)
-			if scope, ok := server.GetRequiredScope(enrichedCtx); ok {
-				server.WriteAuthChallenge(w, status, code, desc, scope)
-			} else {
-				server.WriteAuthChallenge(w, status, code, "", "")
-			}
-			return
-		}
-		// No error, but no AuthInfo either: 401 per RFC
-		if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
-			server.WriteAuthChallenge(
-				w,
-				http.StatusUnauthorized,
-				"invalid_token",
-				"The access token is invalid or expired",
-				"",
-			)
-			return
-		}
-	}
+	// Authentication enforced by auth middleware when configured
 
 	var rawMessage json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&rawMessage); err != nil {
@@ -671,29 +606,7 @@ func (h *httpServerHandler) handleGet(ctx context.Context, w http.ResponseWriter
 		enrichedCtx = fn(enrichedCtx, r)
 	}
 
-	if h.requireAuth {
-		// Authentication error: write challenge header and return
-		if err := server.GetAuthErr(enrichedCtx); err != nil {
-			status, code, desc := server.DetermineAuthError(err)
-			if scope, ok := server.GetRequiredScope(enrichedCtx); ok {
-				server.WriteAuthChallenge(w, status, code, desc, scope)
-			} else {
-				server.WriteAuthChallenge(w, status, code, desc, "")
-			}
-			return
-		}
-		// No error, but no AuthInfo either: 401 per RFC
-		if _, ok := server.GetAuthInfo(enrichedCtx); !ok {
-			server.WriteAuthChallenge(
-				w,
-				http.StatusUnauthorized,
-				"invalid_token",
-				"The access token is invalid or expired",
-				"",
-			)
-			return
-		}
-	}
+	// Authentication enforced by auth middleware when configured
 
 	// Check if streaming is supported
 	flusher, ok := w.(http.Flusher)
@@ -990,29 +903,4 @@ func hasAll(have, need []string) bool {
 	return true
 }
 
-// audienceMatch matches the RFC8707 resource URL with the configured audience loosely
-func audienceMatch(resource string, allowed []string) bool {
-	resource = strings.TrimSuffix(strings.TrimSpace(resource), "#")
-	for _, a := range allowed {
-		if resource == strings.TrimSuffix(strings.TrimSpace(a), "#") {
-			return true
-		}
-	}
-	return false
-}
-
-// extractBearerFromHeader extracts the Bearer token from the Authorization header
-func extractBearerFromHeader(authz string) (string, error) {
-	if strings.TrimSpace(authz) == "" {
-		return "", errors.New("missing Authorization header")
-	}
-	val := strings.TrimSpace(authz)
-	if len(val) < 7 || !strings.EqualFold(val[:7], "Bearer ") {
-		return "", errors.New("authorization scheme must be Bearer")
-	}
-	tok := strings.TrimSpace(val[7:])
-	if tok == "" {
-		return "", errors.New("empty bearer token")
-	}
-	return tok, nil
-}
+// extractBearerFromHeader removed with old auth path
