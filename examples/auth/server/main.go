@@ -90,6 +90,21 @@ func main() {
 	})
 
 	// Create and start the MCP server
+	// Build a TokenVerifier (use introspection for the demo)
+	ctx := context.Background()
+	v, err := server.NewTokenVerifier(ctx, server.TokenVerifierConfig{
+		Introspection: &server.IntrospectionConfig{
+			Endpoint:         "http://localhost:3030/introspect",
+			Timeout:          5 * time.Second,
+			CacheTTL:         30 * time.Second,
+			NegativeCacheTTL: 10 * time.Second,
+			UseOnJWTFail:     true,
+		},
+	})
+	if err != nil {
+		log.Fatalf("failed to create TokenVerifier: %v", err)
+	}
+
 	mcpServer := mcp.NewServer(
 		"Auth-Example-Server",
 		"1.0.0",
@@ -109,15 +124,7 @@ func main() {
 		mcp.WithBearerAuth(&mcp.BearerAuthConfig{
 			Enabled:        true,
 			RequiredScopes: []string{"mcp.read", "mcp.write"},
-			Verifier: server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
-				ai, err := mockVerifyJWT(token)
-				if err != nil {
-					fmt.Printf("❌ Bearer auth failed: %v\n", err)
-					return server.AuthInfo{}, err
-				}
-				fmt.Printf("✅ Bearer token verified for client: %s\n", ai.ClientID)
-				return ai, nil
-			}),
+			Verifier:       v, // directly use TokenVerifier implementation
 		}),
 		mcp.WithHTTPContextFunc(
 			mcp.NewAuthHTTPContextFunc(
@@ -404,6 +411,53 @@ func startMockOAuthServer() {
 			"response_types": []string{"code"},
 		})
 		fmt.Printf("   ✅ Client registered: test-client-id\n\n")
+	})
+
+	// Introspection endpoint (RFC7662 simplified for demo)
+	mux.HandleFunc("/introspect", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		token := r.FormValue("token")
+		resp := map[string]any{"active": false}
+		if token != "" {
+			parsed, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+				}
+				return []byte(hmacSecret), nil
+			})
+			if err == nil && parsed != nil && parsed.Valid {
+				if claims, ok := parsed.Claims.(jwt.MapClaims); ok {
+					var exp int64
+					if v, ok := claims["exp"].(float64); ok {
+						exp = int64(v)
+					}
+					scope, _ := claims["scope"].(string)
+					clientID, _ := claims["client_id"].(string)
+					if clientID == "" {
+						if sub, _ := claims["sub"].(string); sub != "" {
+							clientID = sub
+						}
+					}
+					resp = map[string]any{
+						"active":    true,
+						"exp":       exp,
+						"scope":     scope,
+						"client_id": clientID,
+						"aud":       "http://localhost:3000",
+						"iss":       "http://localhost:3030",
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 
 	// Authorization Server Metadata (RFC 8414) - silent
