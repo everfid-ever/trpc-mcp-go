@@ -8,11 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lestrrat-go/httprc/v3"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jws"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
-
-	"github.com/lestrrat-go/jwx/v3/jwk"
-	"github.com/lestrrat-go/jwx/v3/jwt"
 )
 
 // Standard JWT claims that should not be included in Extra
@@ -68,13 +67,19 @@ func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVeri
 
 	// Load JWKS string if provided
 	if cfg.JWKS != "" {
-		set, err := jwk.Parse([]byte(cfg.JWKS))
+		set, err := jwk.ParseString(cfg.JWKS)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse local JWKS: %w", err)
 		}
-		for i := 0; i < set.Len(); i++ {
-			key, _ := set.Key(i)
-			_ = defaultSet.AddKey(key)
+
+		// Iterate through keys and add them to the default set
+		iter := set.Keys(ctx)
+		for iter.Next(ctx) {
+			pair := iter.Pair()
+			key := pair.Value.(jwk.Key)
+			if err := defaultSet.AddKey(key); err != nil {
+				return nil, fmt.Errorf("failed to add key to set: %w", err)
+			}
 		}
 	}
 
@@ -84,9 +89,15 @@ func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVeri
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse local JWKS file: %w", err)
 		}
-		for i := 0; i < set.Len(); i++ {
-			key, _ := set.Key(i)
-			_ = defaultSet.AddKey(key)
+
+		// Iterate through keys and add them to the default set
+		iter := set.Keys(ctx)
+		for iter.Next(ctx) {
+			pair := iter.Pair()
+			key := pair.Value.(jwk.Key)
+			if err := defaultSet.AddKey(key); err != nil {
+				return nil, fmt.Errorf("failed to add key to set: %w", err)
+			}
 		}
 	}
 
@@ -110,14 +121,15 @@ func NewRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVe
 		// Default refresh interval: 1 hour
 		refreshInterval = 60 * time.Minute
 	}
-
-	cache, err := jwk.NewCache(ctx, httprc.NewClient())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create jwk cache: %w", err)
+	if refreshInterval < 15*time.Minute {
+		refreshInterval = 15 * time.Minute
 	}
+
+	cache := jwk.NewCache(ctx)
+
 	// Register all remote JWKS URLs
 	for _, url_ := range cfg.URLs {
-		if err := cache.Register(ctx, url_, jwk.WithConstantInterval(refreshInterval)); err != nil {
+		if err := cache.Register(url_, jwk.WithRefreshInterval(refreshInterval)); err != nil {
 			return nil, fmt.Errorf("failed to register remote JWKS %s: %w", url_, err)
 		}
 	}
@@ -165,22 +177,41 @@ func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerif
 
 // VerifyAccessToken verifies a JWT token and returns AuthInfo or error
 func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) (AuthInfo, error) {
-	// Parse token without verification to get iss and kid
-	unverifiedToken, err := jwt.ParseInsecure([]byte(tokenStr))
+	// Parse token without verification to get headers and claims
+	msg, err := jws.ParseString(tokenStr)
 	if err != nil {
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrServerError, fmt.Sprintf("failed to parse token: %v", err.Error()), "")
 	}
 
-	// Extract issuer (iss)
-	iss, ok := unverifiedToken.Issuer()
-	if !ok || iss == "" {
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get iss from token", "")
+	// Get the first signature (assuming single signature)
+	if len(msg.Signatures()) == 0 {
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "no signatures found in token", "")
 	}
 
+	headers := msg.Signatures()[0].ProtectedHeaders()
+
 	// Extract key ID (kid)
-	var kid string
-	if err := unverifiedToken.Get("kid", &kid); err != nil {
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get kid from token", "")
+	kidInterface, ok := headers.Get("kid")
+	if !ok {
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing kid in token header", "")
+	}
+
+	kid, ok := kidInterface.(string)
+	if !ok || kid == "" {
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "invalid kid in token header", "")
+	}
+
+	// Parse payload to get issuer
+	payload := msg.Payload()
+	unverifiedToken, err := jwt.Parse(payload, jwt.WithVerify(false))
+	if err != nil {
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrServerError, fmt.Sprintf("failed to parse token payload: %v", err.Error()), "")
+	}
+
+	// Extract issuer (iss)
+	iss := unverifiedToken.Issuer()
+	if iss == "" {
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing iss claim in token", "")
 	}
 
 	// Get target key set from local or remote
@@ -190,25 +221,25 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 	}
 
 	// Parse and validate token with key set
-	token, err := jwt.Parse([]byte(tokenStr),
+	token, err := jwt.ParseString(tokenStr,
 		jwt.WithKeySet(keySet),
 		jwt.WithValidate(true),
 		jwt.WithAcceptableSkew(30*time.Second),
-		// Required claims per RFC 9068
-		jwt.WithRequiredClaim("exp"),
-		jwt.WithRequiredClaim("aud"),
-		jwt.WithRequiredClaim("sub"),
-		jwt.WithRequiredClaim("client_id"),
-		jwt.WithRequiredClaim("iat"),
-		jwt.WithRequiredClaim("jti"),
-		jwt.WithRequiredClaim("scope"),
 	)
 	if err != nil || token == nil {
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to verify token", "")
 	}
 
+	// Validate required claims per RFC 9068
+	requiredClaims := []string{"exp", "aud", "sub", "client_id", "iat", "jti", "scope"}
+	for _, claim := range requiredClaims {
+		if _, ok := token.Get(claim); !ok {
+			return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, fmt.Sprintf("missing required claim: %s", claim), "")
+		}
+	}
+
 	// Ensure subject is not empty
-	if sub, ok := token.Subject(); !ok || sub == "" {
+	if sub := token.Subject(); sub == "" {
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing required 'sub' claim", "")
 	}
 
@@ -231,9 +262,9 @@ func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (j
 	// If remote mode, try remote JWKS
 	if v.isRemote {
 		if url_, ok := v.issuerToURL[iss]; ok {
-			keySet, err := v.cache.Lookup(ctx, url_)
+			keySet, err := v.cache.Refresh(ctx, url_)
 			if err != nil {
-				return nil, fmt.Errorf("failed to lookup remote JWKS for issuer %s: %w", iss, err)
+				return nil, fmt.Errorf("failed to refresh remote JWKS for issuer %s: %w", iss, err)
 			}
 			return keySet, nil
 		}
@@ -248,7 +279,7 @@ func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (
 	authInfo := AuthInfo{Token: tokenStr}
 
 	// Extract exp claim
-	if exp, ok := token.Expiration(); ok {
+	if exp := token.Expiration(); !exp.IsZero() {
 		ts := exp.Unix()
 		authInfo.ExpiresAt = &ts
 	} else {
@@ -275,8 +306,13 @@ func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (
 
 // extractClientID extracts client ID from token
 func extractClientID(token jwt.Token) (string, error) {
-	clientID := ""
-	if _ = token.Get("client_id", &clientID); clientID == "" {
+	clientIDInterface, ok := token.Get("client_id")
+	if !ok {
+		return "", errors.New("token does not contain client_id claim")
+	}
+
+	clientID, ok := clientIDInterface.(string)
+	if !ok || clientID == "" {
 		return "", errors.New("token does not contain valid client_id")
 	}
 	return clientID, nil
@@ -284,8 +320,8 @@ func extractClientID(token jwt.Token) (string, error) {
 
 // extractScopes extracts scope claims in different formats (string, array)
 func extractScopes(token jwt.Token) ([]string, error) {
-	var tempScopes interface{}
-	if err := token.Get("scope", &tempScopes); err != nil {
+	tempScopes, ok := token.Get("scope")
+	if !ok {
 		return nil, errors.New("token does not contain scope claim")
 	}
 
@@ -322,8 +358,28 @@ func extractScopes(token jwt.Token) ([]string, error) {
 
 // extractResource extracts resource (audience) claim and validates it as a URL
 func extractResource(token jwt.Token) (*url.URL, error) {
-	aud, ok := token.Audience()
-	if !ok || len(aud) == 0 {
+	audInterface, ok := token.Get("aud")
+	if !ok {
+		return nil, fmt.Errorf("missing required 'aud' claim")
+	}
+
+	var aud []string
+	switch a := audInterface.(type) {
+	case string:
+		aud = []string{a}
+	case []string:
+		aud = a
+	case []interface{}:
+		for _, v := range a {
+			if str, ok := v.(string); ok {
+				aud = append(aud, str)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("invalid aud claim type")
+	}
+
+	if len(aud) == 0 {
 		return nil, fmt.Errorf("missing required 'aud' claim")
 	}
 
@@ -351,16 +407,20 @@ func extractResource(token jwt.Token) (*url.URL, error) {
 func extractExtra(token jwt.Token) map[string]interface{} {
 	extra := make(map[string]interface{})
 
-	for _, key := range token.Keys() {
+	// Get private claims map - in JWX v2, we need to use PrivateClaims()
+	privateClaims := token.PrivateClaims()
+	if privateClaims == nil {
+		return nil
+	}
+
+	for key, value := range privateClaims {
 		if standardClaims[key] {
 			// Skip standard claims
 			continue
 		}
-		var value interface{}
-		if err := token.Get(key, &value); err == nil {
-			extra[key] = value
-		}
+		extra[key] = value
 	}
+
 	if len(extra) == 0 {
 		// Return nil for empty map (omitempty)
 		return nil
@@ -382,8 +442,12 @@ func (v *TokenVerifier) AddIssuerURL(ctx context.Context, iss, url string, refre
 	}
 
 	// Register JWKS URL in cache
-	if err := v.cache.Register(ctx, url, jwk.WithConstantInterval(refreshInterval)); err != nil {
+	if err := v.cache.Register(url, jwk.WithRefreshInterval(refreshInterval)); err != nil {
 		return fmt.Errorf("failed to register JWKS URL %s: %w", url, err)
+	}
+
+	if v.issuerToURL == nil {
+		v.issuerToURL = make(map[string]string)
 	}
 	v.issuerToURL[iss] = url
 	return nil
@@ -391,5 +455,8 @@ func (v *TokenVerifier) AddIssuerURL(ctx context.Context, iss, url string, refre
 
 // ClearLocalKeys clears all locally cached keys.
 func (v *TokenVerifier) ClearLocalKeys() {
-	_ = v.localKeySet.Clear()
+	if v.localKeySet != nil {
+		// Create a new empty set to replace the current one
+		v.localKeySet = jwk.NewSet()
+	}
 }

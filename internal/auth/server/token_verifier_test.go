@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,10 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lestrrat-go/httprc/v3"
-	"github.com/lestrrat-go/jwx/v3/jwa"
-	"github.com/lestrrat-go/jwx/v3/jwk"
-	"github.com/lestrrat-go/jwx/v3/jwt"
+	"github.com/lestrrat-go/jwx/v2/jwa"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,7 +28,7 @@ func generateRSAKey() (*rsa.PrivateKey, error) {
 func createTestJWK(privateKey *rsa.PrivateKey, keyID string) (jwk.Key, error) {
 	// Import the public key part only
 	publicKey := &privateKey.PublicKey
-	key, err := jwk.Import(publicKey)
+	key, err := jwk.FromRaw(publicKey)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +50,7 @@ func createTestJWK(privateKey *rsa.PrivateKey, keyID string) (jwk.Key, error) {
 
 // createTestToken creates a test JWT token
 func createTestToken(privateKey *rsa.PrivateKey, keyID string, claims map[string]interface{}) (string, error) {
-	key, err := jwk.Import(privateKey)
+	key, err := jwk.FromRaw(privateKey)
 	if err != nil {
 		return "", err
 	}
@@ -80,7 +78,7 @@ func createTestToken(privateKey *rsa.PrivateKey, keyID string, claims map[string
 		token.Set(k, v)
 	}
 
-	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256(), key))
+	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256, key))
 	if err != nil {
 		return "", err
 	}
@@ -417,7 +415,7 @@ func TestVerifyAccessToken_ExpiredToken(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create expired token
-	key, err := jwk.Import(privateKey)
+	key, err := jwk.FromRaw(privateKey)
 	require.NoError(t, err)
 
 	err = key.Set(jwk.KeyIDKey, "test-key-1")
@@ -436,7 +434,7 @@ func TestVerifyAccessToken_ExpiredToken(t *testing.T) {
 	token.Set("scope", "read write")
 	token.Set("kid", "test-key-1")
 
-	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256(), key))
+	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256, key))
 	require.NoError(t, err)
 
 	authInfo, err := verifier.VerifyAccessToken(ctx, string(signed))
@@ -456,7 +454,7 @@ func TestVerifyAccessToken_MissingRequiredClaims(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create token missing required claims
-	key, err := jwk.Import(privateKey)
+	key, err := jwk.FromRaw(privateKey)
 	require.NoError(t, err)
 
 	err = key.Set(jwk.KeyIDKey, "test-key-1")
@@ -467,7 +465,7 @@ func TestVerifyAccessToken_MissingRequiredClaims(t *testing.T) {
 	// Missing other required claims
 	token.Set("kid", "test-key-1")
 
-	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256(), key))
+	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256, key))
 	require.NoError(t, err)
 
 	authInfo, err := verifier.VerifyAccessToken(ctx, string(signed))
@@ -607,25 +605,13 @@ func TestAddIssuerURL_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := httprc.NewClient(
-		httprc.WithHTTPClient(&http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}),
-	)
-
-	// Create cache with custom HTTP client
-	cache, err := jwk.NewCache(ctx, client)
-	require.NoError(t, err)
-
 	verifier := &TokenVerifier{
-		cache:       cache,
+		cache:       jwk.NewCache(ctx),
 		issuerToURL: make(map[string]string),
 		isRemote:    true,
 	}
 
-	err = verifier.AddIssuerURL(ctx, "https://new-issuer.com", server.URL, time.Minute)
+	err := verifier.AddIssuerURL(ctx, "https://new-issuer.com", server.URL, time.Minute)
 	assert.NoError(t, err)
 	assert.Equal(t, server.URL, verifier.issuerToURL["https://new-issuer.com"])
 }

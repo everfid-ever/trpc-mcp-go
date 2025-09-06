@@ -3,12 +3,12 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/go-playground/validator/v10"
-	"golang.org/x/time/rate"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/go-playground/validator/v10"
+	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/pkce"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
