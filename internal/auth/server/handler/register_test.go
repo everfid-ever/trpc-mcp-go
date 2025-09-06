@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
-
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 )
 

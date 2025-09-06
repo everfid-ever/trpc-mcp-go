@@ -15,7 +15,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	as "trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
