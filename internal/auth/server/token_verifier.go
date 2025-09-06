@@ -13,12 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lestrrat-go/httprc/v3"
 	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 
-	"github.com/lestrrat-go/jwx/v3/jwk"
-	"github.com/lestrrat-go/jwx/v3/jws"
-	"github.com/lestrrat-go/jwx/v3/jwt"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jws"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
 // Standard JWT claims that should not be included in Extra
@@ -82,7 +81,7 @@ type IntrospectionConfig struct {
 // TokenVerifier 结构体
 type TokenVerifier struct {
 	localKeySet jwk.Set           // iss 到本地 jwk.Set 的映射
-	cache       *jwk.Cache        // 远程模式缓存
+	cache       *jwk.Cache        // 远程 JWKS 缓存（jwx v2）
 	issuerToURL map[string]string // iss 到远程 URL 的映射
 	isRemote    bool              // 是否使用远程模式
 
@@ -152,20 +151,10 @@ func NewRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVe
 		return nil, fmt.Errorf("must provide at least one RemoteURL")
 	}
 
-	refreshInterval := cfg.RefreshInterval
-	if refreshInterval == 0 {
-		// 默认 1 小时
-		refreshInterval = 60 * time.Minute
-	}
-
-	cache, err := jwk.NewCache(ctx, httprc.NewClient())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create jwk cache: %w", err)
-	}
+	// jwx v2 缓存
+	cache := jwk.NewCache(ctx)
 	for _, url_ := range cfg.URLs {
-		if err := cache.Register(ctx, url_, jwk.WithConstantInterval(refreshInterval)); err != nil {
-			return nil, fmt.Errorf("failed to register remote JWKS %s: %w", url_, err)
-		}
+		_ = cache.Register(url_)
 	}
 
 	return &TokenVerifier{
@@ -287,8 +276,8 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 	}
 
 	// 获取 iss
-	iss, ok := unverifiedToken.Issuer()
-	if !ok || iss == "" {
+	iss := unverifiedToken.Issuer()
+	if iss == "" {
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing issuer (iss) in token", "")
 	}
 
@@ -332,7 +321,7 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 	}
 
 	// 校验sub字段非空
-	if sub, ok := token.Subject(); !ok || sub == "" {
+	if sub := token.Subject(); sub == "" {
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing required 'sub' claim", "")
 	}
 
@@ -354,17 +343,21 @@ func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (j
 	// 如果是远程模式，尝试远程 JWKS
 	if v.isRemote {
 		if url_, ok := v.issuerToURL[iss]; ok {
-			keySet, err := v.cache.Lookup(ctx, url_)
-			if err != nil {
-				return nil, fmt.Errorf("failed to lookup remote JWKS for issuer %s (url=%s): %w", iss, url_, err)
-			}
-			// 若 kid 未命中，则触发一次性强制刷新并重试（应对密钥轮换）
-			if _, ok := keySet.LookupKeyID(kid); !ok {
-				if refreshed, ferr := jwk.Fetch(ctx, url_); ferr == nil {
-					if _, ok2 := refreshed.LookupKeyID(kid); ok2 {
-						return refreshed, nil
+			if v.cache != nil {
+				if keySet, err := v.cache.Get(ctx, url_); err == nil {
+					if _, ok := keySet.LookupKeyID(kid); !ok {
+						if refreshed, ferr := jwk.Fetch(ctx, url_); ferr == nil {
+							if _, ok2 := refreshed.LookupKeyID(kid); ok2 {
+								return refreshed, nil
+							}
+						}
 					}
+					return keySet, nil
 				}
+			}
+			keySet, err := jwk.Fetch(ctx, url_)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch remote JWKS for issuer %s (url=%s): %w", iss, url_, err)
 			}
 			return keySet, nil
 		}
@@ -624,9 +617,10 @@ func extractKIDFromHeader(tokenStr string) (string, error) {
 
 	// 优先从受保护头读取
 	if ph := sigs[0].ProtectedHeaders(); ph != nil {
-		var kid string
-		if err := ph.Get(jws.KeyIDKey, &kid); err == nil && kid != "" {
-			return kid, nil
+		if v, ok := ph.Get(jws.KeyIDKey); ok {
+			if kid, ok2 := v.(string); ok2 && kid != "" {
+				return kid, nil
+			}
 		}
 	}
 	return "", errors.New("missing kid in JWS header")
@@ -637,7 +631,7 @@ func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (
 	authInfo := AuthInfo{Token: tokenStr}
 
 	// 写入 exp -> ExpiresAt （一定要在最前面做）
-	if exp, ok := token.Expiration(); ok {
+	if exp := token.Expiration(); !exp.IsZero() {
 		ts := exp.Unix()
 		authInfo.ExpiresAt = &ts
 	} else {
@@ -666,13 +660,16 @@ func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (
 // extractClientID extracts client ID (optional)
 func extractClientID(token jwt.Token) (string, error) {
 	// client_id is not mandatory for access tokens (RFC9068)
-	clientID := ""
-	if _ = token.Get("client_id", &clientID); clientID != "" {
-		return clientID, nil
+	if v, ok := token.Get("client_id"); ok {
+		if s, ok2 := v.(string); ok2 && s != "" {
+			return s, nil
+		}
 	}
 	// Fallback to azp (often used in OIDC)
-	if _ = token.Get("azp", &clientID); clientID != "" {
-		return clientID, nil
+	if v, ok := token.Get("azp"); ok {
+		if s, ok2 := v.(string); ok2 && s != "" {
+			return s, nil
+		}
 	}
 	// Missing client identifier is acceptable
 	return "", nil
@@ -682,14 +679,16 @@ func extractClientID(token jwt.Token) (string, error) {
 func extractScopes(token jwt.Token) ([]string, error) {
 	var raw interface{}
 	// Prefer RFC6749 style "scope" (space-delimited string or array)
-	if err := token.Get("scope", &raw); err != nil {
+	if v, ok := token.Get("scope"); ok {
+		raw = v
+	} else {
 		// Fallback to "scp" (array of strings used by some providers)
-		var scp interface{}
-		if err2 := token.Get("scp", &scp); err2 != nil {
+		if v2, ok2 := token.Get("scp"); ok2 {
+			raw = v2
+		} else {
 			// No scopes present → treat as empty without error
 			return nil, nil
 		}
-		raw = scp
 	}
 
 	switch s := raw.(type) {
@@ -725,8 +724,8 @@ func extractScopes(token jwt.Token) ([]string, error) {
 
 // extractResource extracts resource information
 func extractResource(token jwt.Token) (*url.URL, error) {
-	aud, ok := token.Audience()
-	if !ok || len(aud) == 0 {
+	aud := token.Audience()
+	if len(aud) == 0 {
 		return nil, fmt.Errorf("missing required 'aud' claim")
 	}
 
@@ -755,21 +754,28 @@ func extractResource(token jwt.Token) (*url.URL, error) {
 
 // extractExtra extracts custom claims to Extra map
 func extractExtra(token jwt.Token) map[string]interface{} {
-	extra := make(map[string]interface{})
+	all, _ := token.AsMap(context.Background())
+	if len(all) == 0 {
+		return nil
+	}
 
-	for _, key := range token.Keys() {
+	extra := make(map[string]interface{})
+	for key, value := range all {
 		if standardClaims[key] {
-			continue // 跳过已处理的声明与标准声明
+			continue
 		}
-		var value interface{}
-		if err := token.Get(key, &value); err == nil {
+		switch key {
+		case "active", "username", "token_type", "token_type_hint":
+			continue
+		case "client_id", "scope", "exp", "aud", "iss", "sub", "iat", "jti":
+			continue
+		default:
 			extra[key] = value
 		}
 	}
 	if len(extra) == 0 {
-		return nil // 符合 omitempty
+		return nil
 	}
-
 	return extra
 }
 
