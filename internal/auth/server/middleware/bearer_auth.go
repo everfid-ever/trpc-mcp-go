@@ -12,30 +12,25 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
-// BearerAuthMiddlewareOptions 定义Bearer认证中间件的配置选项。
-// Defines configuration options for the Bearer authentication middleware.
+// BearerAuthMiddlewareOptions defines configuration for the Bearer auth middleware
 type BearerAuthMiddlewareOptions struct {
-	// Verifier 用于验证令牌的提供者。
-	// Token verifier provider.
+	// Verifier is used to validate the access token
 	Verifier server.TokenVerifierInterface
 
-	// RequiredScopes 可选的权限范围，验证令牌必须包含所有指定范围。
-	// Optional scopes that the token must have.
+	// RequiredScopes lists scopes that must all be present in the token
 	RequiredScopes []string
 
-	// ResourceMetadataURL 可选的资源元数据URL，包含在WWW-Authenticate头中。
-	// Optional resource metadata URL to include in WWW-Authenticate header.
+	// ResourceMetadataURL is optionally included in the WWW-Authenticate header
 	ResourceMetadataURL *string
 }
 
-// RequireBearerAuth 返回一个HTTP中间件，验证请求中的Bearer令牌。
-// Returns an HTTP middleware that validates Bearer tokens in the request.
+// RequireBearerAuth returns an HTTP middleware that validates Bearer tokens on incoming requests
 func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			// 处理错误并设置响应函数
+			// setErrorResponse writes a JSON OAuth error and appropriate status and headers
 			setErrorResponse := func(w http.ResponseWriter, err errors.OAuthError, statusCode int) {
-				// 只在 401 或 403 时设置 WWW-Authenticate 头，以匹配 TypeScript 版本
+				// Set WWW-Authenticate only for 401 or 403 to align with TS implementation
 				if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
 					wwwAuthValue := fmt.Sprintf(`Bearer error="%s", error_description="%s"`, err.ErrorCode, err.Message)
 					if options.ResourceMetadataURL != nil {
@@ -43,19 +38,20 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 					}
 					w.Header().Set("WWW-Authenticate", wwwAuthValue)
 				}
+				// Write JSON body with error details
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(statusCode)
 				_ = json.NewEncoder(w).Encode(err.ToResponseStruct())
 			}
 
-			// 获取Authorization头
+			// Read Authorization header and ensure presence
 			authHeader := req.Header.Get("Authorization")
 			if authHeader == "" {
 				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidToken, "Missing Authorization header", ""), http.StatusUnauthorized)
 				return
 			}
 
-			// 解析Authorization头
+			// Expect "Bearer <token>" format and extract the token
 			parts := strings.Split(authHeader, " ")
 			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" || parts[1] == "" {
 				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidToken, "Invalid Authorization header format, expected 'Bearer TOKEN'", ""), http.StatusUnauthorized)
@@ -63,9 +59,10 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 			}
 			token := parts[1]
 
-			// 验证令牌
+			// Verify token using provided verifier
 			authInfo, err := options.Verifier.VerifyAccessToken(req.Context(), token)
 			if err != nil {
+				// Map verifier error to HTTP status via OAuth error code
 				if oauthErr, ok := err.(errors.OAuthError); ok {
 					switch oauthErr.ErrorCode {
 					case errors.ErrInvalidToken.Error():
@@ -84,7 +81,7 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 				return
 			}
 
-			// 遍历检查权限范围
+			// Enforce required scopes if configured
 			if len(options.RequiredScopes) > 0 {
 				for _, scope := range options.RequiredScopes {
 					found := false
@@ -101,7 +98,7 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 				}
 			}
 
-			// 检查令牌过期时间
+			// Ensure token has an expiration time and is not expired
 			if authInfo.ExpiresAt == nil || *authInfo.ExpiresAt == 0 {
 				setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidToken, "Token has no expiration time", ""), http.StatusUnauthorized)
 				return
@@ -111,10 +108,11 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 				return
 			}
 
-			// 将authInfo添加到请求上下文,对应的key为authInfoKeyType{}
+			// Attach validated auth info to the request context under AuthInfoKey
 			ctx := context.WithValue(req.Context(), AuthInfoKey, authInfo)
 			req = req.WithContext(ctx)
 
+			// Delegate to next handler
 			next.ServeHTTP(w, req)
 		})
 	}

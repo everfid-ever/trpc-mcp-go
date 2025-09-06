@@ -8,12 +8,11 @@ import (
 	"testing"
 )
 
-// TestAllowedMethods 测试 AllowedMethods 中间件
 func TestAllowedMethods(t *testing.T) {
-	// 创建测试路由
+	// Create a test handler
 	createTestHandler := func() http.Handler {
 		mux := http.NewServeMux()
-		// 定义 /test 路由，仅支持 GET
+		// Define /test route that only supports GET
 		mux.Handle("/test", AllowedMethods([]string{"GET"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("GET success"))
@@ -21,7 +20,7 @@ func TestAllowedMethods(t *testing.T) {
 		return mux
 	}
 
-	// 测试用例 1：允许指定的 HTTP 方法
+	// Case 1 allows specified HTTP method
 	t.Run("allows specified HTTP method", func(t *testing.T) {
 		handler := createTestHandler()
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
@@ -36,7 +35,7 @@ func TestAllowedMethods(t *testing.T) {
 		}
 	})
 
-	// 测试用例 2：对未指定的 HTTP 方法返回 405
+	// Case 2 returns 405 for unsupported methods
 	t.Run("returns 405 for unspecified HTTP methods", func(t *testing.T) {
 		methods := []string{"POST", "PUT", "DELETE", "PATCH"}
 
@@ -67,7 +66,7 @@ func TestAllowedMethods(t *testing.T) {
 		}
 	})
 
-	// 测试用例 3：检查 Allow 响应头
+	// Case 3 checks Allow header
 	t.Run("includes Allow header with specified methods", func(t *testing.T) {
 		handler := createTestHandler()
 		req := httptest.NewRequest(http.MethodPost, "/test", nil)
@@ -79,9 +78,9 @@ func TestAllowedMethods(t *testing.T) {
 		}
 	})
 
-	// 测试用例 4：支持多个允许的 HTTP 方法
+	// Case 4 supports multiple allowed methods
 	t.Run("works with multiple allowed methods", func(t *testing.T) {
-		// 创建支持 GET 和 POST 的路由
+		// Define /multi route supporting GET and POST
 		mux := http.NewServeMux()
 		mux.Handle("/multi", AllowedMethods([]string{"GET", "POST"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodGet {
@@ -91,7 +90,7 @@ func TestAllowedMethods(t *testing.T) {
 			}
 		})))
 
-		// 测试允许的方法
+		// Allowed methods
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			t.Run(method, func(t *testing.T) {
 				req := httptest.NewRequest(method, "/multi", nil)
@@ -108,7 +107,7 @@ func TestAllowedMethods(t *testing.T) {
 			})
 		}
 
-		// 测试未允许的方法
+		// Unsupported method PUT
 		t.Run("PUT", func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPut, "/multi", nil)
 			rr := httptest.NewRecorder()

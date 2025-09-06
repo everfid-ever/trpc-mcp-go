@@ -16,8 +16,9 @@ import (
 	oauthErrors "trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
-// 共享变量
+// shared test fixtures for proxy provider tests
 var (
+	// validClient models a typical confidential client usable across tests
 	validClient = auth.OAuthClientInformationFull{
 		OAuthClientInformation: auth.OAuthClientInformation{
 			ClientID:     "test-client",
@@ -28,6 +29,7 @@ var (
 		},
 	}
 
+	// baseOptions is the baseline ProxyOptions used by tests, with hooks injected in TestMain
 	baseOptions = ProxyOptions{
 		Endpoints: ProxyEndpoints{
 			AuthorizationURL: "https://auth.example.com/authorize",
@@ -35,11 +37,12 @@ var (
 			RevocationURL:    "https://auth.example.com/revoke",
 			RegistrationURL:  "https://auth.example.com/register",
 		},
-		VerifyAccessToken: nil, // 在 TestMain 中设置
-		GetClient:         nil, // 在 TestMain 中设置
-		Fetch:             nil, // 在测试中设置 mockFetch
+		VerifyAccessToken: nil,
+		GetClient:         nil,
+		Fetch:             nil,
 	}
 
+	// mock token payload values reused across assertions
 	RefreshToken      = "new-refresh-token"
 	ExpiresIn         = int64(3600)
 	mockTokenResponse = auth.OAuthTokens{
@@ -49,13 +52,13 @@ var (
 		RefreshToken: &RefreshToken,
 	}
 
-	// 模拟 fetch 的函数，匹配 auth.FetchFunc
+	// mockFetch is an overridable HTTP transport used to intercept outbound requests in tests
 	mockFetch func(url string, req *http.Request) (*http.Response, error)
 )
 
-// TestMain 初始化
+// TestMain wires per-suite hooks for VerifyAccessToken, GetClient and fetch before running tests
 func TestMain(m *testing.M) {
-	// 设置 mock 函数
+	// set up VerifyAccessToken behavior
 	baseOptions.VerifyAccessToken = func(token string) (*server.AuthInfo, error) {
 		if token == "valid-token" {
 			ExpiresAt := time.Now().Unix() + 3600
@@ -75,6 +78,7 @@ func TestMain(m *testing.M) {
 		return nil, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "Invalid token", "")
 	}
 
+	// set up client lookup behavior
 	baseOptions.GetClient = func(clientID string) (*auth.OAuthClientInformationFull, error) {
 		if clientID == "test-client" {
 			return &validClient, nil
@@ -82,19 +86,18 @@ func TestMain(m *testing.M) {
 		return nil, nil
 	}
 
-	// 运行测试
+	// run tests
 	code := m.Run()
 
-	// 清理
+	// cleanup
 	mockFetch = nil
 	os.Exit(code)
 }
 
-// 测试代码
 func TestProxyOAuthServerProvider(t *testing.T) {
 	provider := NewProxyOAuthServerProvider(baseOptions)
 
-	// 模拟 codeVerifier 和 redirectURI
+	// Mock codeVerifier and redirectURI
 	codeVerifier := "test-verifier"
 	redirectURI := "https://example.com/callback"
 
@@ -114,13 +117,14 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			// 验证状态码和 Location 头部
+			// Verify the status code and Location header
 			if rr.Code != http.StatusFound {
 				t.Errorf("expected status code %d, got %d", http.StatusFound, rr.Code)
 			}
 
 			gotURL := rr.Header().Get("Location")
-			t.Logf("got redirect URL: %s", gotURL) // 调试输出
+			// Debug output
+			t.Logf("got redirect URL: %s", gotURL)
 			expectedURL, _ := url.Parse("https://auth.example.com/authorize")
 			q := expectedURL.Query()
 			q.Set("client_id", "test-client")
@@ -155,7 +159,8 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			t.Logf("tokens: %+v", tokens) // 调试输出
+			// Debug output
+			t.Logf("tokens: %+v", tokens)
 			if tokens.AccessToken != mockTokenResponse.AccessToken {
 				t.Errorf("expected access_token %s, got %s", mockTokenResponse.AccessToken, tokens.AccessToken)
 			}
@@ -175,7 +180,8 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
 				body, _ := io.ReadAll(req.Body)
 				calledBody = string(body)
-				t.Logf("request body: %s", calledBody) // 调试输出
+				// Debug output
+				t.Logf("request body: %s", calledBody)
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access-token","token_type":"Bearer","expires_in":3600,"refresh_token":"new-refresh-token"}`)),
@@ -202,7 +208,8 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 			provider.fetch = mockFetch
 
 			_, err := provider.ExchangeAuthorizationCode(validClient, "test-code", &codeVerifier, nil, nil)
-			t.Logf("error: %v", err) // 调试输出
+			// Debug output
+			t.Logf("error: %v", err)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -300,7 +307,8 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
 				body, _ := io.ReadAll(req.Body)
 				calledBody = string(body)
-				t.Logf("request body: %s", calledBody) // 调试输出
+				// Debug output
+				t.Logf("request body: %s", calledBody)
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access-token","token_type":"Bearer","expires_in":3600,"refresh_token":"new-refresh-token"}`)),
@@ -335,7 +343,8 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 		t.Run("Registers new client", func(t *testing.T) {
 			mockFetch = func(url string, req *http.Request) (*http.Response, error) {
 				body, _ := io.ReadAll(req.Body)
-				t.Logf("register request body: %s", string(body)) // 调试输出
+				// Debug output
+				t.Logf("register request body: %s", string(body))
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader(`{"client_id":"new-client","client_secret":"new-secret","redirect_uris":["https://new-client.com/callback"]}`)),
@@ -378,7 +387,7 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 				},
 			}
 			_, err := provider.ClientsStore().RegisterClient(newClient)
-			t.Logf("error: %v", err) // 调试输出
+			t.Logf("error: %v", err) // Debug output
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -528,14 +537,15 @@ func TestProxyOAuthServerProvider(t *testing.T) {
 
 		t.Run("Passes through unexpected errors", func(t *testing.T) {
 			var calledToken string
-			options := baseOptions // 复制全局配置
+			// Copy global configuration
+			options := baseOptions
 			options.VerifyAccessToken = func(token string) (*server.AuthInfo, error) {
 				calledToken = token
 				return baseOptions.VerifyAccessToken(token)
 			}
 			provider := NewProxyOAuthServerProvider(options)
 
-			// 调用 VerifyAccessToken
+			// Invoke VerifyAccessToken
 			_, err := provider.VerifyAccessToken("valid-token-unexpected")
 			t.Logf("error: %v", err) // 调试输出
 			if err == nil {

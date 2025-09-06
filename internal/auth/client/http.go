@@ -7,14 +7,17 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 )
 
+// ctxKey defines a private type for context keys to avoid collisions
 type ctxKey int
 
 const (
+	// ctxKeyClientAuthInfo is the context key used to store ClientAuthInfo
 	ctxKeyClientAuthInfo ctxKey = iota
+	// ctxKeyClientAuthErr is the context key used to store authentication errors
 	ctxKeyClientAuthErr
 )
 
-// ClientAuthInfo 客户端认证信息
+// ClientAuthInfo holds OAuth client authentication details
 type ClientAuthInfo struct {
 	AccessToken  string
 	RefreshToken *string
@@ -23,7 +26,7 @@ type ClientAuthInfo struct {
 	Extra        map[string]interface{}
 }
 
-// WithAuthInfo 将认证信息写入context
+// WithAuthInfo stores authentication information in the context
 func WithAuthInfo(ctx context.Context, info *ClientAuthInfo) context.Context {
 	if info == nil {
 		return ctx
@@ -31,7 +34,7 @@ func WithAuthInfo(ctx context.Context, info *ClientAuthInfo) context.Context {
 	return context.WithValue(ctx, ctxKeyClientAuthInfo, info)
 }
 
-// GetAuthInfo 从context读取认证信息
+// GetAuthInfo retrieves authentication information from the context
 func GetAuthInfo(ctx context.Context) (*ClientAuthInfo, bool) {
 	v := ctx.Value(ctxKeyClientAuthInfo)
 	if v == nil {
@@ -41,7 +44,7 @@ func GetAuthInfo(ctx context.Context) (*ClientAuthInfo, bool) {
 	return info, ok && info != nil
 }
 
-// WithAuthErr 将认证错误写入context
+// WithAuthErr stores an authentication error in the context
 func WithAuthErr(ctx context.Context, err error) context.Context {
 	if err == nil {
 		return ctx
@@ -49,7 +52,7 @@ func WithAuthErr(ctx context.Context, err error) context.Context {
 	return context.WithValue(ctx, ctxKeyClientAuthErr, err)
 }
 
-// ConvertTokensToAuthInfo 转换token为认证信息
+// ConvertTokensToAuthInfo converts OAuth tokens into ClientAuthInfo
 func ConvertTokensToAuthInfo(tokens *auth.OAuthTokens) *ClientAuthInfo {
 	if tokens == nil || tokens.AccessToken == "" {
 		return nil
@@ -70,20 +73,19 @@ func ConvertTokensToAuthInfo(tokens *auth.OAuthTokens) *ClientAuthInfo {
 	return authInfo
 }
 
-// IsTokenExpired 检查token是否过期
+// IsTokenExpired checks if the token is expired or near expiry
 func IsTokenExpired(authInfo *ClientAuthInfo) bool {
 	if authInfo == nil {
-		return true // When authInfo is nil, it is considered expired.
+		return true // nil means expired
 	}
-
 	if authInfo.ExpiresAt == nil {
-		return false // No expiration date, considered never expired
+		return false // no expiry means never expired
 	}
-
-	// If the token expires within the next 30 seconds, it is considered expired.
+	// expire if within 30 seconds of expiry
 	return !authInfo.ExpiresAt.After(time.Now().Add(30 * time.Second))
 }
 
+// parseTokenScopes extracts scopes from tokens (currently placeholder)
 func parseTokenScopes(tokens *auth.OAuthTokens) []string {
 	return []string{}
 }

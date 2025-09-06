@@ -17,82 +17,55 @@ import (
 
 // ProxyEndpoints defines the OAuth 2.0/2.1 server endpoints used by the proxy.
 // It contains the URLs for various OAuth operations.
-//
-// ProxyEndpoints 定义了代理使用的 OAuth 2.0/2.1 服务器端点。
-// 它包含了各种 OAuth 操作的 URL。
 type ProxyEndpoints struct {
 	// AuthorizationURL is the URL of the OAuth 2.0/2.1 authorization endpoint.
 	// This is where users are redirected to authorize the client.
-	//
-	// AuthorizationURL 是 OAuth 2.0/2.1 授权端点的 URL。
-	// 这是用户被重定向以授权客户端的地址。
 	// "https://auth.example.com/authorize"
 	AuthorizationURL string `json:"authorizationUrl"`
 
 	// TokenURL is the URL of the OAuth 2.0/2.1 token endpoint.
 	// This is where the client exchanges an authorization code for an access token.
-	//
-	// TokenURL 是 OAuth 2.0/2.1 令牌端点的 URL。
-	// 这是客户端用授权码交换访问令牌的地址。
 	// "https://auth.example.com/token"
 	TokenURL string `json:"tokenUrl"`
 
 	// RevocationURL is the optional URL of the OAuth 2.0 token revocation endpoint.
 	// If provided, it's used to revoke access tokens or refresh tokens.
-	//
-	// RevocationURL 是可选的 OAuth 2.0 令牌撤销端点的 URL。
-	// 如果提供，用于撤销访问令牌或刷新令牌。
 	// "https://auth.example.com/revoke"
 	RevocationURL string `json:"revocationUrl,omitempty"`
 
 	// RegistrationURL is the optional URL of the OAuth 2.0 dynamic client registration endpoint.
-	// If provided, it allows clients to register with the authorization server dynamically.
-	//
-	// RegistrationURL 是可选的 OAuth 2.0 动态客户端注册端点的 URL。
-	// 如果提供，允许客户端动态注册到授权服务器。
+	// If provided, it allows clients to register with the authorization server dynamically. 。
 	// "https://auth.example.com/register"
 	RegistrationURL string `json:"registrationUrl,omitempty"`
 }
 
-// ProxyOptions 定义代理OAuth服务器的配置选项
-// Defines configuration options for the proxy OAuth server
+// ProxyOptions defines configuration options for the proxy OAuth server
 type ProxyOptions struct {
-	// Endpoints 代理OAuth操作的端点配置
-	// Individual endpoint URLs for proxying specific OAuth operations
+	// Endpoints presents Endpoint configuration for proxy OAuth operations
 	Endpoints ProxyEndpoints
 
-	// VerifyAccessToken 验证访问令牌并返回认证信息的函数
-	// Function to verify access tokens and return auth info
+	// VerifyAccessToken verifies access tokens and return auth info
 	VerifyAccessToken func(token string) (*server.AuthInfo, error)
 
-	// GetClient 从上游服务器获取客户端信息的函数
-	// Function to fetch client information from the upstream server
+	// GetClient fetches client information from the upstream server
 	GetClient func(clientID string) (*auth.OAuthClientInformationFull, error)
 
-	// Fetch 自定义HTTP请求函数，用于所有网络请求，可选
-	// Custom fetch implementation used for all network requests, optional
+	// Fetch customs fetch implementation used for all network requests, optional
 	Fetch auth.FetchFunc
 }
 
-// ProxyOAuthServerProvider 代理OAuth服务器提供者
-// Proxy OAuth server provider
+// ProxyOAuthServerProvider defines proxy OAuth server provider
 type ProxyOAuthServerProvider struct {
-	// endpoints 代理端点配置
-	// Proxy endpoint configuration
+	// endpoints defines proxy endpoint configuration
 	endpoints ProxyEndpoints
 
-	// verifyAccessToken 验证访问令牌的函数
-	// Function to verify access tokens
+	// verifyAccessToken verifies access tokens
 	verifyAccessToken func(token string) (*server.AuthInfo, error)
 
-	// getClient 获取客户端信息的函数
-	// Function to fetch client information
+	// getClient get client's information
 	getClient func(clientID string) (*auth.OAuthClientInformationFull, error)
 
-	// SkipLocalPkceValidation 是否跳过本地PKCE验证。
-	// 如果为true，服务器不会在本地执行PKCE验证，而是将code_verifier传递给上游服务器。
-	// 注意：仅当上游服务器执行实际的PKCE验证时，此值应为true。
-	// Whether to skip local PKCE validation.
+	// SkipLocalPkceValidation determines whether to skip local PKCE validation.
 	// If true, the server will not perform PKCE validation locally and will pass the code_verifier to the upstream server.
 	// NOTE: This should only be true if the upstream server is performing the actual PKCE validation.
 	// 可选字段，默认false / Optional field, defaults to false
@@ -102,17 +75,15 @@ type ProxyOAuthServerProvider struct {
 	fetch auth.FetchFunc
 }
 
-// Authorize 处理OAuth授权请求并重定向到授权端点
-// Handles OAuth authorization requests and redirects to the authorization endpoint
+// Authorize handles an OAuth authorization request by constructing the query
+// parameters and redirecting the user agent to the configured authorization endpoint.
 func (p *ProxyOAuthServerProvider) Authorize(client auth.OAuthClientInformationFull, params server.AuthorizationParams, res http.ResponseWriter, req *http.Request) error {
-	// 验证授权端点URL
-	// Validate the authorization endpoint URL
+	// Validate the configured authorization endpoint URL
 	targetURL, err := url.Parse(p.endpoints.AuthorizationURL)
 	if err != nil {
 		return fmt.Errorf("invalid authorization URL: %v", err)
 	}
 
-	// 构建必需的OAuth查询参数
 	// Build required OAuth query parameters
 	query := url.Values{
 		"client_id":             {client.ClientID},
@@ -122,8 +93,7 @@ func (p *ProxyOAuthServerProvider) Authorize(client auth.OAuthClientInformationF
 		"code_challenge_method": {"S256"},
 	}
 
-	// 添加可选的OAuth参数
-	// Add optional OAuth parameters
+	// Add optional parameters when present
 	if params.State != "" {
 		query.Set("state", params.State)
 	}
@@ -134,23 +104,24 @@ func (p *ProxyOAuthServerProvider) Authorize(client auth.OAuthClientInformationF
 		query.Set("resource", params.Resource.String())
 	}
 
-	// 设置查询参数并生成重定向URL
-	// Set query parameters and generate the redirect URL
+	// Attach encoded query to the target URL
 	targetURL.RawQuery = query.Encode()
 
-	// 执行HTTP重定向
-	// Perform HTTP redirect
+	// Perform a 302 redirect to the upstream authorization endpoint
 	http.Redirect(res, req, targetURL.String(), http.StatusFound)
 	return nil
 }
 
+// VerifyAccessToken proxies token verification to the configured verifier function.
 func (p *ProxyOAuthServerProvider) VerifyAccessToken(token string) (*server.AuthInfo, error) {
+	// Delegate to injected verifier to allow custom verification strategies
 	return p.verifyAccessToken(token)
 }
 
-// NewProxyOAuthServerProvider 构造函数，初始化代理OAuth服务器提供者
-// Constructor to initialize the proxy OAuth server provider
+// NewProxyOAuthServerProvider creates a new ProxyOAuthServerProvider using the provided options.
+// By default SkipLocalPkceValidation is set to true to defer PKCE verification to the upstream server.
 func NewProxyOAuthServerProvider(options ProxyOptions) *ProxyOAuthServerProvider {
+	// Populate provider with endpoints, dependency functions, and optional fetch
 	provider := &ProxyOAuthServerProvider{
 		endpoints:               options.Endpoints,
 		verifyAccessToken:       options.VerifyAccessToken,
@@ -158,208 +129,236 @@ func NewProxyOAuthServerProvider(options ProxyOptions) *ProxyOAuthServerProvider
 		fetch:                   options.Fetch,
 		SkipLocalPkceValidation: true,
 	}
+	// Return the ready to use provider
 	return provider
 }
 
-// doFetch 辅助方法：执行HTTP请求
-// Helper method: performs an HTTP request
+// doFetch executes an HTTP request using the custom fetch function if provided,
+// otherwise falls back to the default HTTP client.
 func (p *ProxyOAuthServerProvider) doFetch(req *http.Request) (*http.Response, error) {
+	// Prefer custom fetch to allow callers to add auth, retries, or instrumentation
 	if p.fetch != nil {
 		return p.fetch(req.URL.String(), req)
 	}
+	// Fallback to a vanilla http.Client
 	client := &http.Client{}
 	return client.Do(req)
 }
 
+// RevokeToken sends a token revocation request to the configured revocation endpoint.
+// If the revocation endpoint is not configured, an error is returned.
 func (p *ProxyOAuthServerProvider) RevokeToken(client auth.OAuthClientInformationFull, request auth.OAuthTokenRevocationRequest) error {
+	// Ensure the revocation endpoint exists
 	if p.endpoints.RevocationURL == "" {
 		return fmt.Errorf("no revocation endpoint configured")
 	}
+
+	// Build form-encoded body with required parameters
 	params := url.Values{
 		"token":     {request.Token},
 		"client_id": {client.ClientID},
 	}
+
+	// Include client_secret when available for confidential clients
 	if client.ClientSecret != "" {
 		params.Set("client_secret", client.ClientSecret)
 	}
+
+	// Optionally include token_type_hint to help the AS
 	if request.TokenTypeHint != "" {
 		params.Set("token_type_hint", request.TokenTypeHint)
 	}
+
+	// Create POST request with application/x-www-form-urlencoded payload
 	req, err := http.NewRequest("POST", p.endpoints.RevocationURL, strings.NewReader(params.Encode()))
 	if err != nil {
 		return fmt.Errorf("create request failed: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	// Execute request via custom fetch or default client
 	resp, err := p.doFetch(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
+	// Expect 200 OK per RFC 7009
 	if resp.StatusCode != http.StatusOK {
 		return errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("Token revocation failed: %v", resp.StatusCode), "")
 	}
 
+	// No body parsing required for successful revocation
 	return nil
 }
 
-// ClientsStore 返回 OAuthRegisteredClientsStore
-// Returns an OAuthRegisteredClientsStore
+// ClientsStore returns an OAuthClientsStore wired for lookup and optional dynamic client registration
+// depending on whether a registration endpoint is configured.
 func (p *ProxyOAuthServerProvider) ClientsStore() *server.OAuthClientsStore {
 	var store *server.OAuthClientsStore
 
+	// If registration URL is configured, enable dynamic client registration proxy
 	if p.endpoints.RegistrationURL != "" {
-		// 设置动态客户端注册功能
+		// Define registration function that forwards the registration request upstream
 		registerClient := func(client auth.OAuthClientInformationFull) (*auth.OAuthClientInformationFull, error) {
-			// 序列化客户端信息为 JSON
-			// Serialize client information to JSON
+			// Serialize client metadata to JSON request body
 			body, err := json.Marshal(client)
 			if err != nil {
-				//todo 日志化错误
+				// TODO: add logging for serialization error
 				return nil, fmt.Errorf("failed to marshal client: %v", err)
 			}
 
-			// 创建 HTTP 请求
-			// Create HTTP request
+			// Create HTTP POST to upstream registration endpoint
 			req, err := http.NewRequest("POST", p.endpoints.RegistrationURL, bytes.NewReader(body))
 			if err != nil {
-				//todo 日志化错误
+				// TODO: add logging for request creation error
 				return nil, fmt.Errorf("failed to create request: %v", err)
 			}
 			req.Header.Set("Content-Type", "application/json")
 
-			// 执行 HTTP 请求
-			// Perform HTTP request
+			// Execute registration request
 			resp, err := p.doFetch(req)
 			if err != nil {
 				return nil, err
 			}
 			defer resp.Body.Close()
 
-			// 检查响应状态
-			// Check response status
+			// Expect 200 OK with client registration response
 			if resp.StatusCode != http.StatusOK {
-				// return nil, &ServerError{Message: fmt.Sprintf("client registration failed: %v", resp.StatusCode)
-				return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("client registration failed: %v", resp.StatusCode), "")
+				return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Errorf("client registration failed: %v", resp.StatusCode).Error(), "")
 			}
 
-			// 解析响应
-			// Parse response
+			// Decode response JSON into full client record
 			var data auth.OAuthClientInformationFull
 			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-				//todo 日志化错误
+				// TODO: add logging for decode error
 				return nil, fmt.Errorf("failed to decode response: %v", err)
 			}
 
-			// 返回客户端信息（假设无需额外验证，Zod 验证可在此添加）
-			// Return client information (assuming no additional validation; Zod validation can be added here)
+			// Return registered client info to caller
 			return &data, nil
 		}
+
+		// Build a store that supports both lookup and registration
 		store = server.NewOAuthClientStoreSupportDynamicRegistration(p.getClient, registerClient)
 	} else {
-		// 不支持动态客户端注册
+		// Build a lookup-only store when registration is not supported
 		store = server.NewOAuthClientStore(p.getClient)
 	}
 
 	return store
 }
 
-// ChallengeForAuthorizationCode 返回指定授权开始时使用的 codeChallenge 值。
-// Returns the `codeChallenge` that was used when the indicated authorization began.
+// ChallengeForAuthorizationCode returns the PKCE code_challenge for a previously initiated authorization.
+// In a proxy setup this is not stored locally and we defer validation to the upstream server.
 func (p *ProxyOAuthServerProvider) ChallengeForAuthorizationCode(client auth.OAuthClientInformationFull, authorizationCode string) (string, error) {
-	// In a proxy setup, we don't store the code challenge ourselves
-	// Instead, we proxy the token request and let the upstream server validate it
+	// No local storage of code_challenge in proxy mode
+	// Upstream AS validates code_verifier against its stored challenge
 	return "", nil
 }
 
+// ExchangeAuthorizationCode exchanges an authorization code for tokens by forwarding
+// the request to the upstream token endpoint and returning the parsed response.
 func (p *ProxyOAuthServerProvider) ExchangeAuthorizationCode(client auth.OAuthClientInformationFull, authorizationCode string, codeVerifier *string, redirectUri *string, resource *url.URL) (*auth.OAuthTokens, error) {
-	// 验证 token URL
-	// Validate token URL
+	// Ensure a token endpoint is configured
 	if p.endpoints.TokenURL == "" {
 		return nil, fmt.Errorf("no token endpoint configured")
 	}
-	// 构建表单参数
-	// Build form parameters
+
+	// Build form parameters required by the authorization_code grant
 	params := url.Values{
 		"grant_type": {"authorization_code"},
 		"client_id":  {client.ClientID},
 		"code":       {authorizationCode},
 	}
+
+	// Include client_secret for confidential clients
 	if client.ClientSecret != "" {
 		params.Set("client_secret", client.ClientSecret)
 	}
+
+	// Forward PKCE code_verifier when provided
 	if codeVerifier != nil {
 		params.Set("code_verifier", *codeVerifier)
 	}
+
+	// Include redirect_uri when provided to satisfy AS validation
 	if redirectUri != nil {
 		params.Set("redirect_uri", *redirectUri)
 	}
+
+	// Forward resource indicator when present
 	if resource != nil {
 		params.Set("resource", resource.String())
 	}
 
-	// 创建 HTTP 请求
-	// Create HTTP request
+	// Create POST request to token endpoint with form-encoded body
 	req, err := http.NewRequest("POST", p.endpoints.TokenURL, bytes.NewReader([]byte(params.Encode())))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	// 执行 HTTP 请求
-	// Perform HTTP request
+	// Send request via fetch helper
 	resp, err := p.doFetch(req)
 	if err != nil {
 		return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("token exchange failed: %v", err), "")
 	}
 	defer resp.Body.Close()
 
-	// 检查响应状态
-	// Check response status
+	// Expect 200 OK for successful token response
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("token exchange failed: %v", resp.StatusCode), "")
 	}
 
-	// 解析响应 JSON
-	// Parse response JSON
+	// Decode token response JSON into OAuthTokens
 	var data auth.OAuthTokens
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	// 返回令牌
-	// Return tokens
+	// Return parsed tokens to caller
 	return &data, nil
 }
 
+// ExchangeRefreshToken exchanges a refresh token for a new access token by calling
+// the upstream token endpoint and validating the response payload.
 func (p *ProxyOAuthServerProvider) ExchangeRefreshToken(
 	client auth.OAuthClientInformationFull,
 	refreshToken string,
-	scopes []string, // 可选，若为空表示未提供 / Optional, empty slice if not provided
-	resource *url.URL, // 可选，若为nil表示未提供 / Optional, nil if not provided
+	scopes []string, // Optional empty slice if not provided
+	resource *url.URL, // Optional nil if not provided
 ) (*auth.OAuthTokens, error) {
+	// Assemble form parameters for the refresh_token grant
 	params := url.Values{
 		"grant_type":    {"refresh_token"},
 		"client_id":     {client.ClientID},
 		"refresh_token": {refreshToken},
 	}
+
+	// Include client_secret for confidential clients
 	if client.ClientSecret != "" {
 		params.Set("client_secret", client.ClientSecret)
 	}
+
+	// Optionally narrow or expand scopes as requested
 	if len(scopes) > 0 {
 		params.Set("scope", strings.Join(scopes, " "))
 	}
+
+	// Forward resource indicator when present
 	if resource != nil {
 		params.Set("resource", resource.String())
 	}
 
-	// 创建HTTP请求
+	// Create a context bound POST request to the token endpoint
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, p.endpoints.TokenURL, bytes.NewBufferString(params.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	// 使用自定义fetch或默认HTTP客户端
+	// Choose custom fetch when provided, otherwise use default client
 	fetch := p.fetch
 	if fetch == nil {
 		fetch = func(url string, req *http.Request) (*http.Response, error) {
@@ -367,34 +366,37 @@ func (p *ProxyOAuthServerProvider) ExchangeRefreshToken(
 		}
 	}
 
-	// 发送请求
+	// Execute the HTTP request
 	resp, err := fetch(p.endpoints.TokenURL, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// 检查响应状态
+	// Expect a successful status code from the token endpoint
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.NewOAuthError(errors.ErrServerError, fmt.Sprintf("token refresh failed: %v", resp.StatusCode), "")
 	}
 
-	// 解析响应
+	// Decode the token response body
 	var data auth.OAuthTokens
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	// 验证响应数据（使用 validator/v10）
+	// Validate the decoded structure using validator/v10
 	if err := validateOAuthTokens(&data); err != nil {
 		return nil, fmt.Errorf("validation failed: %v", err)
 	}
 
+	// Return validated tokens
 	return &data, nil
 }
 
-// validateOAuthTokens 验证OAuthTokens结构体
+// validateOAuthTokens validates the OAuthTokens struct using github.com/go-playground/validator.
+// This can be extended with custom field validators if needed.
 func validateOAuthTokens(tokens *auth.OAuthTokens) error {
+	// Initialize a new validator instance and run struct validation
 	validate := validator.New()
 	if err := validate.Struct(tokens); err != nil {
 		return fmt.Errorf("validation errors: %v", err)
@@ -402,8 +404,9 @@ func validateOAuthTokens(tokens *auth.OAuthTokens) error {
 	return nil
 }
 
-// GetSkipLocalPkceValidation returns the skipLocalPkceValidation setting
-// This method allows the token handler to check if PKCE validation should be skipped locally
+// GetSkipLocalPkceValidation exposes whether local PKCE verification should be skipped.
+// Token handlers can use this to decide if code_verifier must be validated locally or forwarded.
 func (p *ProxyOAuthServerProvider) GetSkipLocalPkceValidation() bool {
+	// Return the current setting as provided during construction
 	return p.SkipLocalPkceValidation
 }

@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +13,7 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 )
 
-// 测试辅助函数
+// contains checks whether a slice of strings contains a specific item
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
@@ -24,15 +23,19 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
+// captureLogger is a mock implementation of AuditLogger
+// It captures the last logged AuditEvent for inspection in tests
 type captureLogger struct {
 	last AuditEvent
 }
 
+// LogEvent stores the provided event in captureLogger
 func (c *captureLogger) LogEvent(e AuditEvent) error {
 	c.last = e
 	return nil
 }
 
+// LogError stores the event along with the error message in captureLogger
 func (c *captureLogger) LogError(e AuditEvent, err error) error {
 	e.ErrorMessage = err.Error()
 	c.last = e
@@ -40,7 +43,7 @@ func (c *captureLogger) LogError(e AuditEvent, err error) error {
 }
 
 func TestAuditLevelConstants(t *testing.T) {
-	// 测试审计级别常量值
+	// Test audit level constant value
 	if AuditLevelNone != 0 {
 		t.Errorf("Expected AuditLevelNone to be 0, got %d", AuditLevelNone)
 	}
@@ -56,19 +59,19 @@ func TestAuditLevelConstants(t *testing.T) {
 }
 
 func TestNewAuditLogger(t *testing.T) {
-	// 测试创建默认 logger
+	// Test create default logger
 	logger := NewAuditLogger(nil)
 	if logger == nil {
 		t.Fatal("Expected logger to be created")
 	}
 
-	// 测试获取底层 zap logger
+	// Test to get the underlying zap logger
 	zapLogger := logger.GetZapLogger()
 	if zapLogger == nil {
 		t.Fatal("Expected underlying zap logger to exist")
 	}
 
-	// 测试使用自定义 zap logger
+	// Testing using a custom zap logger
 	testLogger := zaptest.NewLogger(t)
 	customLogger := NewAuditLogger(testLogger)
 	if customLogger == nil {
@@ -81,11 +84,11 @@ func TestNewAuditLogger(t *testing.T) {
 }
 
 func TestDefaultAuditLoggerLogEvent(t *testing.T) {
-	// 创建测试 logger
+	// Creating a test logger
 	testLogger := zaptest.NewLogger(t)
 	auditLogger := NewAuditLogger(testLogger)
 
-	// 创建测试事件
+	// Creating a test event
 	event := AuditEvent{
 		EventID:      "test_123",
 		Timestamp:    time.Now(),
@@ -102,7 +105,7 @@ func TestDefaultAuditLoggerLogEvent(t *testing.T) {
 		RiskFactors:  []string{"normal"},
 	}
 
-	// 测试日志记录
+	// Test logging
 	err := auditLogger.LogEvent(event)
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
@@ -126,14 +129,14 @@ func TestDefaultAuditLoggerLogError(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	// 注意：由于 event 是按值传递的，ErrorMessage 不会被修改
-	// 这个测试主要验证 LogError 方法不会返回错误
+	// Note: Since the event is passed by value, the ErrorMessage is not modified.
+	// This test mainly verifies that the LogError method does not return an error.
 }
 
 func TestDefaultAuditMiddlewareOptions(t *testing.T) {
 	options := DefaultAuditMiddlewareOptions()
 
-	// 验证默认值
+	// Verify default values
 	if options.Logger == nil {
 		t.Error("Expected logger to be set")
 	}
@@ -154,7 +157,7 @@ func TestDefaultAuditMiddlewareOptions(t *testing.T) {
 func TestAuditOptionsBuilder(t *testing.T) {
 	builder := NewAuditOptionsBuilder()
 
-	// 测试链式调用
+	// Testing chain calls
 	options := builder.
 		WithLevel(AuditLevelFull).
 		WithHashSensitiveData(false).
@@ -179,12 +182,12 @@ func TestAuditOptionsBuilder(t *testing.T) {
 func TestAuditOptionsBuilderWithCustomFunctions(t *testing.T) {
 	builder := NewAuditOptionsBuilder()
 
-	// 自定义风险评估器
+	// Custom Risk Assessor
 	customRiskAssessor := func(event AuditEvent) (string, []string) {
 		return "high", []string{"custom_risk"}
 	}
 
-	// 自定义元数据提取器
+	// Custom metadata extractors
 	customMetadataExtractor := func(r *http.Request) map[string]interface{} {
 		return map[string]interface{}{
 			"custom_field": "custom_value",
@@ -203,7 +206,7 @@ func TestAuditOptionsBuilderWithCustomFunctions(t *testing.T) {
 		t.Error("Expected MetadataExtractor to be set")
 	}
 
-	// 测试自定义函数
+	// Testing custom functions
 	event := AuditEvent{}
 	riskLevel, riskFactors := options.RiskAssessor(event)
 	if riskLevel != "high" {
@@ -215,7 +218,7 @@ func TestAuditOptionsBuilderWithCustomFunctions(t *testing.T) {
 }
 
 func TestValidateOptions(t *testing.T) {
-	// 测试有效配置
+	// Testing a valid configuration
 	validOptions := &AuditMiddlewareOptions{
 		EndpointPatterns: []string{"/test"},
 	}
@@ -223,7 +226,7 @@ func TestValidateOptions(t *testing.T) {
 		t.Errorf("Expected no error for valid options, got %v", err)
 	}
 
-	// 测试无效配置
+	// Testing for invalid configurations
 	invalidOptions := &AuditMiddlewareOptions{
 		EndpointPatterns: []string{},
 		ExcludePatterns:  []string{},
@@ -332,7 +335,7 @@ func TestRandomString(t *testing.T) {
 }
 
 func TestSanitizeMap(t *testing.T) {
-	// 测试查询参数清理
+	// Test query parameter sanitization
 	queryParams := map[string][]string{
 		"client_id":     {"test_client"},
 		"client_secret": {"secret_value"},
@@ -504,7 +507,7 @@ func TestDetermineErrorCode(t *testing.T) {
 		{404, "not_found"},
 		{429, "too_many_requests"},
 		{500, "server_error"},
-		{999, "server_error"}, // 999 仍然被视为服务器错误
+		{999, "server_error"}, // 999 is still considered a server error
 	}
 
 	for _, tt := range tests {
@@ -516,27 +519,27 @@ func TestDetermineErrorCode(t *testing.T) {
 }
 
 func TestDetermineErrorMessage(t *testing.T) {
-	// 测试 JSON 错误响应
+	// Testing JSON error responses
 	jsonError := `{"error": "invalid_grant", "error_description": "Invalid authorization code"}`
 	message := determineErrorMessage(400, []byte(jsonError))
 	if message != "Invalid authorization code" {
 		t.Errorf("Expected 'Invalid authorization code', got %s", message)
 	}
 
-	// 测试只有 error 字段的响应
+	// Testing responses with only an error field
 	jsonErrorOnly := `{"error": "invalid_request"}`
 	message = determineErrorMessage(400, []byte(jsonErrorOnly))
 	if message != "invalid_request" {
 		t.Errorf("Expected 'invalid_request', got %s", message)
 	}
 
-	// 测试空响应体
+	// Testing for an empty response body
 	message = determineErrorMessage(404, []byte{})
 	if message != "" {
 		t.Errorf("Expected empty message for empty body, got %s", message)
 	}
 
-	// 测试无效 JSON
+	// Testing for invalid JSON
 	invalidJSON := `{invalid json}`
 	message = determineErrorMessage(500, []byte(invalidJSON))
 	if message != "Internal Server Error" {
@@ -545,28 +548,29 @@ func TestDetermineErrorMessage(t *testing.T) {
 }
 
 func TestExtractOAuthInfo(t *testing.T) {
-	// 创建测试请求
+	// Creating a test request
 	req := httptest.NewRequest("POST", "/oauth2/token?client_id=test_client&scope=read+write", strings.NewReader("grant_type=authorization_code&code=test_code"))
 	req.Header.Set("Authorization", "Bearer test_token")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	// 设置上下文中的认证信息
-	ctx := context.WithValue(req.Context(), authInfoKeyType{}, server.AuthInfo{
+	// Set the authentication information in the context
+	ctx := server.WithAuthInfo(req.Context(), &server.AuthInfo{
 		Scopes: []string{"read", "write"},
 		Extra: map[string]interface{}{
-			"sub": "test_user",
+			"sub":       "test_user",
+			"client_id": "ctx_client_id",
 		},
 	})
 	req = req.WithContext(ctx)
 
 	info := extractOAuthInfo(req)
 
-	// 验证提取的信息
+	// Verify the extracted information
 	if info.ClientID != "test_client" {
 		t.Errorf("Expected client_id 'test_client', got %s", info.ClientID)
 	}
 
-	// 注意：由于 ParseForm 可能在某些测试环境中不工作，我们主要测试 URL 参数和头部
+	// Note: Since ParseForm may not work in some test environments, we mainly test URL parameters and headers
 	if info.Token != "test_token" {
 		t.Errorf("Expected token 'test_token', got %s", info.Token)
 	}
@@ -593,7 +597,7 @@ func TestExtractSubject(t *testing.T) {
 		t.Errorf("Expected subject 'test_user', got %s", subject)
 	}
 
-	// 测试没有 subject 的情况
+	// Testing without a subject
 	authInfoNoSub := server.AuthInfo{
 		Extra: map[string]interface{}{
 			"other": "value",
@@ -607,120 +611,120 @@ func TestExtractSubject(t *testing.T) {
 }
 
 func TestAuditMiddlewareBasic(t *testing.T) {
-	// 创建基础审计中间件
+	// Create basic audit middleware
 	middleware := WithBasicAudit()
 
-	// 创建测试处理器
+	// Create a Test Handler
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test response"))
 	})
 
-	// 包装处理器
+	// Package handler
 	wrappedHandler := middleware(testHandler)
 
-	// 创建测试请求
+	// Create a test request
 	req := httptest.NewRequest("GET", "/oauth2/authorize?client_id=test_client", nil)
 	w := httptest.NewRecorder()
 
-	// 执行请求
+	// Execute Request
 	wrappedHandler.ServeHTTP(w, req)
 
-	// 验证响应
+	// Validate response
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 }
 
 func TestAuditMiddlewareDetailed(t *testing.T) {
-	// 创建详细审计中间件
+	// Create detailed audit middleware
 	middleware := WithDetailedAudit()
 
-	// 创建测试处理器
+	// Create a Test Handler
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test response"))
 	})
 
-	// 包装处理器
+	// Package handler
 	wrappedHandler := middleware(testHandler)
 
-	// 创建测试请求
+	// Create a test request
 	req := httptest.NewRequest("POST", "/oauth2/token", strings.NewReader("grant_type=client_credentials"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "test-agent")
 
 	w := httptest.NewRecorder()
 
-	// 执行请求
+	// Execute Request
 	wrappedHandler.ServeHTTP(w, req)
 
-	// 验证响应
+	// Validate response
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 }
 
 func TestAuditMiddlewareFull(t *testing.T) {
-	// 创建完整审计中间件
+	// Create full audit middleware
 	middleware := WithFullAudit()
 
-	// 创建测试处理器
+	// Create a Test Handler
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test response"))
 	})
 
-	// 包装处理器
+	// Package handler
 	wrappedHandler := middleware(testHandler)
 
-	// 创建测试请求
+	// Create a test request
 	req := httptest.NewRequest("DELETE", "/oauth2/revoke", strings.NewReader("token=test_token"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	w := httptest.NewRecorder()
 
-	// 执行请求
+	// Execute request
 	wrappedHandler.ServeHTTP(w, req)
 
-	// 验证响应
+	// Validate response
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 }
 
 func TestAuditMiddlewareWithCustomZapLogger(t *testing.T) {
-	// 创建自定义 zap logger
+	// Create a custom zap logger
 	testLogger := zaptest.NewLogger(t)
 
-	// 创建带自定义 logger 的审计中间件
+	// Create audit middleware with a custom logger
 	options := WithCustomZapLogger(testLogger, AuditLevelDetailed, true)
 	middleware := AuditMiddleware(options)
 
-	// 创建测试处理器
+	// Create a Test Handler
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test response"))
 	})
 
-	// 包装处理器
+	// Package handler
 	wrappedHandler := middleware(testHandler)
 
-	// 创建测试请求
+	// Create a test request
 	req := httptest.NewRequest("GET", "/oauth2/metadata", nil)
 	w := httptest.NewRecorder()
 
-	// 执行请求
+	// Execute request
 	wrappedHandler.ServeHTTP(w, req)
 
-	// 验证响应
+	// Validate response
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 }
 
 func TestAuditMiddlewareExcludePatterns(t *testing.T) {
-	// 创建自定义配置的审计中间件
+	// Create custom configured audit middleware
 	options := NewAuditOptionsBuilder().
 		WithEndpointPatterns([]string{"/oauth2/.*"}).
 		WithExcludePatterns([]string{"/oauth2/health"}).
@@ -728,16 +732,16 @@ func TestAuditMiddlewareExcludePatterns(t *testing.T) {
 
 	middleware := AuditMiddleware(options)
 
-	// 创建测试处理器
+	// Create a test handler
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test response"))
 	})
 
-	// 包装处理器
+	// Package handler
 	wrappedHandler := middleware(testHandler)
 
-	// 测试应该被审计的路径
+	// Test paths that should be audited
 	req1 := httptest.NewRequest("GET", "/oauth2/authorize", nil)
 	w1 := httptest.NewRecorder()
 	wrappedHandler.ServeHTTP(w1, req1)
@@ -746,7 +750,7 @@ func TestAuditMiddlewareExcludePatterns(t *testing.T) {
 		t.Errorf("Expected status 200 for audited path, got %d", w1.Code)
 	}
 
-	// 测试应该被排除的路径
+	// Testing paths that should be excluded
 	req2 := httptest.NewRequest("GET", "/oauth2/health", nil)
 	w2 := httptest.NewRecorder()
 	wrappedHandler.ServeHTTP(w2, req2)
@@ -757,14 +761,14 @@ func TestAuditMiddlewareExcludePatterns(t *testing.T) {
 }
 
 func TestAuditMiddlewareErrorHandling(t *testing.T) {
-	// 创建测试 logger
+	// Create a test logger
 	testLogger := zaptest.NewLogger(t)
 
-	// 创建审计中间件
+	// Create test audit middleware
 	options := WithZapLogger(testLogger)
 	middleware := AuditMiddleware(options)
 
-	// 创建返回错误的测试处理器
+	// Creating a test handler that returns an error
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		errorResponse := map[string]string{
@@ -774,26 +778,26 @@ func TestAuditMiddlewareErrorHandling(t *testing.T) {
 		json.NewEncoder(w).Encode(errorResponse)
 	})
 
-	// 包装处理器
+	// Package handler
 	wrappedHandler := middleware(testHandler)
 
-	// 创建测试请求
+	// Create a test request
 	req := httptest.NewRequest("POST", "/oauth2/token", strings.NewReader(""))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	w := httptest.NewRecorder()
 
-	// 执行请求
+	// Execute request
 	wrappedHandler.ServeHTTP(w, req)
 
-	// 验证响应
+	// Validate request
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400, got %d", w.Code)
 	}
 }
 
 func TestAuditMiddlewarePerformance(t *testing.T) {
-	// 创建性能测试的审计中间件
+	// Creating audit middleware for performance testing
 	options := NewAuditOptionsBuilder().
 		WithLevel(AuditLevelBasic).
 		WithHashSensitiveData(false).
@@ -801,54 +805,54 @@ func TestAuditMiddlewarePerformance(t *testing.T) {
 
 	middleware := AuditMiddleware(options)
 
-	// 创建测试处理器
+	// Create test handler
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 模拟处理时间
+		// Simulation processing time
 		time.Sleep(50 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test response"))
 	})
 
-	// 包装处理器
+	// Package handler
 	wrappedHandler := middleware(testHandler)
 
-	// 创建测试请求
+	// Creating a test request
 	req := httptest.NewRequest("GET", "/oauth2/authorize", nil)
 	w := httptest.NewRecorder()
 
-	// 执行请求
+	// Execute request
 	start := time.Now()
 	wrappedHandler.ServeHTTP(w, req)
 	duration := time.Since(start)
 
-	// 验证响应
+	// Validate response
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
-	// 验证性能（应该比直接调用慢一些，但不会太慢）
+	// Verify performance
 	if duration > 200*time.Millisecond {
 		t.Errorf("Expected reasonable performance, took %v", duration)
 	}
 }
 
 func TestAuditResponseWriter(t *testing.T) {
-	// 创建测试响应记录器
+	// Creating a Test Response Recorder
 	recorder := httptest.NewRecorder()
 
-	// 创建审计响应写入器
+	// Creating an Audit Response Writer
 	auditWriter := &auditResponseWriter{
 		ResponseWriter: recorder,
 		body:           make([]byte, 0),
 	}
 
-	// 测试写入头部
+	// Test write header
 	auditWriter.WriteHeader(http.StatusCreated)
 	if auditWriter.statusCode != http.StatusCreated {
 		t.Errorf("Expected status code %d, got %d", http.StatusCreated, auditWriter.statusCode)
 	}
 
-	// 测试写入数据
+	// Test writing data
 	testData := []byte("test response")
 	written, err := auditWriter.Write(testData)
 	if err != nil {
@@ -858,32 +862,31 @@ func TestAuditResponseWriter(t *testing.T) {
 		t.Errorf("Expected written bytes %d, got %d", len(testData), written)
 	}
 
-	// 验证状态码被设置
+	// Verification status code is set
 	if auditWriter.statusCode == 0 {
 		auditWriter.statusCode = http.StatusOK
 	}
 
-	// 验证响应体被捕获
+	// Verify that the response body is captured
 	if len(auditWriter.body) == 0 {
 		t.Error("Expected response body to be captured")
 	}
 }
 
-// 基准测试
 func BenchmarkAuditMiddleware(b *testing.B) {
-	// 创建基础审计中间件
+	// Creating basic audit middleware
 	middleware := WithBasicAudit()
 
-	// 创建测试处理器
+	// Creating a Test Handler
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("test response"))
 	})
 
-	// 包装处理器
+	// Packaging Processor
 	wrappedHandler := middleware(testHandler)
 
-	// 创建测试请求
+	// Creating a test request
 	req := httptest.NewRequest("GET", "/oauth2/authorize", nil)
 
 	b.ResetTimer()
