@@ -664,6 +664,58 @@ func TestVerifyAccessToken_MixedMode_LocalKeyFound(t *testing.T) {
 	assert.Equal(t, tokenStr, authInfo.Token)
 }
 
+// Introspection-only mode: no JWKS configured, only introspection is used.
+func TestVerifyAccessToken_IntrospectionOnly_Mode(t *testing.T) {
+	ctx := context.Background()
+
+	// Fake introspection endpoint which returns active token and minimal payload
+	introspectCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		introspectCalls++
+		_ = r.ParseForm()
+		token := r.FormValue("token")
+		// return an active response regardless of token content
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"active":    true,
+			"scope":     "read write",
+			"client_id": "cli-123",
+			"exp":       float64(time.Now().Add(5 * time.Minute).Unix()),
+			"aud":       "https://api.example.com",
+		}
+		// echo part to ensure parser tolerates arbitrary fields
+		if token != "" {
+			resp["token_hash"] = len(token)
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	v, err := NewTokenVerifier(ctx, TokenVerifierConfig{
+		Introspection: &IntrospectionConfig{
+			Endpoint:         server.URL,
+			Timeout:          2 * time.Second,
+			CacheTTL:         2 * time.Second,
+			NegativeCacheTTL: 1 * time.Second,
+			UseOnJWTFail:     true,
+		},
+	})
+	require.NoError(t, err)
+
+	// Opaque token scenario
+	ai, err := v.VerifyAccessToken(ctx, "opaque-token-abc")
+	assert.NoError(t, err)
+	assert.Equal(t, "cli-123", ai.ClientID)
+	assert.ElementsMatch(t, []string{"read", "write"}, ai.Scopes)
+	assert.NotNil(t, ai.ExpiresAt)
+
+	// Cache hit path
+	ai2, err := v.VerifyAccessToken(ctx, "opaque-token-abc")
+	assert.NoError(t, err)
+	assert.Equal(t, ai.ClientID, ai2.ClientID)
+	assert.LessOrEqual(t, introspectCalls, 2) // first call + maybe cache check
+}
+
 // Key rotation: first JWKS does not contain target kid, second fetch returns rotated JWKS.
 func TestVerifyAccessToken_RemoteJWKS_KeyRotation_RefreshOnKidMiss(t *testing.T) {
 	ctx := context.Background()

@@ -185,6 +185,7 @@ func NewRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVe
 }
 
 // NewTokenVerifier 创建综合 TokenVerifier
+// 只需提供一种或多种配置即可工作。SDK 将自动按“本地 → 远程 → introspection（如启用）
 func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerifier, error) {
 	var verifier *TokenVerifier
 	var err error
@@ -210,7 +211,12 @@ func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerif
 	}
 
 	if verifier == nil {
-		return nil, errors.New("must provide either Local or Remote configuration")
+		// 若未提供 JWKS，则允许构建“仅 introspection”模式
+		if cfg.Introspection != nil {
+			verifier = &TokenVerifier{}
+		} else {
+			return nil, errors.New("no verification method configured: configure Local JWKS (Local), or Remote JWKS (Remote), or Introspection")
+		}
 	}
 
 	// 初始化 introspection（可选）
@@ -253,11 +259,22 @@ func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerif
 		verifier.introspectCache = make(map[string]introspectionCacheEntry)
 	}
 
+	// 不设置显式“模式”，在 Verify 阶段按配置动态选择
+
 	return verifier, nil
 }
 
 // VerifyAccessToken 验证 JWT token，返回解析后的 token 或错误
 func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) (AuthInfo, error) {
+	// 未配置任何 JWKS 且启用 introspection：直接走 introspection（兼容 opaque/JWT）
+	if v.localKeySet == nil && !v.isRemote && v.introspectionEnabled {
+		ai, err := v.introspectAccessToken(ctx, tokenStr, "")
+		if err != nil {
+			return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to verify token", "")
+		}
+		return ai, nil
+	}
+
 	// 先解析 token（不验证签名）以获取 iss；若失败且启用 introspection，则直接尝试 introspection（支持 opaque token）。
 	unverifiedToken, err := jwt.ParseInsecure([]byte(tokenStr))
 	if err != nil {
@@ -266,13 +283,13 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 				return ai, nil
 			}
 		}
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to verify token", "")
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "malformed token: cannot parse header/payload; if you are using opaque tokens, enable Introspection", "")
 	}
 
 	// 获取 iss
 	iss, ok := unverifiedToken.Issuer()
 	if !ok || iss == "" {
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get iss from token", "")
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing issuer (iss) in token", "")
 	}
 
 	// 从 JWS Header 中获取 kid
@@ -284,7 +301,7 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 				return ai, nil
 			}
 		}
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to get kid from token header", "")
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing key id (kid) in JWS header; if your tokens omit kid, ensure the JWKS only contains one key or use Introspection fallback", "")
 	}
 
 	// 尝试获取目标 keySet
@@ -311,7 +328,7 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 				return ai, nil
 			}
 		}
-		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "failed to verify token", "")
+		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "signature validation failed or claims invalid; ensure JWKS is configured for issuer or enable Introspection fallback", "")
 	}
 
 	// 校验sub字段非空
@@ -339,7 +356,7 @@ func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (j
 		if url_, ok := v.issuerToURL[iss]; ok {
 			keySet, err := v.cache.Lookup(ctx, url_)
 			if err != nil {
-				return nil, fmt.Errorf("failed to lookup remote JWKS for issuer %s: %w", iss, err)
+				return nil, fmt.Errorf("failed to lookup remote JWKS for issuer %s (url=%s): %w", iss, url_, err)
 			}
 			// 若 kid 未命中，则触发一次性强制刷新并重试（应对密钥轮换）
 			if _, ok := keySet.LookupKeyID(kid); !ok {
@@ -351,10 +368,10 @@ func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (j
 			}
 			return keySet, nil
 		}
-		return nil, fmt.Errorf("no remote JWKS URL found for issuer %s", iss)
+		return nil, fmt.Errorf("no remote JWKS URL found for issuer %s: provide Remote.IssuerToURL mapping", iss)
 	}
 
-	return nil, fmt.Errorf("no JWKS found for issuer %s", iss)
+	return nil, fmt.Errorf("no JWKS found for issuer %s: neither Local nor Remote key set available", iss)
 }
 
 // ---- RFC7662 introspection 实现 ----
@@ -417,7 +434,7 @@ func (v *TokenVerifier) introspectAccessToken(ctx context.Context, tokenStr, iss
 	}
 	endpoint, creds := v.resolveIntrospectionEndpoint(issuer)
 	if endpoint == "" {
-		return AuthInfo{}, errors.New("no introspection endpoint configured")
+		return AuthInfo{}, errors.New("no introspection endpoint configured: set Introspection.Endpoint or IssuerToEndpoint for the issuer")
 	}
 
 	key := v.introspectionCacheKey(endpoint, tokenStr)
