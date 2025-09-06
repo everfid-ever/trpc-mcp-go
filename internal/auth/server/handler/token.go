@@ -2,13 +2,13 @@ package handler
 
 import (
 	"encoding/json"
-	"github.com/go-playground/validator/v10"
-	"golang.org/x/time/rate"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/go-playground/validator/v10"
+	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/pkce"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
@@ -186,7 +186,8 @@ func handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request, valida
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 
-		if verrs, ok := err.(validator.ValidationErrors); ok {
+		switch verrs := err.(type) {
+		case validator.ValidationErrors:
 			for _, fe := range verrs {
 				if fe.Field() == "Resource" && fe.Tag() == "url" {
 					errResp := errors.NewOAuthError(errors.ErrInvalidRequest, "resource must be a valid URL", "")
@@ -194,11 +195,14 @@ func handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request, valida
 					return
 				}
 			}
+			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+			return
+		default:
+			errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
+			json.NewEncoder(w).Encode(errResp.ToResponseStruct())
+			return
 		}
-
-		errResp := errors.NewOAuthError(errors.ErrInvalidRequest, err.Error(), "")
-		json.NewEncoder(w).Encode(errResp.ToResponseStruct())
-		return
 	}
 
 	// Check if the provider supports skipLocalPKceValidation
