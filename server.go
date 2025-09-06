@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	sh "trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
