@@ -1,6 +1,6 @@
 module trpc.group/trpc-go/trpc-mcp-go
 
-go 1.22.0
+go 1.20
 
 require (
 	github.com/getkin/kin-openapi v0.124.0

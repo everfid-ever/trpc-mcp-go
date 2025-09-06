@@ -305,6 +305,7 @@ func WithProtocolVersion(version string) ClientOption {
 func WithClientLogger(logger Logger) ClientOption {
 	return func(c *Client) {
 		c.logger = logger
+		c.transportConfig.logger = logger
 		c.transportOptions = append(c.transportOptions, withClientTransportLogger(logger))
 	}
 }
@@ -319,6 +320,7 @@ func WithClientGetSSEEnabled(enabled bool) ClientOption {
 // WithClientPath sets a custom path for the client transport.
 func WithClientPath(path string) ClientOption {
 	return func(c *Client) {
+		c.transportConfig.path = path
 		c.transportOptions = append(c.transportOptions, withClientTransportPath(path))
 	}
 }
@@ -354,6 +356,7 @@ func WithHTTPHeaders(headers http.Header) ClientOption {
 // This is typically only needed when using custom implementations of HTTPReqHandler.
 func WithServiceName(serviceName string) ClientOption {
 	return func(c *Client) {
+		c.transportConfig.serviceName = serviceName
 		c.transportOptions = append(c.transportOptions, withTransportServiceName(serviceName))
 	}
 }
@@ -363,6 +366,7 @@ func WithServiceName(serviceName string) ClientOption {
 // that support additional configuration options.
 func WithHTTPReqHandlerOption(options ...HTTPReqHandlerOption) ClientOption {
 	return func(c *Client) {
+		c.transportConfig.httpReqHandlerOptions = append(c.transportConfig.httpReqHandlerOptions, options...)
 		for _, option := range options {
 			c.transportOptions = append(c.transportOptions, withTransportHTTPReqHandlerOption(option))
 		}
