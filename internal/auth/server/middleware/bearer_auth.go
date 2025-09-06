@@ -12,6 +12,17 @@ import (
 	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
+// audienceMatchLocal matches resource against allowed audience values (trim trailing '#')
+func audienceMatchLocal(resource string, allowed []string) bool {
+	resource = strings.TrimSuffix(strings.TrimSpace(resource), "#")
+	for _, a := range allowed {
+		if resource == strings.TrimSuffix(strings.TrimSpace(a), "#") {
+			return true
+		}
+	}
+	return false
+}
+
 // BearerAuthMiddlewareOptions defines configuration for the Bearer auth middleware
 type BearerAuthMiddlewareOptions struct {
 	// Verifier is used to validate the access token
@@ -22,6 +33,12 @@ type BearerAuthMiddlewareOptions struct {
 
 	// ResourceMetadataURL is optionally included in the WWW-Authenticate header
 	ResourceMetadataURL *string
+
+	// Issuer restricts accepted tokens to this issuer (optional)
+	Issuer string
+
+	// Audience restricts accepted tokens to this audience/resource (optional)
+	Audience []string
 }
 
 // RequireBearerAuth returns an HTTP middleware that validates Bearer tokens on incoming requests
@@ -35,6 +52,10 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 					wwwAuthValue := fmt.Sprintf(`Bearer error="%s", error_description="%s"`, err.ErrorCode, err.Message)
 					if options.ResourceMetadataURL != nil {
 						wwwAuthValue += fmt.Sprintf(`, resource_metadata="%s"`, *options.ResourceMetadataURL)
+					}
+					// Append scope for insufficient_scope
+					if err.ErrorCode == errors.ErrInsufficientScope.Error() && len(options.RequiredScopes) > 0 {
+						wwwAuthValue += fmt.Sprintf(`, scope="%s"`, strings.Join(options.RequiredScopes, " "))
 					}
 					w.Header().Set("WWW-Authenticate", wwwAuthValue)
 				}
@@ -81,6 +102,24 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 				return
 			}
 
+			// Optional issuer guarantee
+			if options.Issuer != "" {
+				if authInfo.Extra != nil {
+					if iss, _ := authInfo.Extra["iss"].(string); iss != "" && iss != options.Issuer {
+						setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidToken, "Invalid token issuer", ""), http.StatusUnauthorized)
+						return
+					}
+				}
+			}
+
+			// Optional audience/resource check (RFC 8707 simplified)
+			if len(options.Audience) > 0 && authInfo.Resource != nil {
+				if !audienceMatchLocal(authInfo.Resource.String(), options.Audience) {
+					setErrorResponse(w, errors.NewOAuthError(errors.ErrInvalidToken, "Invalid token audience", ""), http.StatusUnauthorized)
+					return
+				}
+			}
+
 			// Enforce required scopes if configured
 			if len(options.RequiredScopes) > 0 {
 				for _, scope := range options.RequiredScopes {
@@ -108,7 +147,8 @@ func RequireBearerAuth(options BearerAuthMiddlewareOptions) func(handler http.Ha
 				return
 			}
 
-			// Attach validated auth info to the request context under AuthInfoKey
+			// Attach validated auth info to the request context under AuthInfoKey (avoid token propagation)
+			authInfo.Token = ""
 			ctx := context.WithValue(req.Context(), AuthInfoKey, authInfo)
 			req = req.WithContext(ctx)
 
