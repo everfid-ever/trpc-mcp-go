@@ -125,7 +125,7 @@ func (f TokenVerifierFunc) VerifyAccessToken(ctx context.Context, token string) 
 }
 
 // NewLocalTokenVerifier 创建仅使用本地 JWKS 的 TokenVerifier
-func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVerifier, error) {
+func newLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVerifier, error) {
 	verifier := &TokenVerifier{}
 
 	defaultSet := jwk.NewSet()
@@ -163,7 +163,7 @@ func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVeri
 }
 
 // NewRemoteTokenVerifier 创建仅使用远程 JWKS 的 TokenVerifier
-func NewRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVerifier, error) {
+func newRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVerifier, error) {
 	if len(cfg.URLs) == 0 {
 		return nil, fmt.Errorf("must provide at least one RemoteURL")
 	}
@@ -197,14 +197,14 @@ func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerif
 	var err error
 
 	if cfg.Remote != nil && len(cfg.Remote.URLs) > 0 {
-		verifier, err = NewRemoteTokenVerifier(ctx, *cfg.Remote)
+		verifier, err = newRemoteTokenVerifier(ctx, *cfg.Remote)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	if cfg.Local != nil && (cfg.Local.JWKS != "" || cfg.Local.File != "") {
-		localVerifier, err := NewLocalTokenVerifier(ctx, *cfg.Local)
+		localVerifier, err := newLocalTokenVerifier(ctx, *cfg.Local)
 		if err != nil {
 			return nil, err
 		}
