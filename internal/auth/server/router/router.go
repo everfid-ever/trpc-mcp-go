@@ -10,32 +10,70 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/handler"
 )
 
 // AuthRouterOptions holds configuration options for the MCP authentication router.
+// It configures how OAuth 2.1 endpoints (/authorize, /token, /revoke, /register) are exposed.
 type AuthRouterOptions struct {
-	Provider                  server.OAuthServerProvider
-	IssuerUrl                 *url.URL
-	BaseUrl                   *url.URL
-	ServiceDocumentationUrl   *url.URL
-	ScopesSupported           []string
-	ResourceName              *string
-	AuthorizationOptions      *handler.AuthorizationHandlerOptions
+	// Provider is the OAuth server implementation.
+	// It manages client registration, authorization codes, tokens, and verification.
+	Provider server.OAuthServerProvider
+
+	// IssuerUrl is the OAuth issuer identifier (RFC 8414).
+	// Typically something like "https://auth.example.com".
+	IssuerUrl *url.URL
+
+	// BaseUrl is the base URL of this service, used to construct endpoint URLs
+	// such as /authorize, /token, etc.
+	BaseUrl *url.URL
+
+	// ServiceDocumentationUrl points to human-readable documentation about the service,
+	// usually an API docs page.
+	ServiceDocumentationUrl *url.URL
+
+	// ScopesSupported lists all scopes supported by this authorization server,
+	// for example: ["read", "write"].
+	ScopesSupported []string
+
+	// ResourceName is an optional logical name for the protected resource/API.
+	ResourceName *string
+
+	// AuthorizationOptions configures the /authorize endpoint (validation, rate limiting, etc.).
+	AuthorizationOptions *handler.AuthorizationHandlerOptions
+
+	// ClientRegistrationOptions configures the /register endpoint for dynamic client registration (RFC 7591).
 	ClientRegistrationOptions *handler.ClientRegistrationHandlerOptions
-	RevocationOptions         *handler.RevocationHandlerOptions
-	TokenOptions              *handler.TokenHandlerOptions
+
+	// RevocationOptions configures the /revoke endpoint for token revocation (RFC 7009).
+	RevocationOptions *handler.RevocationHandlerOptions
+
+	// TokenOptions configures the /token endpoint for issuing tokens (supports auth code flow, PKCE, etc.).
+	TokenOptions *handler.TokenHandlerOptions
 }
 
 // AuthMetadataOptions holds configuration options for the MCP authentication metadata endpoints.
+// It controls what is published via OAuth 2.1 Authorization Server Metadata (RFC 8414).
 type AuthMetadataOptions struct {
-	OAuthMetadata           auth.OAuthMetadata
-	ResourceServerUrl       *url.URL
+	// OAuthMetadata contains the full OAuth 2.1 Authorization Server Metadata,
+	// including authorization_endpoint, token_endpoint, scopes_supported, etc.
+	OAuthMetadata auth.OAuthMetadata
+
+	// ResourceServerUrl points to the protected resource server,
+	// used by clients to discover where to send API requests.
+	ResourceServerUrl *url.URL
+
+	// ServiceDocumentationUrl points to human-readable documentation about the service.
 	ServiceDocumentationUrl *url.URL
-	ScopesSupported         []string
-	ResourceName            *string
+
+	// ScopesSupported lists the scopes supported by this resource server.
+	ScopesSupported []string
+
+	// ResourceName is an optional logical name for the resource server.
+	ResourceName *string
 }
 
 // checkIssuerUrl validates the issuer URL according to RFC 8414.
@@ -56,17 +94,23 @@ func checkIssuerUrl(issuer *url.URL) error {
 
 // supportsClientRegistration checks if the provider supports dynamic client registration
 func supportsClientRegistration(provider server.OAuthServerProvider) bool {
+	if provider == nil {
+		return false
+	}
+
 	clientsStore := provider.ClientsStore()
 	if clientsStore == nil {
 		return false
 	}
-	// Use type assertion to check if the clients store implements SupportDynamicClientRegistration interface
-	_, ok := provider.(server.SupportDynamicClientRegistration)
-	return ok
+	// Check if the clients store supports registration
+	return clientsStore.SupportsRegistration()
 }
 
 // supportsTokenRevocation checks if the provider supports token revocation
 func supportsTokenRevocation(provider server.OAuthServerProvider) bool {
+	if provider == nil {
+		return false
+	}
 	// Use type assertion to check if the provider implements SupportTokenRevocation interface
 	_, ok := provider.(server.SupportTokenRevocation)
 	return ok
@@ -80,6 +124,10 @@ func CreateOAuthMetadata(options struct {
 	ServiceDocumentationUrl *url.URL
 	ScopesSupported         []string
 }) (auth.OAuthMetadata, error) {
+	if options.Provider == nil {
+		return auth.OAuthMetadata{}, fmt.Errorf("provider is required")
+	}
+
 	issuer := options.IssuerUrl
 	baseUrl := options.BaseUrl
 
@@ -176,7 +224,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 	if options.AuthorizationOptions != nil && options.AuthorizationOptions.RateLimit != nil {
 		authzOptions.RateLimit = options.AuthorizationOptions.RateLimit
 	}
-	mux.Handle("GET "+authorizationURL.Path, handler.AuthorizationHandler(authzOptions))
+	mux.Handle(authorizationURL.Path, methodRestrictedHandler("GET", handler.AuthorizationHandler(authzOptions)))
 
 	// Token endpoint (POST only for OAuth 2.1)
 	tokenURL, _ := url.Parse(oauthMetadata.TokenEndpoint)
@@ -186,7 +234,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 			tokenOptions.RateLimit = options.TokenOptions.RateLimit
 		}
 	}
-	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
+	mux.Handle(tokenURL.Path, methodRestrictedHandler("POST", handler.TokenHandler(tokenOptions)))
 
 	// Metadata endpoints
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
@@ -206,25 +254,24 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 
 	// Dynamic client registration (optional, POST only)
 	if oauthMetadata.RegistrationEndpoint != nil {
-		registrationURL, _ := url.Parse(*oauthMetadata.RegistrationEndpoint)
-		clientsStore := options.Provider.ClientsStore()
-
-		regOpts := handler.ClientRegistrationHandlerOptions{
-			ClientsStore: clientsStore,
-		}
-
-		if options.ClientRegistrationOptions != nil {
-			regOpts = *options.ClientRegistrationOptions
-			regOpts.ClientsStore = clientsStore
-		} else {
-			// OAuth 2.1 recommended rate limiting for client registration
-			regOpts.RateLimit = &handler.RegisterRateLimitConfig{
-				WindowMs: 60000,
-				Max:      10,
+		// Ensure ClientsStore() is not nil before mounting /register
+		if clientsStore := options.Provider.ClientsStore(); clientsStore != nil {
+			registrationURL, _ := url.Parse(*oauthMetadata.RegistrationEndpoint)
+			regOpts := handler.ClientRegistrationHandlerOptions{
+				ClientsStore: clientsStore,
 			}
+			if options.ClientRegistrationOptions != nil {
+				regOpts = *options.ClientRegistrationOptions
+				regOpts.ClientsStore = clientsStore
+			} else {
+				// OAuth 2.1 recommended rate limiting for client registration
+				regOpts.RateLimit = &handler.RegisterRateLimitConfig{
+					WindowMs: 60000,
+					Max:      10,
+				}
+			}
+			mux.Handle(registrationURL.Path, methodRestrictedHandler("POST", handler.ClientRegistrationHandler(regOpts)))
 		}
-
-		mux.Handle("POST "+registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
 	}
 
 	// Token revocation endpoint (optional, POST only)
@@ -238,7 +285,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 			revOpts.RateLimit = options.RevocationOptions.RateLimit
 		}
 
-		mux.Handle("POST "+revocationURL.Path, handler.RevocationHandler(revOpts))
+		mux.Handle(revocationURL.Path, methodRestrictedHandler("POST", handler.RevocationHandler(revOpts)))
 	}
 
 	return nil
@@ -271,12 +318,12 @@ func McpAuthMetadataRouter(mux *http.ServeMux, options AuthMetadataOptions) erro
 	}
 
 	// Protected resource metadata endpoint (GET only)
-	mux.Handle("GET /.well-known/oauth-protected-resource",
-		handler.MetadataHandler(protectedResourceMetadata))
+	mux.Handle("/.well-known/oauth-protected-resource",
+		methodRestrictedHandler("GET", handler.MetadataHandler(protectedResourceMetadata)))
 
 	// Authorization server metadata endpoint (GET only, for backward compatibility)
-	mux.Handle("GET /.well-known/oauth-authorization-server",
-		handler.MetadataHandler(options.OAuthMetadata))
+	mux.Handle("/.well-known/oauth-authorization-server",
+		methodRestrictedHandler("GET", handler.MetadataHandler(options.OAuthMetadata)))
 
 	return nil
 }
@@ -328,4 +375,15 @@ func InstallMCPAuthRoutes(
 	}
 
 	return McpAuthRouter(mux, options)
+}
+
+func methodRestrictedHandler(allowedMethod string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != allowedMethod {
+			w.Header().Set("Allow", allowedMethod)
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
