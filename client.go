@@ -264,6 +264,8 @@ type transportConfig struct {
 	// These options are typically not used by the default handler, but may be used by custom
 	// implementations that replace the default NewHTTPReqHandler function for extensibility.
 	httpReqHandlerOptions []HTTPReqHandlerOption
+
+	oauthProvider client.OAuthClientProvider
 }
 
 // newDefaultTransportConfig creates a default transport configuration.
@@ -276,6 +278,7 @@ func newDefaultTransportConfig() *transportConfig {
 		httpReqHandlerOptions: []HTTPReqHandlerOption{},
 		enableGetSSE:          true,
 		path:                  "",
+		oauthProvider:         nil,
 	}
 }
 
@@ -780,6 +783,7 @@ func WithAuthFlow(config AuthFlowConfig) ClientOption {
 		)
 
 		c.oauthProvider = provider
+		c.transportConfig.oauthProvider = provider
 		c.transportOptions = append(c.transportOptions, withTransportOAuthProvider(provider))
 
 	}
