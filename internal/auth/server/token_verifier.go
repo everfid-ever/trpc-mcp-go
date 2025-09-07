@@ -26,10 +26,21 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
-// Standard JWT claims that should not be included in Extra
+// standardClaims are filtered out of Extra because they are either mapped to
+// AuthInfo first-class fields or are not useful as extra metadata.
+// Mapped fields: client_id -> ClientID, sub -> Subject, scope -> Scopes,
+// exp -> ExpiresAt, aud -> Resource (via extractResource)
 var standardClaims = map[string]bool{
-	"iss": true, "sub": true, "aud": true, "exp": true, "iat": true,
-	"jti": true, "client_id": true, "scope": true, "kid": true,
+	"client_id": true,
+	"sub":       true,
+	"scope":     true,
+	"exp":       true,
+	"aud":       true,
+	// Other common standard/housekeeping claims not needed in Extra
+	"iss": true,
+	"iat": true,
+	"jti": true,
+	"kid": true,
 }
 
 type TokenVerifierInterface interface {
@@ -658,6 +669,11 @@ func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (
 		return AuthInfo{}, err
 	}
 
+	// 写入 subject -> AuthInfo.Subject
+	if s := token.Subject(); s != "" {
+		authInfo.Subject = s
+	}
+
 	// 其他自定义声明
 	authInfo.Extra = extractExtra(token)
 	return authInfo, nil
@@ -772,8 +788,7 @@ func extractExtra(token jwt.Token) map[string]interface{} {
 		}
 		switch key {
 		case "active", "username", "token_type", "token_type_hint":
-			continue
-		case "client_id", "scope", "exp", "aud", "iss", "sub", "iat", "jti":
+			// known noise in introspection/JWT contexts; exclude from Extra
 			continue
 		default:
 			extra[key] = value

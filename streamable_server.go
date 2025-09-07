@@ -246,11 +246,11 @@ func (h *httpServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Apply auth middleware first, then audit middleware
-	if h.authEnabled && h.authWrap != nil {
-		core = h.authWrap(core)
-	}
 	if h.auditEnabled && h.auditWrap != nil {
 		core = h.auditWrap(core)
+	}
+	if h.authEnabled && h.authWrap != nil {
+		core = h.authWrap(core)
 	}
 
 	core.ServeHTTP(w, r)
