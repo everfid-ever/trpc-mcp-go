@@ -1,3 +1,9 @@
+// Tencent is pleased to support the open source community by making trpc-mcp-go available.
+//
+// Copyright (C) 2025 Tencent.  All rights reserved.
+//
+// trpc-mcp-go is licensed under the Apache License Version 2.0.
+
 package middleware
 
 import (
@@ -6,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -315,7 +322,7 @@ func TestRequireBearerAuth_VerifierErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("unexpected error -> 500", func(t *testing.T) {
+	t.Run("unexpected error -> 401", func(t *testing.T) {
 		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) {
 			return srv.AuthInfo{}, fmt.Errorf("unexpected error")
 		}}
@@ -326,15 +333,16 @@ func TestRequireBearerAuth_VerifierErrors(t *testing.T) {
 		if nextCalled {
 			t.Fatalf("expected next not to be called")
 		}
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("expected 500, got %d", rec.Code)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", rec.Code)
 		}
 		body := decodeOAuthResp(t, rec)
-		if body.Error != "server_error" || body.ErrorDescription != "Internal Server Error" {
+		if body.Error != "invalid_token" || body.ErrorDescription != "Invalid access token" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
-		if hdr := rec.Header().Get("WWW-Authenticate"); hdr != "" {
-			t.Fatalf("expected no WWW-Authenticate header, got %q", hdr)
+		hdr := rec.Header().Get("WWW-Authenticate")
+		if !strings.Contains(hdr, `error="invalid_token"`) || !strings.Contains(hdr, "Invalid access token") {
+			t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
 		}
 	})
 }
@@ -406,8 +414,8 @@ func TestRequireBearerAuth_WithResourceMetadata(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("expected 403, got %d", rec.Code)
 		}
-		if hdr := rec.Header().Get("WWW-Authenticate"); !strings.Contains(hdr, `resource_metadata="`+url+`"`) {
-			t.Fatalf("resource_metadata missing in header: %q", hdr)
+		if hdr := rec.Header().Get("WWW-Authenticate"); !strings.Contains(hdr, `resource_metadata="`+url+`"`) || !strings.Contains(hdr, `scope="read write"`) {
+			t.Fatalf("resource_metadata or scope missing in header: %q", hdr)
 		}
 	})
 
@@ -434,4 +442,325 @@ func TestRequireBearerAuth_WithResourceMetadata(t *testing.T) {
 			t.Fatalf("expected body {error: \"server_error\", error_description: \"Internal server issue\"}, got %+v", body)
 		}
 	})
+}
+
+func TestRequireBearerAuth_IssuerChecks(t *testing.T) {
+	t.Run("issuer accepted when matches", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Extra: map[string]interface{}{"iss": "https://issuer.example"}}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Issuer: "https://issuer.example"}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("issuer rejected when mismatches", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Extra: map[string]interface{}{"iss": "https://issuer.example"}}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Issuer: "https://another-issuer"}, "Bearer tok")
+		if nextCalled || rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
+		}
+		hdr := rec.Header().Get("WWW-Authenticate")
+		if !strings.Contains(hdr, `error="invalid_token"`) || !strings.Contains(hdr, "Invalid token issuer") {
+			t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
+		}
+		body := decodeOAuthResp(t, rec)
+		if body.Error != "invalid_token" || body.ErrorDescription != "Invalid token issuer" {
+			t.Fatalf("unexpected body: %+v", body)
+		}
+	})
+
+	t.Run("issuer check skipped when Extra is nil", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Extra: nil}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Issuer: "https://issuer.example"}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("issuer check skipped when iss claim is non-string", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Extra: map[string]interface{}{"iss": 12345}}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Issuer: "https://issuer.example"}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("issuer check skipped when iss is empty string", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Extra: map[string]interface{}{"iss": ""}}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Issuer: "https://issuer.example"}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+}
+
+func TestRequireBearerAuth_AudienceChecks(t *testing.T) {
+	t.Run("audience accepted when matches exactly", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		// token resource: https://api.example.com/mcp# -> middleware trims trailing '#'
+		u := mustParseURL(t, "https://api.example.com/mcp#")
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Resource: u}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Audience: []string{"https://api.example.com/mcp"}}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("audience rejected when mismatched", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		u := mustParseURL(t, "https://api.example.com/mcp")
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Resource: u}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Audience: []string{"https://other.example.com/mcp"}}, "Bearer tok")
+		if nextCalled || rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 without next, got %d next=%v", rec.Code, nextCalled)
+		}
+		hdr := rec.Header().Get("WWW-Authenticate")
+		if !strings.Contains(hdr, `error="invalid_token"`) || !strings.Contains(hdr, "Invalid token audience") {
+			t.Fatalf("unexpected WWW-Authenticate: %q", hdr)
+		}
+		body := decodeOAuthResp(t, rec)
+		if body.Error != "invalid_token" || body.ErrorDescription != "Invalid token audience" {
+			t.Fatalf("unexpected body: %+v", body)
+		}
+	})
+
+	t.Run("audience accepted when in multi-value list", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		u := mustParseURL(t, "https://api.example.com/mcp#")
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Resource: u}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Audience: []string{"https://other.example.com", "https://api.example.com/mcp"}}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("audience accepted when allowed value has trailing hash", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		u := mustParseURL(t, "https://api.example.com/mcp")
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Resource: u}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Audience: []string{"https://api.example.com/mcp#"}}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("skip audience when Resource is nil", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Resource: nil}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Audience: []string{"https://api.example.com/mcp"}}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("skip audience when options.Audience is empty", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		u := mustParseURL(t, "https://api.example.com/mcp")
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Resource: u}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Audience: []string{}}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+}
+
+func TestRequireBearerAuth_ContextInjectionAndTokenCleared(t *testing.T) {
+	exp := time.Now().Add(1 * time.Hour).Unix()
+	ai := srv.AuthInfo{Token: "secret-token", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp}
+	mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+
+	nextCalled := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		v := r.Context().Value(AuthInfoKey)
+		info, ok := v.(srv.AuthInfo)
+		if !ok {
+			t.Fatalf("auth info not injected in context")
+		}
+		if info.Token != "" {
+			t.Fatalf("expected token to be cleared, got %q", info.Token)
+		}
+		if info.ClientID != "c" || len(info.Scopes) != 1 || info.Scopes[0] != "read" {
+			t.Fatalf("unexpected auth info: %+v", info)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := RequireBearerAuth(BearerAuthMiddlewareOptions{Verifier: mv})(next)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !nextCalled {
+		t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+	}
+}
+
+func TestRequireBearerAuth_WWWAuthenticateScopeParamOnInsufficientScope(t *testing.T) {
+	exp := time.Now().Add(1 * time.Hour).Unix()
+	ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp}
+	mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+
+	opts := BearerAuthMiddlewareOptions{Verifier: mv, RequiredScopes: []string{"read", "write"}}
+	rec, _ := runWithMiddleware(t, opts, "Bearer tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+	hdr := rec.Header().Get("WWW-Authenticate")
+	if !strings.Contains(hdr, `error="insufficient_scope"`) {
+		t.Fatalf("expected insufficient_scope in header, got %q", hdr)
+	}
+	if !strings.Contains(hdr, `scope="read write"`) {
+		t.Fatalf("expected scope=\"read write\" in header, got %q", hdr)
+	}
+}
+
+func TestRequireBearerAuth_WWWAuthenticateHeaderCombos(t *testing.T) {
+	t.Run("invalid_token 401 header has no scope param", func(t *testing.T) {
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) {
+			return srv.AuthInfo{}, oauth.NewOAuthError(oauth.ErrInvalidToken, "Bad token", "")
+		}}
+		rec, _ := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, RequiredScopes: []string{"read", "write"}}, "Bearer bad")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+		hdr := rec.Header().Get("WWW-Authenticate")
+		if strings.Contains(hdr, "scope=") {
+			t.Fatalf("unexpected scope param in header: %q", hdr)
+		}
+	})
+
+	t.Run("400 invalid_request should not set WWW-Authenticate header", func(t *testing.T) {
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) {
+			return srv.AuthInfo{}, oauth.NewOAuthError(oauth.ErrInvalidRequest, "Bad req", "")
+		}}
+		rec, _ := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv}, "Bearer t")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rec.Code)
+		}
+		// For 400, middleware should NOT set WWW-Authenticate header
+		if hdr := rec.Header().Get("WWW-Authenticate"); hdr != "" {
+			t.Fatalf("expected no WWW-Authenticate header, got %q", hdr)
+		}
+	})
+}
+
+func TestRequireBearerAuth_BearerPrefixCaseInsensitive(t *testing.T) {
+	exp := time.Now().Add(1 * time.Hour).Unix()
+	ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp}
+	mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+
+	// Use mixed-case prefix "BeArEr"
+	rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv}, "BeArEr tok")
+	if mv.last != "tok" {
+		t.Fatalf("expected verifier to receive token 'tok', got %q", mv.last)
+	}
+	if rec.Code != http.StatusOK || !nextCalled {
+		t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+	}
+}
+
+func TestRequireBearerAuth_IssuerEdgeCases(t *testing.T) {
+	t.Run("issuer check skipped when Extra=nil", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Extra: nil}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Issuer: "https://issuer.example"}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("issuer check skipped when iss is not a string", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Extra: map[string]interface{}{"iss": 123}}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Issuer: "https://issuer.example"}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+
+	t.Run("issuer check skipped when iss is empty string", func(t *testing.T) {
+		exp := time.Now().Add(1 * time.Hour).Unix()
+		ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp, Extra: map[string]interface{}{"iss": ""}}
+		mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) { return ai, nil }}
+		rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, Issuer: "https://issuer.example"}, "Bearer tok")
+		if rec.Code != http.StatusOK || !nextCalled {
+			t.Fatalf("expected 200 and next called, got %d next=%v", rec.Code, nextCalled)
+		}
+	})
+}
+
+func TestRequireBearerAuth_NoWWWAuthenticateOn400(t *testing.T) {
+	mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) {
+		return srv.AuthInfo{}, oauth.NewOAuthError(oauth.ErrInvalidRequest, "invalid input", "")
+	}}
+	rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv}, "Bearer any")
+	if nextCalled || rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without next, got %d next=%v", rec.Code, nextCalled)
+	}
+	if hdr := rec.Header().Get("WWW-Authenticate"); hdr != "" {
+		t.Fatalf("expected no WWW-Authenticate header, got %q", hdr)
+	}
+}
+
+func TestRequireBearerAuth_InsufficientScopeFromVerifierIncludesScopeParam(t *testing.T) {
+	exp := time.Now().Add(1 * time.Hour).Unix()
+	ai := srv.AuthInfo{Token: "tok", ClientID: "c", Scopes: []string{"read"}, ExpiresAt: &exp}
+	mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) {
+		return ai, oauth.NewOAuthError(oauth.ErrInsufficientScope, "need read write", "")
+	}}
+	rec, _ := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, RequiredScopes: []string{"read", "write"}}, "Bearer tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+	hdr := rec.Header().Get("WWW-Authenticate")
+	if !strings.Contains(hdr, `error="insufficient_scope"`) {
+		t.Fatalf("expected insufficient_scope in header, got %q", hdr)
+	}
+	if !strings.Contains(hdr, `scope="read write"`) {
+		t.Fatalf("expected scope=\"read write\" in header, got %q", hdr)
+	}
+}
+
+func TestRequireBearerAuth_NoWWWAuthenticateOn400WithMetadata(t *testing.T) {
+	urlStr := "https://api.example.com/.well-known/oauth-protected-resource"
+	mv := &mockVerifier{verify: func(ctx context.Context, token string) (srv.AuthInfo, error) {
+		return srv.AuthInfo{}, oauth.NewOAuthError(oauth.ErrInvalidRequest, "invalid input", "")
+	}}
+	rec, nextCalled := runWithMiddleware(t, BearerAuthMiddlewareOptions{Verifier: mv, ResourceMetadataURL: &urlStr}, "Bearer any")
+	if nextCalled || rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without next, got %d next=%v", rec.Code, nextCalled)
+	}
+	if hdr := rec.Header().Get("WWW-Authenticate"); hdr != "" {
+		t.Fatalf("expected no WWW-Authenticate header, got %q", hdr)
+	}
+}
+
+// mustParseURL is a small helper for building *url.URL in tests
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	return u
 }
