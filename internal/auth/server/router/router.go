@@ -377,6 +377,8 @@ func InstallMCPAuthRoutes(
 	return McpAuthRouter(mux, options)
 }
 
+// methodRestrictedHandler returns an HTTP handler that restricts requests
+// to the specified HTTP method. If the request method does not match
 func methodRestrictedHandler(allowedMethod string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != allowedMethod {
