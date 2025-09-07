@@ -17,6 +17,10 @@ type AuthInfo struct {
 	// ClientID is the client identifier associated with this token
 	ClientID string `json:"clientId"`
 
+	// Subject is the principal (end-user or client) the token represents
+	// Typically comes from the JWT 'sub' claim or introspection response
+	Subject string `json:"subject,omitempty"`
+
 	// Scopes are the permission scopes granted with this token
 	Scopes []string `json:"scopes"`
 
