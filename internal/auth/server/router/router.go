@@ -224,7 +224,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 	if options.AuthorizationOptions != nil && options.AuthorizationOptions.RateLimit != nil {
 		authzOptions.RateLimit = options.AuthorizationOptions.RateLimit
 	}
-	mux.Handle("GET "+authorizationURL.Path, handler.AuthorizationHandler(authzOptions))
+	mux.Handle(authorizationURL.Path, methodRestrictedHandler("GET", handler.AuthorizationHandler(authzOptions)))
 
 	// Token endpoint (POST only for OAuth 2.1)
 	tokenURL, _ := url.Parse(oauthMetadata.TokenEndpoint)
@@ -234,7 +234,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 			tokenOptions.RateLimit = options.TokenOptions.RateLimit
 		}
 	}
-	mux.Handle("POST "+tokenURL.Path, handler.TokenHandler(tokenOptions))
+	mux.Handle(tokenURL.Path, methodRestrictedHandler("POST", handler.TokenHandler(tokenOptions)))
 
 	// Metadata endpoints
 	issuerURL, _ := url.Parse(oauthMetadata.Issuer)
@@ -270,7 +270,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 					Max:      10,
 				}
 			}
-			mux.Handle("POST "+registrationURL.Path, handler.ClientRegistrationHandler(regOpts))
+			mux.Handle(registrationURL.Path, methodRestrictedHandler("POST", handler.ClientRegistrationHandler(regOpts)))
 		}
 	}
 
@@ -285,7 +285,7 @@ func McpAuthRouter(mux *http.ServeMux, options AuthRouterOptions) error {
 			revOpts.RateLimit = options.RevocationOptions.RateLimit
 		}
 
-		mux.Handle("POST "+revocationURL.Path, handler.RevocationHandler(revOpts))
+		mux.Handle(revocationURL.Path, methodRestrictedHandler("POST", handler.RevocationHandler(revOpts)))
 	}
 
 	return nil
@@ -318,12 +318,12 @@ func McpAuthMetadataRouter(mux *http.ServeMux, options AuthMetadataOptions) erro
 	}
 
 	// Protected resource metadata endpoint (GET only)
-	mux.Handle("GET /.well-known/oauth-protected-resource",
-		handler.MetadataHandler(protectedResourceMetadata))
+	mux.Handle("/.well-known/oauth-protected-resource",
+		methodRestrictedHandler("GET", handler.MetadataHandler(protectedResourceMetadata)))
 
 	// Authorization server metadata endpoint (GET only, for backward compatibility)
-	mux.Handle("GET /.well-known/oauth-authorization-server",
-		handler.MetadataHandler(options.OAuthMetadata))
+	mux.Handle("/.well-known/oauth-authorization-server",
+		methodRestrictedHandler("GET", handler.MetadataHandler(options.OAuthMetadata)))
 
 	return nil
 }
@@ -375,4 +375,15 @@ func InstallMCPAuthRoutes(
 	}
 
 	return McpAuthRouter(mux, options)
+}
+
+func methodRestrictedHandler(allowedMethod string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != allowedMethod {
+			w.Header().Set("Allow", allowedMethod)
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
