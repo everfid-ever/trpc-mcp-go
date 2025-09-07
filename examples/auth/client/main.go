@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -38,11 +39,11 @@ const (
 )
 
 func main() {
-	fmt.Println("🖥️  Starting OAuth Client Demo")
-	fmt.Println("   Target Server: http://localhost:3000")
-	fmt.Println("   Callback URL: http://localhost:5173/callback")
-	fmt.Println("   Required Scopes: mcp.read mcp.write")
-	fmt.Println()
+	log.Println("🖥️  Starting OAuth Client Demo")
+	log.Println("   Target Server: http://localhost:3000")
+	log.Println("   Callback URL: http://localhost:5173/callback")
+	log.Println("   Required Scopes: mcp.read mcp.write")
+	log.Println()
 
 	// Configure the auth flow used by the MCP SDK
 	authFlow := mcp.AuthFlowConfig{
@@ -58,10 +59,10 @@ func main() {
 		RedirectURL:         redirectURL,
 		Scope:               strPtr(scope),
 		OnRedirect: func(u *url.URL) error {
-			fmt.Printf("🌐 Authorization Required\n")
-			fmt.Printf("   Please open this URL in your browser:\n")
-			fmt.Printf("   %s\n\n", u.String())
-			fmt.Printf("   Waiting for authorization...\n")
+			log.Printf("🌐 Authorization Required\n")
+			log.Printf("   Please open this URL in your browser:\n")
+			log.Printf("   %s\n\n", u.String())
+			log.Printf("   Waiting for authorization...\n")
 			return nil
 		},
 	}
@@ -73,7 +74,7 @@ func main() {
 		mcp.WithAuthFlow(authFlow),
 	)
 	if err != nil {
-		fmt.Printf("❌ Failed to create client: %v\n", err)
+		log.Printf("❌ Failed to create client: %v\n", err)
 		return
 	}
 
@@ -83,7 +84,7 @@ func main() {
 	defer shutdownServer(cbServer)
 
 	// First initialize will typically request user authorization
-	fmt.Println("🔄 Step 1: Initializing client (triggering OAuth flow)...")
+	log.Println("🔄 Step 1: Initializing client (triggering OAuth flow)...")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, _ = client.Initialize(ctx, &mcp.InitializeRequest{})
@@ -91,9 +92,9 @@ func main() {
 	// Wait for the browser redirect to complete the code exchange
 	select {
 	case <-authDone:
-		fmt.Println("✅ Step 2: Authorization flow completed successfully")
+		log.Println("✅ Step 2: Authorization flow completed successfully")
 	case <-time.After(3 * time.Minute):
-		fmt.Println("❌ Authorization timeout after 3 minutes")
+		log.Println("❌ Authorization timeout after 3 minutes")
 		return
 	}
 
@@ -101,25 +102,25 @@ func main() {
 	time.Sleep(2 * time.Second)
 
 	// Second initialize should succeed using the stored tokens
-	fmt.Println("🔄 Step 3: Testing authenticated connection...")
+	log.Println("🔄 Step 3: Testing authenticated connection...")
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel2()
 
 	initResp, err := client.Initialize(ctx2, &mcp.InitializeRequest{})
 	if err != nil {
-		fmt.Printf("❌ Authenticated connection failed: %v\n", err)
+		log.Printf("❌ Authenticated connection failed: %v\n", err)
 		return
 	}
 
-	fmt.Println("📋 OAuth Flow Summary:")
-	fmt.Println("   1. ✅ Client registration")
-	fmt.Println("   2. ✅ User authorization")
-	fmt.Println("   3. ✅ Token exchange")
-	fmt.Println("   4. ✅ Authenticated API access")
-	fmt.Println()
-	fmt.Printf("🎉 Success! Connected to MCP Server\n")
-	fmt.Printf("   Server: %s v%s\n", initResp.ServerInfo.Name, initResp.ServerInfo.Version)
-	fmt.Printf("   Authentication: OAuth 2.0 with Bearer Token\n")
+	log.Println("📋 OAuth Flow Summary:")
+	log.Println("   1. ✅ Client registration")
+	log.Println("   2. ✅ User authorization")
+	log.Println("   3. ✅ Token exchange")
+	log.Println("   4. ✅ Authenticated API access")
+	log.Println()
+	log.Printf("🎉 Success! Connected to MCP Server\n")
+	log.Printf("   Server: %s v%s\n", initResp.ServerInfo.Name, initResp.ServerInfo.Version)
+	log.Printf("   Authentication: OAuth 2.0 with Bearer Token\n")
 }
 
 // startCallbackServer runs an HTTP server that handles /callback and completes the OAuth flow via the SDK
@@ -129,30 +130,30 @@ func startCallbackServer(c *mcp.Client, done chan<- struct{}) *http.Server {
 		code := r.URL.Query().Get("code")
 		state := r.URL.Query().Get("state")
 
-		fmt.Printf("🔄 Callback received\n")
-		fmt.Printf("   Authorization Code: %s\n", code[:20]+"...")
+		log.Printf("🔄 Callback received\n")
+		log.Printf("   Authorization Code: %s\n", code[:20]+"...")
 		if state != "" {
-			fmt.Printf("   State: %s\n", state[:20]+"...")
+			log.Printf("   State: %s\n", state[:20]+"...")
 		}
 
 		if code == "" {
-			fmt.Println("❌ Missing authorization code")
+			log.Println("❌ Missing authorization code")
 			http.Error(w, "missing code parameter", http.StatusBadRequest)
 			return
 		}
 
-		fmt.Printf("🎫 Exchanging authorization code for tokens...\n")
+		log.Printf("🎫 Exchanging authorization code for tokens...\n")
 
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 
 		if err := c.CompleteAuthFlow(ctx, code); err != nil {
-			fmt.Printf("❌ Token exchange failed: %v\n", err)
+			log.Printf("❌ Token exchange failed: %v\n", err)
 			http.Error(w, fmt.Sprintf("Authorization failed: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		fmt.Println("✅ Token exchange successful")
+		log.Println("✅ Token exchange successful")
 
 		// Send a nice response page
 		w.Header().Set("Content-Type", "text/html")
@@ -171,7 +172,7 @@ func startCallbackServer(c *mcp.Client, done chan<- struct{}) *http.Server {
 		Handler: mux,
 	}
 	go func() {
-		fmt.Printf("🌐 Callback server listening on %s\n", callbackListenAddr)
+		log.Printf("🌐 Callback server listening on %s\n", callbackListenAddr)
 		srv.ListenAndServe()
 	}()
 	return srv
