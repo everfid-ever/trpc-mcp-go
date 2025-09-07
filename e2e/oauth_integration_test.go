@@ -1,4 +1,9 @@
-// 修复后的代码
+// Tencent is pleased to support the open source community by making trpc-mcp-go available.
+//
+// Copyright (C) 2025 Tencent.  All rights reserved.
+//
+// trpc-mcp-go is licensed under the Apache License Version 2.0.
+
 package e2e
 
 import (
@@ -12,7 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/golang-jwt/jwt/v4"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
@@ -29,18 +35,18 @@ const (
 
 // TestOAuth2Integration tests the complete OAuth 2.1 flow with MCP server
 func TestOAuth2Integration(t *testing.T) {
-	// 1. 启动模拟OAuth授权服务器
+	// Start mock OAuth authorization server
 	oauthServer := startMockOAuthServer(t)
 	defer oauthServer.Close()
 
-	// 2. 创建OAuth Provider
+	// Create OAuth Provider
 	provider := createTestOAuthProvider(oauthServer.URL)
 
-	// 3. 启动带OAuth的MCP服务器
+	// Start MCP server with OAuth authentication
 	mcpServerURL, cleanup := startOAuthMCPServer(t, provider)
 	defer cleanup()
 
-	// 4. 测试OAuth流程
+	// Test OAuth flows
 	t.Run("BearerTokenAuth", func(t *testing.T) {
 		testBearerTokenAuth(t, oauthServer.URL, mcpServerURL)
 	})
@@ -49,7 +55,7 @@ func TestOAuth2Integration(t *testing.T) {
 		testInvalidToken(t, mcpServerURL)
 	})
 
-	// 测试授权码流程
+	// Test authorization code flow
 	t.Run("AuthorizationCodeFlow", func(t *testing.T) {
 		testSimpleAuthorizationCodeFlow(t, oauthServer.URL, mcpServerURL)
 	})
@@ -59,18 +65,18 @@ func TestOAuth2Integration(t *testing.T) {
 	})
 }
 
-// startMockOAuthServer 启动模拟OAuth授权服务器
+// startMockOAuthServer starts a mock OAuth authorization server for testing
 func startMockOAuthServer(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 
-	// 授权端点
+	// Authorization endpoint
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// 模拟用户授权，直接重定向到回调URL
+		// Simulate user authorization by redirecting directly to callback URL
 		redirectURI := r.URL.Query().Get("redirect_uri")
 		state := r.URL.Query().Get("state")
 		code := "test-auth-code-" + fmt.Sprintf("%d", time.Now().Unix())
@@ -79,7 +85,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		http.Redirect(w, r, callbackURL, http.StatusFound)
 	})
 
-	// 令牌端点
+	// Token endpoint
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -110,7 +116,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 				http.Error(w, "Missing refresh token", http.StatusBadRequest)
 				return
 			}
-			// 检查刷新token是否有效
+			// Validate refresh token
 			if !strings.HasPrefix(refreshToken, "test-refresh-token-") {
 				http.Error(w, "Invalid refresh token", http.StatusBadRequest)
 				return
@@ -126,7 +132,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		json.NewEncoder(w).Encode(tokenResponse)
 	})
 
-	// 客户端注册端点
+	// Client registration endpoint
 	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -145,14 +151,14 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		json.NewEncoder(w).Encode(clientInfo)
 	})
 
-	// OAuth授权服务器元数据端点
+	// OAuth authorization server metadata endpoint
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// 动态获取服务器URL
+		// Dynamically get server URL
 		baseURL := "http://" + r.Host
 		metadata := map[string]interface{}{
 			"issuer":                                baseURL,
@@ -170,16 +176,16 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		json.NewEncoder(w).Encode(metadata)
 	})
 
-	// OpenID Connect配置端点（兼容性）
+	// OpenID Connect configuration endpoint (for compatibility)
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// 动态获取服务器URL
+		// Dynamically get server URL
 		baseURL := "http://" + r.Host
-		// 返回与OAuth元数据相同的内容
+		// Return same content as OAuth metadata
 		metadata := map[string]interface{}{
 			"issuer":                                baseURL,
 			"authorization_endpoint":                baseURL + "/authorize",
@@ -201,7 +207,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 	return server
 }
 
-// createTestOAuthProvider 创建测试用的OAuth Provider
+// createTestOAuthProvider creates an OAuth provider for testing
 func createTestOAuthProvider(oauthServerURL string) server.OAuthServerProvider {
 	return providers.NewProxyOAuthServerProvider(providers.ProxyOptions{
 		Endpoints: providers.ProxyEndpoints{
@@ -230,9 +236,9 @@ func createTestOAuthProvider(oauthServerURL string) server.OAuthServerProvider {
 	})
 }
 
-// startOAuthMCPServer 启动带OAuth认证的MCP服务器
+// startOAuthMCPServer starts an MCP server with OAuth authentication enabled
 func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (string, func()) {
-	// 创建MCP服务器
+	// Create MCP server
 	server := mcp.NewServer(
 		"OAuth-Test-Server",
 		"1.0.0",
@@ -246,6 +252,8 @@ func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (str
 		mcp.WithBearerAuth(&mcp.BearerAuthConfig{
 			Enabled:        true,
 			RequiredScopes: []string{"mcp.read", "mcp.write"},
+			Issuer:         "http://localhost:3030",
+			Audience:       []string{"http://localhost:3000"},
 			Verifier: server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
 				authInfo, err := verifyTestJWT(token)
 				if err != nil {
@@ -254,28 +262,12 @@ func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (str
 				return *authInfo, nil
 			}),
 		}),
-		mcp.WithHTTPContextFunc(
-			mcp.NewAuthHTTPContextFunc(
-				server.TokenVerifierFunc(func(ctx context.Context, token string) (server.AuthInfo, error) {
-					authInfo, err := verifyTestJWT(token)
-					if err != nil {
-						return server.AuthInfo{}, err
-					}
-					return *authInfo, nil
-				}),
-				mcp.ServerAuthConfig{
-					Issuer:         "http://localhost:3030",
-					Audience:       []string{"http://localhost:3000"},
-					RequiredScopes: []string{"mcp.read", "mcp.write"},
-				},
-			),
-		),
 	)
 
-	// 注册测试工具
+	// Register test tools
 	RegisterTestTools(server)
 
-	// 创建HTTP测试服务器
+	// Create HTTP test server
 	httpServer := httptest.NewServer(server.HTTPHandler())
 	serverURL := httpServer.URL + "/mcp"
 
@@ -289,15 +281,15 @@ func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (str
 	return serverURL, cleanup
 }
 
-// startCallbackServer 启动回调服务器处理OAuth授权码
+// startCallbackServer starts a callback server to handle OAuth authorization codes
 func startCallbackServer(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 
-	// 回调端点
+	// Callback endpoint
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		t.Logf("Callback received: %s", r.URL.RawQuery)
 
-		// 返回成功页面
+		// Return success page
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`
@@ -316,11 +308,11 @@ func startCallbackServer(t *testing.T) *httptest.Server {
 	return server
 }
 
-// testSimpleAuthorizationCodeFlow 测试简化的授权码流程
+// testSimpleAuthorizationCodeFlow tests the simplified authorization code flow
 func testSimpleAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL string) {
-	// 测试授权端点是否正常工作
+	// Test authorization endpoint functionality
 	t.Run("AuthorizationEndpoint", func(t *testing.T) {
-		// 启动一个简单的回调服务器
+		// Start a simple callback server
 		callbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Logf("Callback received: %s", r.URL.RawQuery)
 			w.WriteHeader(http.StatusOK)
@@ -328,7 +320,7 @@ func testSimpleAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL 
 		}))
 		defer callbackServer.Close()
 
-		// 构建授权URL，使用URL编码
+		// Build authorization URL with URL encoding
 		params := url.Values{}
 		params.Set("client_id", testClientID)
 		params.Set("response_type", "code")
@@ -339,31 +331,31 @@ func testSimpleAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL 
 		authURL := oauthServerURL + "/authorize?" + params.Encode()
 		t.Logf("Testing authorization URL: %s", authURL)
 
-		// 创建不跟随重定向的HTTP客户端
+		// Create HTTP client that doesn't follow redirects
 		client := &http.Client{
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse // 不跟随重定向
+				return http.ErrUseLastResponse // Don't follow redirects
 			},
 		}
 
-		// 访问授权端点
+		// Access authorization endpoint
 		resp, err := client.Get(authURL)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
-		// 应该重定向到回调URL
+		// Should redirect to callback URL
 		assert.Equal(t, http.StatusFound, resp.StatusCode)
 
-		// 检查重定向URL
+		// Check redirect URL
 		location := resp.Header.Get("Location")
 		t.Logf("Redirect location: %s", location)
 		assert.Contains(t, location, "code=")
 		assert.Contains(t, location, "state=test-state")
 	})
 
-	// 测试令牌端点是否正常工作
+	// Test token endpoint functionality
 	t.Run("TokenEndpoint", func(t *testing.T) {
-		// 模拟授权码交换令牌
+		// Simulate authorization code exchange for tokens
 		formData := url.Values{}
 		formData.Set("grant_type", "authorization_code")
 		formData.Set("code", "test-auth-code-123")
@@ -373,10 +365,10 @@ func testSimpleAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL 
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
-		// 应该返回成功
+		// Should return success
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-		// 验证响应内容
+		// Validate response content
 		var tokenResp map[string]interface{}
 		err = json.NewDecoder(resp.Body).Decode(&tokenResp)
 		require.NoError(t, err)
@@ -387,9 +379,9 @@ func testSimpleAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL 
 		assert.Equal(t, testScope, tokenResp["scope"])
 	})
 
-	// 测试OAuth元数据端点
+	// Test OAuth metadata endpoint
 	t.Run("OAuthMetadata", func(t *testing.T) {
-		// 测试OAuth授权服务器元数据
+		// Test OAuth authorization server metadata
 		resp, err := http.Get(oauthServerURL + "/.well-known/oauth-authorization-server")
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -407,13 +399,13 @@ func testSimpleAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL 
 	})
 }
 
-// testAuthorizationCodeFlow 测试授权码流程
+// testAuthorizationCodeFlow tests the complete authorization code flow
 func testAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL string) {
-	// 启动回调服务器
+	// Start callback server
 	callbackServer := startCallbackServer(t)
 	defer callbackServer.Close()
 
-	// 创建带OAuth认证的客户端
+	// Create client with OAuth authentication
 	authFlow := mcp.AuthFlowConfig{
 		ServerURL: oauthServerURL,
 		ClientMetadata: auth.OAuthClientMetadata{
@@ -428,7 +420,7 @@ func testAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL string
 		Scope:               stringPtr(testScope),
 		OnRedirect: func(u *url.URL) error {
 			t.Logf("Authorization redirect: %s", u.String())
-			// 模拟用户点击授权链接，直接访问授权URL
+			// Simulate user clicking authorization link by directly accessing the authorization URL
 			resp, err := http.Get(u.String())
 			if err != nil {
 				return fmt.Errorf("failed to access authorization URL: %w", err)
@@ -446,7 +438,7 @@ func testAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL string
 	require.NoError(t, err)
 	defer client.Close()
 
-	// 初始化客户端（这会触发OAuth流程）
+	// Initialize client (this triggers OAuth flow)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -462,7 +454,7 @@ func testAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL string
 	require.NoError(t, err)
 	assert.Equal(t, mcp.ProtocolVersion_2025_03_26, initResult.ProtocolVersion)
 
-	// 测试调用需要认证的工具
+	// Test calling authenticated tools
 	content := ExecuteTestTool(t, client, "basic-greet", map[string]interface{}{
 		"name": "oauth-test",
 	})
@@ -473,24 +465,24 @@ func testAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL string
 	assert.Contains(t, textContent.Text, "Hello, oauth-test")
 }
 
-// testBearerTokenAuth 测试Bearer Token认证
+// testBearerTokenAuth tests Bearer Token authentication
 func testBearerTokenAuth(t *testing.T, oauthServerURL, mcpServerURL string) {
-	// 直接使用有效的JWT Token创建客户端
+	// Create client directly with a valid JWT Token
 	validToken := createTestJWT(t, "access_token")
 
-	// 创建HTTP头，包含Bearer Token
+	// Create HTTP headers with Bearer Token
 	headers := make(http.Header)
 	headers.Set("Authorization", "Bearer "+validToken)
 
 	client, err := mcp.NewClient(
 		mcpServerURL,
 		mcp.Implementation{Name: "Bearer-Test-Client", Version: "1.0.0"},
-		mcp.WithHTTPHeaders(headers), // 使用WithHTTPHeaders设置Authorization头
+		mcp.WithHTTPHeaders(headers), // Use WithHTTPHeaders to set Authorization header
 	)
 	require.NoError(t, err)
 	defer client.Close()
 
-	// 初始化客户端
+	// Initialize client
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -505,7 +497,7 @@ func testBearerTokenAuth(t *testing.T, oauthServerURL, mcpServerURL string) {
 	})
 	require.NoError(t, err)
 
-	// 测试工具调用
+	// Test tool invocation
 	content := ExecuteTestTool(t, client, "basic-greet", map[string]interface{}{
 		"name": "bearer-test",
 	})
@@ -516,12 +508,12 @@ func testBearerTokenAuth(t *testing.T, oauthServerURL, mcpServerURL string) {
 	assert.Contains(t, textContent.Text, "Hello, bearer-test")
 }
 
-// testTokenRefresh 测试Token刷新
+// testTokenRefresh tests token refresh functionality
 func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
-	// 创建一个带有刷新token的客户端
+	// Create a client with a refresh token
 	refreshToken := "test-refresh-token-" + fmt.Sprintf("%d", time.Now().Unix())
 
-	// 创建OAuth Provider，支持刷新token
+	// Create OAuth Provider that supports token refresh
 	provider := providers.NewProxyOAuthServerProvider(providers.ProxyOptions{
 		Endpoints: providers.ProxyEndpoints{
 			AuthorizationURL: oauthServerURL + "/authorize",
@@ -548,19 +540,19 @@ func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
 		},
 	})
 
-	// 启动带OAuth的MCP服务器
+	// Start MCP server with OAuth
 	mcpServerURL, cleanup := startOAuthMCPServer(t, provider)
 	defer cleanup()
 
-	// 测试刷新token流程
+	// Test token refresh flow
 	t.Run("RefreshTokenFlow", func(t *testing.T) {
-		// 模拟刷新token请求
+		// Simulate refresh token request
 		refreshReq := map[string]string{
 			"grant_type":    "refresh_token",
 			"refresh_token": refreshToken,
 		}
 
-		// 发送刷新请求到OAuth服务器
+		// Send refresh request to OAuth server
 		formData := url.Values{}
 		for k, v := range refreshReq {
 			formData.Set(k, v)
@@ -569,24 +561,24 @@ func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
-		// 验证响应
+		// Validate response
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 		var tokenResp map[string]interface{}
 		err = json.NewDecoder(resp.Body).Decode(&tokenResp)
 		require.NoError(t, err)
 
-		// 验证返回的token
+		// Validate returned tokens
 		assert.Contains(t, tokenResp, "access_token")
 		assert.Contains(t, tokenResp, "refresh_token")
 		assert.Equal(t, "Bearer", tokenResp["token_type"])
 		assert.Equal(t, testScope, tokenResp["scope"])
 
-		// 验证新的access token是否有效
+		// Validate new access token is valid
 		newAccessToken, ok := tokenResp["access_token"].(string)
 		require.True(t, ok)
 
-		// 使用新的access token创建客户端
+		// Create client with new access token
 		headers := make(http.Header)
 		headers.Set("Authorization", "Bearer "+newAccessToken)
 
@@ -598,7 +590,7 @@ func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
 		require.NoError(t, err)
 		defer client.Close()
 
-		// 测试使用新token调用工具
+		// Test using new token for tool calls
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -613,7 +605,7 @@ func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
 		})
 		require.NoError(t, err)
 
-		// 测试工具调用
+		// Test tool invocation
 		content := ExecuteTestTool(t, client, "basic-greet", map[string]interface{}{
 			"name": "refresh-test",
 		})
@@ -624,7 +616,7 @@ func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
 		assert.Contains(t, textContent.Text, "Hello, refresh-test")
 	})
 
-	// 测试无效刷新token
+	// Test invalid refresh token
 	t.Run("InvalidRefreshToken", func(t *testing.T) {
 		invalidRefreshReq := map[string]string{
 			"grant_type":    "refresh_token",
@@ -639,29 +631,29 @@ func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
-		// 应该返回错误（400 Bad Request）
+		// Should return error (400 Bad Request)
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
 }
 
-// testInvalidToken 测试无效Token
+// testInvalidToken tests invalid token handling
 func testInvalidToken(t *testing.T, mcpServerURL string) {
-	// 使用无效Token创建客户端
+	// Create client with invalid token
 	invalidToken := "invalid.jwt.token"
 
-	// 创建HTTP头，包含无效的Bearer Token
+	// Create HTTP headers with invalid Bearer Token
 	headers := make(http.Header)
 	headers.Set("Authorization", "Bearer "+invalidToken)
 
 	client, err := mcp.NewClient(
 		mcpServerURL,
 		mcp.Implementation{Name: "Invalid-Token-Client", Version: "1.0.0"},
-		mcp.WithHTTPHeaders(headers), // 使用WithHTTPHeaders设置Authorization头
+		mcp.WithHTTPHeaders(headers), // Use WithHTTPHeaders to set Authorization header
 	)
 	require.NoError(t, err)
 	defer client.Close()
 
-	// 尝试初始化客户端，应该失败
+	// Try to initialize client, should fail
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -675,9 +667,9 @@ func testInvalidToken(t *testing.T, mcpServerURL string) {
 		},
 	})
 
-	// 应该返回认证错误
+	// Should return authentication error
 	assert.Error(t, err)
-	// 检查是否包含认证相关的错误信息
+	// Check if it contains authentication-related error message
 	errorMsg := err.Error()
 	assert.True(t,
 		strings.Contains(errorMsg, "unauthorized") ||
@@ -687,8 +679,7 @@ func testInvalidToken(t *testing.T, mcpServerURL string) {
 		"Expected authentication error, got: %s", errorMsg)
 }
 
-// 辅助函数
-
+// createTokenResponse creates a test token response with JWT access token
 func createTokenResponse(t *testing.T, accessToken, refreshToken string) map[string]interface{} {
 	return map[string]interface{}{
 		"access_token":  createTestJWT(t, accessToken),
@@ -699,12 +690,13 @@ func createTokenResponse(t *testing.T, accessToken, refreshToken string) map[str
 	}
 }
 
+// createTestJWT creates a test JWT token with specified token type
 func createTestJWT(t *testing.T, tokenType string) string {
 	claims := jwt.MapClaims{
 		"iss":        "http://localhost:3030",
 		"aud":        []string{"http://localhost:3000"},
 		"sub":        testClientID,
-		"scope":      "mcp.read mcp.write", // 确保作用域正确
+		"scope":      "mcp.read mcp.write", // Ensure correct scope
 		"iat":        time.Now().Unix(),
 		"exp":        time.Now().Add(time.Hour).Unix(),
 		"token_type": tokenType,
@@ -716,6 +708,7 @@ func createTestJWT(t *testing.T, tokenType string) string {
 	return signedToken
 }
 
+// verifyTestJWT verifies and parses a test JWT token
 func verifyTestJWT(tokenString string) (*server.AuthInfo, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -729,25 +722,74 @@ func verifyTestJWT(tokenString string) (*server.AuthInfo, error) {
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		// Scopes
 		scopes := []string{}
 		if scope, ok := claims["scope"].(string); ok {
-			// 将空格分隔的作用域字符串转换为切片
 			scopes = strings.Fields(scope)
 		}
 
+		// ExpiresAt
+		var expiresAtPtr *int64
+		if v, ok := claims["exp"].(float64); ok {
+			vv := int64(v)
+			expiresAtPtr = &vv
+		}
+
+		// Audience -> Resource (first value)
+		var resourceURL *url.URL
+		if audVal, ok := claims["aud"]; ok {
+			switch v := audVal.(type) {
+			case string:
+				if u, err := url.Parse(v); err == nil {
+					resourceURL = u
+				}
+			case []interface{}:
+				if len(v) > 0 {
+					if s, ok := v[0].(string); ok {
+						if u, err := url.Parse(s); err == nil {
+							resourceURL = u
+						}
+					}
+				}
+			case []string:
+				if len(v) > 0 {
+					if u, err := url.Parse(v[0]); err == nil {
+						resourceURL = u
+					}
+				}
+			}
+		}
+
+		// ClientID
+		clientID, _ := claims["sub"].(string)
+
+		// Extra (include iss and client_id)
+		extra := map[string]interface{}{}
+		if iss, ok := claims["iss"].(string); ok {
+			extra["iss"] = iss
+		}
+		if clientID != "" {
+			extra["client_id"] = clientID
+		}
+
 		return &server.AuthInfo{
-			ClientID: claims["sub"].(string),
-			Scopes:   scopes,
+			ClientID:  clientID,
+			Scopes:    scopes,
+			ExpiresAt: expiresAtPtr,
+			Resource:  resourceURL,
+			Extra:     extra,
 		}, nil
 	}
 
 	return nil, fmt.Errorf("invalid token")
 }
 
+// stringPtr returns a pointer to the given string
 func stringPtr(s string) *string {
 	return &s
 }
 
+// mustParseURL parses a URL string and panics if parsing fails
 func mustParseURL(s string) *url.URL {
 	u, err := url.Parse(s)
 	if err != nil {
