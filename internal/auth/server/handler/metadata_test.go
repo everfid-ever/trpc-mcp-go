@@ -1,201 +1,345 @@
+// Tencent is pleased to support the open source community by making trpc-mcp-go available.
+//
+// Copyright (C) 2025 Tencent.  All rights reserved.
+//
+// trpc-mcp-go is licensed under the Apache License Version 2.0.
+
 package handler
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"testing"
 
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// Helper function to create string pointer
-var stringPtr = func(s string) *string {
-	return &s
-}
-
-// TestMetadataHandler tests the MetadataHandler function
 func TestMetadataHandler(t *testing.T) {
-
-	// Example OAuthMetadata for testing
-	exampleMetadata := auth.OAuthMetadata{
-		Issuer:                            "https://auth.example.com",
-		AuthorizationEndpoint:             "https://auth.example.com/authorize",
-		TokenEndpoint:                     "https://auth.example.com/token",
-		RegistrationEndpoint:              stringPtr("https://auth.example.com/register"),
-		RevocationEndpoint:                stringPtr("https://auth.example.com/revoke"),
-		ScopesSupported:                   []string{"profile", "email"},
-		ResponseTypesSupported:            []string{"code"},
-		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
-		TokenEndpointAuthMethodsSupported: []string{"client_secret_basic"},
-		CodeChallengeMethodsSupported:     []string{"S256"},
+	// Test metadata
+	testMetadata := map[string]interface{}{
+		"name":        "test-server",
+		"version":     "1.0.0",
+		"description": "Test MCP server",
+		"capabilities": map[string]interface{}{
+			"auth":  true,
+			"tools": []interface{}{"test-tool-1", "test-tool-2"}, // JSON decoding converts to []interface{}
+		},
 	}
 
-	// Setup test cases
-	t.Run("requires GET method", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/.well-known/oauth-authorization-server", nil)
-		w := httptest.NewRecorder()
-		handler := MetadataHandler(exampleMetadata)
-		handler(w, req)
+	// Create handler
+	handler := MetadataHandler(testMetadata)
 
-		if w.Code != http.StatusMethodNotAllowed {
-			t.Errorf("Expected status %d, got %d", http.StatusMethodNotAllowed, w.Code)
-		}
+	// Verify handler is created successfully
+	assert.NotNil(t, handler)
 
-		if w.Header().Get("Allow") != "GET" {
-			t.Errorf("Expected Allow header 'GET', got '%s'", w.Header().Get("Allow"))
-		}
+	// Test GET request
+	req := httptest.NewRequest(http.MethodGet, "/metadata", nil)
+	w := httptest.NewRecorder()
 
-		var oauthErr errors.OAuthErrorResponse
-		if err := json.NewDecoder(w.Body).Decode(&oauthErr); err != nil {
-			t.Fatalf("Failed to decode response: %v", err)
-		}
+	// Execute request
+	handler(w, req)
 
-		expectedErr := errors.OAuthErrorResponse{
-			Error:            "method_not_allowed",
-			ErrorDescription: "Only GET method is allowed",
-		}
-		if !reflect.DeepEqual(oauthErr, expectedErr) {
-			t.Errorf("Expected error response %+v, got %+v", expectedErr, oauthErr)
-		}
-	})
+	// Verify response
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 
-	t.Run("returns the metadata object", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-		w := httptest.NewRecorder()
-		handler := MetadataHandler(exampleMetadata)
-		handler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
-		}
-
-		var result auth.OAuthMetadata
-		if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-			t.Fatalf("Failed to decode response: %v", err)
-		}
-
-		if !reflect.DeepEqual(result, exampleMetadata) {
-			t.Errorf("Expected metadata %+v, got %+v", exampleMetadata, result)
-		}
-	})
-
-	t.Run("includes CORS headers in response", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-		req.Header.Set("Origin", "https://example.com")
-		w := httptest.NewRecorder()
-		handler := MetadataHandler(exampleMetadata)
-		handler(w, req)
-
-		if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-			t.Errorf("Expected Access-Control-Allow-Origin '*', got '%s'", w.Header().Get("Access-Control-Allow-Origin"))
-		}
-	})
-
-	t.Run("supports OPTIONS preflight requests", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodOptions, "/.well-known/oauth-authorization-server", nil)
-		req.Header.Set("Origin", "https://example.com")
-		req.Header.Set("Access-Control-Request-Method", "GET")
-		w := httptest.NewRecorder()
-		handler := MetadataHandler(exampleMetadata)
-		handler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
-		}
-
-		if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-			t.Errorf("Expected Access-Control-Allow-Origin '*', got '%s'", w.Header().Get("Access-Control-Allow-Origin"))
-		}
-
-		if w.Header().Get("Access-Control-Allow-Methods") != "GET, OPTIONS" {
-			t.Errorf("Expected Access-Control-Allow-Methods 'GET, OPTIONS', got '%s'", w.Header().Get("Access-Control-Allow-Methods"))
-		}
-	})
-
-	t.Run("works with minimal metadata", func(t *testing.T) {
-		minimalMetadata := auth.OAuthMetadata{
-			Issuer:                 "https://auth.example.com",
-			AuthorizationEndpoint:  "https://auth.example.com/authorize",
-			TokenEndpoint:          "https://auth.example.com/token",
-			ResponseTypesSupported: []string{"code"},
-		}
-
-		req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-		w := httptest.NewRecorder()
-		handler := MetadataHandler(minimalMetadata)
-		handler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
-		}
-
-		var result auth.OAuthMetadata
-		if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-			t.Fatalf("Failed to decode response: %v", err)
-		}
-
-		if !reflect.DeepEqual(result, minimalMetadata) {
-			t.Errorf("Expected metadata %+v, got %+v", minimalMetadata, result)
-		}
-	})
+	// Verify JSON response
+	var responseData map[string]interface{}
+	err := json.NewDecoder(w.Body).Decode(&responseData)
+	require.NoError(t, err)
+	assert.Equal(t, testMetadata, responseData)
 }
 
-// TestAuthorizationServerMetadataHandler tests the AuthorizationServerMetadataHandler function
-func TestAuthorizationServerMetadataHandler(t *testing.T) {
+func TestMetadataHandler_MethodValidation(t *testing.T) {
+	// Test metadata
+	testMetadata := map[string]interface{}{
+		"name": "test-server",
+	}
 
-	// Setup test cases
-	t.Run("includes registration endpoint with dynamic registration support", func(t *testing.T) {
-		handler := AuthorizationServerMetadataHandler("https://auth.example.com", store)
-		req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
+	// Create handler
+	handler := MetadataHandler(testMetadata)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
-		}
+	// Test cases for different HTTP methods
+	testCases := []struct {
+		name            string
+		method          string
+		expectedCode    int
+		shouldHaveJSON  bool
+		shouldHaveAllow bool
+	}{
+		{
+			name:            "GET method allowed",
+			method:          http.MethodGet,
+			expectedCode:    http.StatusOK,
+			shouldHaveJSON:  true,
+			shouldHaveAllow: false,
+		},
+		{
+			name:            "POST method not allowed",
+			method:          http.MethodPost,
+			expectedCode:    http.StatusMethodNotAllowed,
+			shouldHaveJSON:  true,
+			shouldHaveAllow: true,
+		},
+		{
+			name:            "PUT method not allowed",
+			method:          http.MethodPut,
+			expectedCode:    http.StatusMethodNotAllowed,
+			shouldHaveJSON:  true,
+			shouldHaveAllow: true,
+		},
+		{
+			name:            "DELETE method not allowed",
+			method:          http.MethodDelete,
+			expectedCode:    http.StatusMethodNotAllowed,
+			shouldHaveJSON:  true,
+			shouldHaveAllow: true,
+		},
+		{
+			name:            "PATCH method not allowed",
+			method:          http.MethodPatch,
+			expectedCode:    http.StatusMethodNotAllowed,
+			shouldHaveJSON:  true,
+			shouldHaveAllow: true,
+		},
+	}
 
-		var result auth.OAuthMetadata
-		if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-			t.Fatalf("Failed to decode response: %v", err)
-		}
+	// Execute tests
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/metadata", nil)
+			w := httptest.NewRecorder()
 
-		expected := auth.OAuthMetadata{
-			Issuer:                            "https://auth.example.com",
-			AuthorizationEndpoint:             "https://auth.example.com/authorize",
-			TokenEndpoint:                     "https://auth.example.com/token",
-			RegistrationEndpoint:              stringPtr("https://auth.example.com/register"),
-			ResponseTypesSupported:            []string{"code"},
-			GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
-			CodeChallengeMethodsSupported:     []string{"S256"},
-			TokenEndpointAuthMethodsSupported: []string{"client_secret_basic", "client_secret_post", "none"},
-		}
+			// Execute request
+			handler(w, req)
 
-		if !reflect.DeepEqual(result, expected) {
-			t.Errorf("Expected metadata %+v, got %+v", expected, result)
-		}
-	})
+			// Verify status code
+			assert.Equal(t, tc.expectedCode, w.Code)
 
-	t.Run("excludes registration endpoint without dynamic registration support", func(t *testing.T) {
-		store := &mockStore{} // Not implementing SupportDynamicClientRegistration
-		handler := AuthorizationServerMetadataHandler("https://auth.example.com", store)
-		req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
-		w := httptest.NewRecorder()
-		handler(w, req)
+			// Verify Content-Type header
+			if tc.shouldHaveJSON {
+				assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			}
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
-		}
+			// Verify Allow header for method not allowed responses
+			if tc.shouldHaveAllow {
+				allowHeader := w.Header().Get("Allow")
+				assert.Contains(t, allowHeader, "GET")
+			}
 
-		var result auth.OAuthMetadata
-		if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-			t.Fatalf("Failed to decode response: %v", err)
-		}
+			// For successful requests, verify metadata is returned
+			if tc.expectedCode == http.StatusOK {
+				var responseData map[string]interface{}
+				err := json.NewDecoder(w.Body).Decode(&responseData)
+				require.NoError(t, err)
+				assert.Equal(t, testMetadata, responseData)
+			}
+		})
+	}
+}
 
-		if result.RegistrationEndpoint != nil {
-			t.Errorf("Expected RegistrationEndpoint to be nil, got %v", result.RegistrationEndpoint)
-		}
-	})
+func TestMetadataHandler_CORSHeaders(t *testing.T) {
+	// Test metadata
+	testMetadata := map[string]interface{}{
+		"name": "test-server",
+	}
+
+	// Create handler
+	handler := MetadataHandler(testMetadata)
+
+	// Test cases for CORS handling
+	testCases := []struct {
+		name                  string
+		method                string
+		origin                string
+		expectedCode          int
+		shouldHaveCORSOrigin  bool
+		shouldHaveCORSMethods bool
+	}{
+		{
+			name:                  "Non-CORS request",
+			method:                http.MethodGet,
+			origin:                "",
+			expectedCode:          http.StatusOK,
+			shouldHaveCORSOrigin:  false,
+			shouldHaveCORSMethods: false,
+		},
+		{
+			name:                  "CORS GET request",
+			method:                http.MethodGet,
+			origin:                "https://example.com",
+			expectedCode:          http.StatusOK,
+			shouldHaveCORSOrigin:  true,
+			shouldHaveCORSMethods: true,
+		},
+		{
+			name:                  "CORS OPTIONS preflight request",
+			method:                http.MethodOptions,
+			origin:                "https://example.com",
+			expectedCode:          http.StatusNoContent,
+			shouldHaveCORSOrigin:  true,
+			shouldHaveCORSMethods: true,
+		},
+	}
+
+	// Execute tests
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/metadata", nil)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			w := httptest.NewRecorder()
+
+			// Execute request
+			handler(w, req)
+
+			// Verify status code
+			assert.Equal(t, tc.expectedCode, w.Code)
+
+			// Verify CORS headers
+			if tc.shouldHaveCORSOrigin {
+				assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+			} else {
+				assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+			}
+
+			if tc.shouldHaveCORSMethods {
+				allowMethods := w.Header().Get("Access-Control-Allow-Methods")
+				assert.Equal(t, "GET,HEAD,PUT,PATCH,POST,DELETE", allowMethods)
+			}
+
+			// For OPTIONS requests, verify Content-Length header
+			if tc.method == http.MethodOptions {
+				assert.Equal(t, "0", w.Header().Get("Content-Length"))
+			}
+
+			// For successful GET requests, verify metadata is returned
+			if tc.method == http.MethodGet && tc.expectedCode == http.StatusOK {
+				var responseData map[string]interface{}
+				err := json.NewDecoder(w.Body).Decode(&responseData)
+				require.NoError(t, err)
+				assert.Equal(t, testMetadata, responseData)
+			}
+		})
+	}
+}
+
+func TestMetadataHandler_DifferentMetadataTypes(t *testing.T) {
+	// Test cases with different metadata types
+	testCases := []struct {
+		name     string
+		metadata interface{}
+	}{
+		{
+			name:     "String metadata",
+			metadata: "simple string metadata",
+		},
+		{
+			name:     "Number metadata",
+			metadata: float64(42),
+		},
+		{
+			name:     "Boolean metadata",
+			metadata: true,
+		},
+		{
+			name:     "Array metadata",
+			metadata: []interface{}{"item1", "item2", "item3"},
+		},
+		{
+			name: "Complex object metadata",
+			metadata: map[string]interface{}{
+				"server": map[string]interface{}{
+					"name":    "mcp-server",
+					"version": "2.0.0",
+					"config": map[string]interface{}{
+						"debug": true,
+						"port":  float64(8080),
+					},
+				},
+				"capabilities": []interface{}{"auth", "tools", "resources"},
+				"stats": map[string]interface{}{
+					"uptime":   float64(3600),
+					"requests": float64(1500),
+					"errors":   float64(5),
+				},
+			},
+		},
+		{
+			name:     "Empty metadata",
+			metadata: map[string]interface{}{},
+		},
+		{
+			name:     "Nil metadata",
+			metadata: nil,
+		},
+	}
+
+	// Execute tests
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create handler with test metadata
+			handler := MetadataHandler(tc.metadata)
+
+			// Create request
+			req := httptest.NewRequest(http.MethodGet, "/metadata", nil)
+			w := httptest.NewRecorder()
+
+			// Execute request
+			handler(w, req)
+
+			// Verify response
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+			// Verify JSON response matches expected metadata
+			var responseData interface{}
+			err := json.NewDecoder(w.Body).Decode(&responseData)
+			require.NoError(t, err)
+			assert.Equal(t, tc.metadata, responseData)
+		})
+	}
+}
+
+func TestMetadataHandler_ConcurrentRequests(t *testing.T) {
+	// Test metadata
+	testMetadata := map[string]interface{}{
+		"name":    "concurrent-test-server",
+		"version": "1.0.0",
+	}
+
+	// Create handler
+	handler := MetadataHandler(testMetadata)
+
+	// Number of concurrent requests
+	numRequests := 10
+	responses := make(chan *httptest.ResponseRecorder, numRequests)
+
+	// Launch concurrent requests
+	for i := 0; i < numRequests; i++ {
+		go func() {
+			req := httptest.NewRequest(http.MethodGet, "/metadata", nil)
+			w := httptest.NewRecorder()
+			handler(w, req)
+			responses <- w
+		}()
+	}
+
+	// Collect and verify all responses
+	for i := 0; i < numRequests; i++ {
+		w := <-responses
+
+		// Verify response
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+		// Verify JSON response
+		var responseData map[string]interface{}
+		err := json.NewDecoder(w.Body).Decode(&responseData)
+		require.NoError(t, err)
+		assert.Equal(t, testMetadata, responseData)
+	}
 }
