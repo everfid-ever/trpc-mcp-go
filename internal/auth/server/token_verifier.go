@@ -47,60 +47,60 @@ type TokenVerifierInterface interface {
 	VerifyAccessToken(ctx context.Context, token string) (AuthInfo, error)
 }
 
-// LocalJWKSConfig local JWKS configuration
+// LocalJWKSConfig 本地 JWKS 配置
 type LocalJWKSConfig struct {
-	JWKS string // Local JWKS JSON string
-	File string // Local JWKS file path
+	JWKS string // 本地 JWKS JSON 字符串
+	File string // 本地 JWKS 文件路径
 }
 
-// RemoteJWKSConfig remote JWKS configuration
+// RemoteJWKSConfig 远程 JWKS 配置
 type RemoteJWKSConfig struct {
-	URLs            []string          // Remote JWKS URLs
-	IssuerToURL     map[string]string // Mapping from issuer (iss) to remote URL
-	RefreshInterval time.Duration     // Refresh interval
+	URLs            []string          // 远程 JWKS URLs
+	IssuerToURL     map[string]string // iss 到远程 URL 的映射
+	RefreshInterval time.Duration     // 刷新间隔
 }
 
-// TokenVerifierConfig configuration for TokenVerifier
+// TokenVerifierConfig TokenVerifier 的配置
 type TokenVerifierConfig struct {
-	Local         *LocalJWKSConfig     // Local JWKS configuration
-	Remote        *RemoteJWKSConfig    // Remote JWKS configuration
-	Introspection *IntrospectionConfig // Remote introspection configuration (RFC7662)
+	Local         *LocalJWKSConfig     // 本地 JWKS 配置
+	Remote        *RemoteJWKSConfig    // 远程 JWKS 配置
+	Introspection *IntrospectionConfig // 远程 introspection 配置（RFC7662）
 }
 
-// IntrospectionCredentials client credentials for introspection
+// IntrospectionCredentials introspection 客户端凭据
 type IntrospectionCredentials struct {
 	ClientID     string
 	ClientSecret string
 }
 
-// IntrospectionConfig remote introspection configuration
+// IntrospectionConfig 远程 introspection 配置
 type IntrospectionConfig struct {
-	// Default introspection endpoint (optional). Used when no issuer-bound endpoint is found.
+	// 默认 introspection 端点（可选）。当找不到与 issuer 绑定的端点时使用。
 	Endpoint string
-	// Endpoint selection by issuer (multi-tenant).
+	// 根据 issuer 选择不同端点（多租户）。
 	IssuerToEndpoint map[string]string
 
-	// Default credentials and per-issuer credentials (optional).
+	// 默认凭据以及每个 issuer 的凭据（可选）。
 	DefaultCredentials *IntrospectionCredentials
 	IssuerCredentials  map[string]IntrospectionCredentials
 
-	// HTTP timeout
+	// HTTP 超时
 	Timeout time.Duration
 
-	// Cache TTL (positive) and negative cache TTL (for inactive tokens or 4xx/401, etc.).
+	// 缓存 TTL（正向）与负缓存 TTL（inactive 或 4xx/401 等）。
 	CacheTTL         time.Duration
 	NegativeCacheTTL time.Duration
 
-	// Whether to fall back to introspection on JWT verification failure.
+	// 当 JWT 验签失败时是否回退到 introspection。
 	UseOnJWTFail bool
 }
 
-// TokenVerifier holds verification configuration and helpers
+// TokenVerifier 结构体
 type TokenVerifier struct {
-	localKeySet jwk.Set           // Local JWKS key set
-	cache       *jwk.Cache        // Remote JWKS cache (jwx v2)
-	issuerToURL map[string]string // Mapping from issuer (iss) to remote URL
-	isRemote    bool              // Whether remote JWKS mode is enabled
+	localKeySet jwk.Set           // iss 到本地 jwk.Set 的映射
+	cache       *jwk.Cache        // 远程 JWKS 缓存（jwx v2）
+	issuerToURL map[string]string // iss 到远程 URL 的映射
+	isRemote    bool              // 是否使用远程模式
 
 	// RFC7662 introspection
 	introspectionEnabled   bool
@@ -111,7 +111,7 @@ type TokenVerifier struct {
 	issuerCreds            map[string]IntrospectionCredentials
 	useIntrospectionOnFail bool
 
-	// Simple in-memory cache
+	// 简单内存缓存
 	introspectCache   map[string]introspectionCacheEntry
 	introspectCacheMu sync.RWMutex
 	cacheTTL          time.Duration
@@ -124,13 +124,13 @@ func (f TokenVerifierFunc) VerifyAccessToken(ctx context.Context, token string) 
 	return f(ctx, token)
 }
 
-// NewLocalTokenVerifier creates a TokenVerifier that uses only local JWKS
-func newLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVerifier, error) {
+// NewLocalTokenVerifier 创建仅使用本地 JWKS 的 TokenVerifier
+func NewLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVerifier, error) {
 	verifier := &TokenVerifier{}
 
 	defaultSet := jwk.NewSet()
 
-	// Load JWKS from string
+	// 加载 JWKS 字符串
 	if cfg.JWKS != "" {
 		set, err := jwk.Parse([]byte(cfg.JWKS))
 		if err != nil {
@@ -142,7 +142,7 @@ func newLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVeri
 		}
 	}
 
-	// Load JWKS from file
+	// 加载 JWKS 文件
 	if cfg.File != "" {
 		set, err := jwk.ReadFile(cfg.File)
 		if err != nil {
@@ -162,13 +162,13 @@ func newLocalTokenVerifier(ctx context.Context, cfg LocalJWKSConfig) (*TokenVeri
 	return verifier, nil
 }
 
-// NewRemoteTokenVerifier creates a TokenVerifier that uses only remote JWKS
-func newRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVerifier, error) {
+// NewRemoteTokenVerifier 创建仅使用远程 JWKS 的 TokenVerifier
+func NewRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVerifier, error) {
 	if len(cfg.URLs) == 0 {
 		return nil, fmt.Errorf("must provide at least one RemoteURL")
 	}
 
-	// jwx v2 cache
+	// jwx v2 缓存
 	cache := jwk.NewCache(ctx)
 	for _, url_ := range cfg.URLs {
 		_ = cache.Register(url_)
@@ -190,64 +190,21 @@ func newRemoteTokenVerifier(ctx context.Context, cfg RemoteJWKSConfig) (*TokenVe
 	}, nil
 }
 
-// NewIntrospectionTokenVerifier creates a TokenVerifier that uses only RFC7662 introspection
-func newIntrospectionTokenVerifier(ctx context.Context, cfg IntrospectionConfig) (*TokenVerifier, error) {
-	verifier := &TokenVerifier{}
-
-	to := cfg.Timeout
-	if to <= 0 {
-		to = 5 * time.Second
-	}
-	verifier.httpClient = &http.Client{Timeout: to}
-	verifier.defaultIntrospectEP = cfg.Endpoint
-	// Copy IssuerToEndpoint
-	if cfg.IssuerToEndpoint != nil {
-		verifier.issuerToIntrospectEP = make(map[string]string, len(cfg.IssuerToEndpoint))
-		for k, v := range cfg.IssuerToEndpoint {
-			verifier.issuerToIntrospectEP[k] = v
-		}
-	}
-	// Copy DefaultCredentials
-	if cfg.DefaultCredentials != nil {
-		dc := *cfg.DefaultCredentials
-		verifier.defaultCreds = &dc
-	}
-	// Copy IssuerCredentials
-	if cfg.IssuerCredentials != nil {
-		verifier.issuerCreds = make(map[string]IntrospectionCredentials, len(cfg.IssuerCredentials))
-		for k, v := range cfg.IssuerCredentials {
-			verifier.issuerCreds[k] = v
-		}
-	}
-	verifier.useIntrospectionOnFail = cfg.UseOnJWTFail
-	verifier.cacheTTL = cfg.CacheTTL
-	if verifier.cacheTTL <= 0 {
-		verifier.cacheTTL = 60 * time.Second
-	}
-	verifier.negativeCacheTTL = cfg.NegativeCacheTTL
-	if verifier.negativeCacheTTL <= 0 {
-		verifier.negativeCacheTTL = 15 * time.Second
-	}
-	verifier.introspectionEnabled = true
-	verifier.introspectCache = make(map[string]introspectionCacheEntry)
-	return verifier, nil
-}
-
-// NewTokenVerifier creates a comprehensive TokenVerifier.
-// Provide any one or more configurations. The SDK will automatically prefer Local → Remote → Introspection (if enabled).
+// NewTokenVerifier 创建综合 TokenVerifier
+// 只需提供一种或多种配置即可工作。SDK 将自动按“本地 → 远程 → introspection（如启用）
 func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerifier, error) {
 	var verifier *TokenVerifier
 	var err error
 
 	if cfg.Remote != nil && len(cfg.Remote.URLs) > 0 {
-		verifier, err = newRemoteTokenVerifier(ctx, *cfg.Remote)
+		verifier, err = NewRemoteTokenVerifier(ctx, *cfg.Remote)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	if cfg.Local != nil && (cfg.Local.JWKS != "" || cfg.Local.File != "") {
-		localVerifier, err := newLocalTokenVerifier(ctx, *cfg.Local)
+		localVerifier, err := NewLocalTokenVerifier(ctx, *cfg.Local)
 		if err != nil {
 			return nil, err
 		}
@@ -260,14 +217,15 @@ func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerif
 	}
 
 	if verifier == nil {
-		// If no JWKS is provided, allow constructing an introspection-only mode
+		// 若未提供 JWKS，则允许构建“仅 introspection”模式
 		if cfg.Introspection != nil {
-			return newIntrospectionTokenVerifier(ctx, *cfg.Introspection)
+			verifier = &TokenVerifier{}
+		} else {
+			return nil, errors.New("no verification method configured: configure Local JWKS (Local), or Remote JWKS (Remote), or Introspection")
 		}
-		return nil, errors.New("no verification method configured: configure Local JWKS (Local), or Remote JWKS (Remote), or Introspection")
 	}
 
-	// Initialize introspection (optional)
+	// 初始化 introspection（可选）
 	if cfg.Introspection != nil {
 		to := cfg.Introspection.Timeout
 		if to <= 0 {
@@ -275,19 +233,19 @@ func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerif
 		}
 		verifier.httpClient = &http.Client{Timeout: to}
 		verifier.defaultIntrospectEP = cfg.Introspection.Endpoint
-		// Copy IssuerToEndpoint to avoid external mutations
+		// 复制 IssuerToEndpoint，防止外部后续修改
 		if cfg.Introspection.IssuerToEndpoint != nil {
 			verifier.issuerToIntrospectEP = make(map[string]string, len(cfg.Introspection.IssuerToEndpoint))
 			for k, v := range cfg.Introspection.IssuerToEndpoint {
 				verifier.issuerToIntrospectEP[k] = v
 			}
 		}
-		// Copy DefaultCredentials
+		// 复制 DefaultCredentials
 		if cfg.Introspection.DefaultCredentials != nil {
 			dc := *cfg.Introspection.DefaultCredentials
 			verifier.defaultCreds = &dc
 		}
-		// Copy IssuerCredentials
+		// 复制 IssuerCredentials
 		if cfg.Introspection.IssuerCredentials != nil {
 			verifier.issuerCreds = make(map[string]IntrospectionCredentials, len(cfg.Introspection.IssuerCredentials))
 			for k, v := range cfg.Introspection.IssuerCredentials {
@@ -307,14 +265,14 @@ func NewTokenVerifier(ctx context.Context, cfg TokenVerifierConfig) (*TokenVerif
 		verifier.introspectCache = make(map[string]introspectionCacheEntry)
 	}
 
-	// Do not set an explicit "mode"; choose dynamically during Verify based on configuration
+	// 不设置显式“模式”，在 Verify 阶段按配置动态选择
 
 	return verifier, nil
 }
 
-// VerifyAccessToken verifies an access token and returns AuthInfo or error
+// VerifyAccessToken 验证 JWT token，返回解析后的 token 或错误
 func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) (AuthInfo, error) {
-	// If no JWKS configured and introspection is enabled: directly use introspection (works for opaque/JWT)
+	// 未配置任何 JWKS 且启用 introspection：直接走 introspection（兼容 opaque/JWT）
 	if v.localKeySet == nil && !v.isRemote && v.introspectionEnabled {
 		ai, err := v.introspectAccessToken(ctx, tokenStr, "")
 		if err != nil {
@@ -323,7 +281,7 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 		return ai, nil
 	}
 
-	// Parse token first (without verifying signature) to obtain iss; if parsing fails and introspection is enabled, try introspection directly (supports opaque tokens).
+	// 先解析 token（不验证签名）以获取 iss；若失败且启用 introspection，则直接尝试 introspection（支持 opaque token）。
 	unverifiedToken, err := jwt.ParseInsecure([]byte(tokenStr))
 	if err != nil {
 		if v.introspectionEnabled {
@@ -334,16 +292,16 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "malformed token: cannot parse header/payload; if you are using opaque tokens, enable Introspection", "")
 	}
 
-	// Extract issuer (iss)
+	// 获取 iss
 	iss := unverifiedToken.Issuer()
 	if iss == "" {
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing issuer (iss) in token", "")
 	}
 
-	// Extract kid from JWS header
+	// 从 JWS Header 中获取 kid
 	kid, err := extractKIDFromHeader(tokenStr)
 	if err != nil || kid == "" {
-		// Try introspection fallback
+		// 尝试 introspection 回退
 		if v.introspectionEnabled && v.useIntrospectionOnFail {
 			if ai, ierr := v.introspectAccessToken(ctx, tokenStr, iss); ierr == nil {
 				return ai, nil
@@ -352,25 +310,25 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing key id (kid) in JWS header; if your tokens omit kid, ensure the JWKS only contains one key or use Introspection fallback", "")
 	}
 
-	// Try to obtain target keySet
+	// 尝试获取目标 keySet
 	keySet, err := v.getTargetKeySet(ctx, iss, kid)
 	if err != nil {
 		return AuthInfo{}, err
 	}
 
-	// Validate token with key set and basic claims, allowing time skew
+	// 验证 token,包括基本验证并配置时间验证偏差
 	token, err := jwt.Parse([]byte(tokenStr),
 		jwt.WithKeySet(keySet),
 		jwt.WithValidate(true),
 		jwt.WithAcceptableSkew(30*time.Second),
-		// RFC 9068: exp and iat are validated automatically; here we only require presence for other claims
+		// rfc 9068,对于exp、iat会自动验证合法性，其他此处只验证存在性
 		jwt.WithRequiredClaim("exp"),
 		jwt.WithRequiredClaim("aud"),
 		jwt.WithRequiredClaim("sub"),
 		jwt.WithRequiredClaim("iat"),
 	)
 	if err != nil || token == nil {
-		// On JWT signature/claims validation failure, optionally fall back to introspection
+		// JWT 验签失败，策略化回退到 introspection（若启用）
 		if v.introspectionEnabled && v.useIntrospectionOnFail {
 			if ai, ierr := v.introspectAccessToken(ctx, tokenStr, iss); ierr == nil {
 				return ai, nil
@@ -379,7 +337,7 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "signature validation failed or claims invalid; ensure JWKS is configured for issuer or enable Introspection fallback", "")
 	}
 
-	// Ensure non-empty subject
+	// 校验sub字段非空
 	if sub := token.Subject(); sub == "" {
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing required 'sub' claim", "")
 	}
@@ -392,14 +350,14 @@ func (v *TokenVerifier) VerifyAccessToken(ctx context.Context, tokenStr string) 
 }
 
 func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (jwk.Set, error) {
-	// Prefer local JWKS
+	// 优先尝试本地 JWKS
 	if v.localKeySet != nil {
 		if _, ok := v.localKeySet.LookupKeyID(kid); ok {
 			return v.localKeySet, nil
 		}
 	}
 
-	// If remote mode enabled, try remote JWKS
+	// 如果是远程模式，尝试远程 JWKS
 	if v.isRemote {
 		if url_, ok := v.issuerToURL[iss]; ok {
 			if v.cache != nil {
@@ -426,7 +384,7 @@ func (v *TokenVerifier) getTargetKeySet(ctx context.Context, iss, kid string) (j
 	return nil, fmt.Errorf("no JWKS found for issuer %s: neither Local nor Remote key set available", iss)
 }
 
-// ---- RFC7662 introspection implementation ----
+// ---- RFC7662 introspection 实现 ----
 
 type introspectionCacheEntry struct {
 	authInfo  AuthInfo
@@ -657,7 +615,7 @@ func extractResourceFromIntrospection(audRaw interface{}) (*url.URL, error) {
 		if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
 			continue
 		}
-		u.Fragment = "" // Remove fragment (per RFC 8707)
+		u.Fragment = ""
 		return u, nil
 	}
 	return nil, nil
@@ -674,7 +632,7 @@ func extractKIDFromHeader(tokenStr string) (string, error) {
 		return "", errors.New("no signatures found in JWS")
 	}
 
-	// Prefer protected headers
+	// 优先从受保护头读取
 	if ph := sigs[0].ProtectedHeaders(); ph != nil {
 		if v, ok := ph.Get(jws.KeyIDKey); ok {
 			if kid, ok2 := v.(string); ok2 && kid != "" {
@@ -689,17 +647,17 @@ func extractKIDFromHeader(tokenStr string) (string, error) {
 func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (AuthInfo, error) {
 	authInfo := AuthInfo{Token: tokenStr}
 
-	// Write exp -> ExpiresAt (must be done first)
+	// 写入 exp -> ExpiresAt （一定要在最前面做）
 	if exp := token.Expiration(); !exp.IsZero() {
 		ts := exp.Unix()
 		authInfo.ExpiresAt = &ts
 	} else {
-		// This case should not be reached because WithRequiredClaim("exp") was used in Parse
-		// But for robustness, return invalid_token for clarity
+		// 正常不会走到这里，因为上面 Parse 时用了 WithRequiredClaim("exp")
+		// 但为了健壮性，返回 invalid_token 更清晰
 		return AuthInfo{}, oauthErrors.NewOAuthError(oauthErrors.ErrInvalidToken, "missing exp claim", "")
 	}
 
-	// Extract OAuth-related fields
+	// 提取 OAuth 字段
 	var err error
 	if authInfo.ClientID, err = extractClientID(token); err != nil {
 		return AuthInfo{}, err
@@ -711,12 +669,12 @@ func (v *TokenVerifier) convertJWTToAuthInfo(token jwt.Token, tokenStr string) (
 		return AuthInfo{}, err
 	}
 
-	// Write subject -> AuthInfo.Subject
+	// 写入 subject -> AuthInfo.Subject
 	if s := token.Subject(); s != "" {
 		authInfo.Subject = s
 	}
 
-	// Other custom claims
+	// 其他自定义声明
 	authInfo.Extra = extractExtra(token)
 	return authInfo, nil
 }
@@ -793,8 +751,8 @@ func extractResource(token jwt.Token) (*url.URL, error) {
 		return nil, fmt.Errorf("missing required 'aud' claim")
 	}
 
-	// Iterate to find the first value that looks like a URL and is parseable as HTTP(S);
-	// if none are URLs, return nil to indicate no resource indicator provided.
+	// 遍历查找第一个看起来像 URL 并且可解析为 HTTP(S) 的值；
+	// 若都不是 URL，则返回 nil，表示未提供资源指示器。
 	for _, candidate := range aud {
 		if candidate == "" {
 			continue
@@ -810,7 +768,7 @@ func extractResource(token jwt.Token) (*url.URL, error) {
 		if resourceURL.Scheme == "" || resourceURL.Host == "" {
 			continue
 		}
-		resourceURL.Fragment = "" // Remove fragment (per RFC 8707)
+		resourceURL.Fragment = "" // 移除哈希片段（符合 RFC 8707）
 		return resourceURL, nil
 	}
 	return nil, nil
@@ -830,7 +788,7 @@ func extractExtra(token jwt.Token) map[string]interface{} {
 		}
 		switch key {
 		case "active", "username", "token_type", "token_type_hint":
-			// Known noise in introspection/JWT contexts; exclude from Extra
+			// known noise in introspection/JWT contexts; exclude from Extra
 			continue
 		default:
 			extra[key] = value
@@ -842,4 +800,4 @@ func extractExtra(token jwt.Token) map[string]interface{} {
 	return extra
 }
 
-// Note: TokenVerifier is statically configured. After initialization, it does not support dynamically adding issuer mappings or clearing the local KeySet.
+// 注意：TokenVerifier 为静态配置。初始化后不支持动态添加 issuer 映射或清空本地 KeySet。

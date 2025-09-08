@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
@@ -37,7 +36,7 @@ type RevocationRateLimitConfig struct {
 // RevocationHandler creates a handler for OAuth token revocation with client authentication middleware
 func RevocationHandler(opts RevocationHandlerOptions) http.Handler {
 	// Check if provider supports token revocation
-	if opts.Provider == nil {
+	if opts.Provider.RevokeToken == nil {
 		panic("Auth provider does not support revoking tokens")
 	}
 

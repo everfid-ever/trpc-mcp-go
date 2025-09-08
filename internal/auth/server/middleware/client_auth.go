@@ -30,14 +30,9 @@ type ClientAuthenticationMiddlewareOptions struct {
 	ResolveClientIDFromRefreshToken func(refreshToken string) (clientID string, ok bool)
 }
 
-// ClientAuthenticatedRequest represents the request schema for client authentication.
-// It is typically used when exchanging credentials at the token endpoint.
+// ClientAuthenticatedRequest represents the request schema for client authentication
 type ClientAuthenticatedRequest struct {
-	// ClientID is the unique identifier issued to the client during registration.
-	ClientID string `json:"client_id"`
-
-	// ClientSecret is the client’s secret credential.
-	// It may be omitted when using public clients or PKCE-only flows.
+	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret,omitempty"`
 }
 

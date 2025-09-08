@@ -13,19 +13,19 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
+	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth"
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
-	"trpc.group/trpc-go/trpc-mcp-go/internal/errors"
 )
 
 const (
-	defaultClientSecretExpirySeconds = 30 * 24 * 60 * 60 // 30 days
-	defaultRateLimitWindowMs         = 60 * 60 * 1000    // 1 hour
-	DefaultRateLimitMax              = 20                // 20 requests per hour
+	DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS = 30 * 24 * 60 * 60 // 30 days
+	DEFAULT_RATE_LIMIT_WINDOW_MS         = 60 * 60 * 1000    // 1 hour
+	DEFAULT_RATE_LIMIT_MAX               = 20                // 20 requests per hour
 )
 
 // ClientRegistrationHandlerOptions configuration for client registration handler
@@ -58,8 +58,8 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 	rateLimitConfig := options.RateLimit
 	if rateLimitConfig == nil {
 		rateLimitConfig = &RegisterRateLimitConfig{
-			WindowMs: defaultRateLimitWindowMs,
-			Max:      DefaultRateLimitMax,
+			WindowMs: DEFAULT_RATE_LIMIT_WINDOW_MS,
+			Max:      DEFAULT_RATE_LIMIT_MAX,
 		}
 	}
 
@@ -78,7 +78,7 @@ func ClientRegistrationHandler(options ClientRegistrationHandlerOptions) http.Ha
 		})
 	}
 
-	clientSecretExpirySeconds := defaultClientSecretExpirySeconds
+	clientSecretExpirySeconds := DEFAULT_CLIENT_SECRET_EXPIRY_SECONDS
 	if options.ClientSecretExpirySeconds != nil {
 		clientSecretExpirySeconds = *options.ClientSecretExpirySeconds
 	}

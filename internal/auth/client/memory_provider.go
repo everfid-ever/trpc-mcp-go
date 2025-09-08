@@ -20,10 +20,6 @@ import (
 
 // InMemoryOAuthClientProvider provides an in-memory implementation of OAuthClientProvider
 // It stores client information, tokens, and PKCE code verifiers with thread safety
-//
-// NOTE: This is a demo implementation for testing and development purposes only.
-// It is NOT recommended for production use as it stores sensitive data in memory
-// without persistence or proper security measures.
 type InMemoryOAuthClientProvider struct {
 	redirectURL    string
 	clientMetadata auth.OAuthClientMetadata

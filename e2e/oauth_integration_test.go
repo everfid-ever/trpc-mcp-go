@@ -67,8 +67,6 @@ func TestOAuth2Integration(t *testing.T) {
 
 // startMockOAuthServer starts a mock OAuth authorization server for testing
 func startMockOAuthServer(t *testing.T) *httptest.Server {
-	t.Helper()
-
 	mux := http.NewServeMux()
 
 	// Authorization endpoint
@@ -131,7 +129,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(tokenResponse)
+		json.NewEncoder(w).Encode(tokenResponse)
 	})
 
 	// Client registration endpoint
@@ -150,7 +148,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(clientInfo)
+		json.NewEncoder(w).Encode(clientInfo)
 	})
 
 	// OAuth authorization server metadata endpoint
@@ -175,7 +173,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(metadata)
+		json.NewEncoder(w).Encode(metadata)
 	})
 
 	// OpenID Connect configuration endpoint (for compatibility)
@@ -201,7 +199,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(metadata)
+		json.NewEncoder(w).Encode(metadata)
 	})
 
 	server := httptest.NewServer(mux)
@@ -240,9 +238,7 @@ func createTestOAuthProvider(oauthServerURL string) server.OAuthServerProvider {
 
 // startOAuthMCPServer starts an MCP server with OAuth authentication enabled
 func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (string, func()) {
-	t.Helper()
-
-	// Create MCP server using standardized approach
+	// Create MCP server
 	server := mcp.NewServer(
 		"OAuth-Test-Server",
 		"1.0.0",
@@ -268,7 +264,7 @@ func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (str
 		}),
 	)
 
-	// Register test tools using standardized approach
+	// Register test tools
 	RegisterTestTools(server)
 
 	// Create HTTP test server
@@ -285,86 +281,35 @@ func startOAuthMCPServer(t *testing.T, provider server.OAuthServerProvider) (str
 	return serverURL, cleanup
 }
 
-// testBearerTokenAuth tests Bearer Token authentication using standardized approach
-func testBearerTokenAuth(t *testing.T, oauthServerURL, mcpServerURL string) {
-	t.Helper()
+// startCallbackServer starts a callback server to handle OAuth authorization codes
+func startCallbackServer(t *testing.T) *httptest.Server {
+	mux := http.NewServeMux()
 
-	// Create client directly with a valid JWT Token
-	validToken := createTestJWT(t, "access_token")
+	// Callback endpoint
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("Callback received: %s", r.URL.RawQuery)
 
-	// Create HTTP headers with Bearer Token
-	headers := make(http.Header)
-	headers.Set("Authorization", "Bearer "+validToken)
-
-	// Use standardized client creation
-	client := CreateTestClient(t, mcpServerURL, func(c *mcp.Client) {
-		// Apply OAuth headers
-		mcp.WithHTTPHeaders(headers)(c)
-	})
-	defer CleanupClient(t, client)
-
-	// Initialize client using standardized approach
-	InitializeClient(t, client)
-
-	// Test tool invocation using standardized approach
-	content := ExecuteTestTool(t, client, "basic-greet", map[string]interface{}{
-		"name": "bearer-test",
+		// Return success page
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`
+			<html>
+				<head><title>Authorization Successful</title></head>
+				<body>
+					<h1>Authorization Successful</h1>
+					<p>You can close this window now.</p>
+				</body>
+			</html>
+		`))
 	})
 
-	require.Len(t, content, 1)
-	textContent, ok := content[0].(mcp.TextContent)
-	assert.True(t, ok)
-	assert.Contains(t, textContent.Text, "Hello, bearer-test")
-}
-
-// testInvalidToken tests invalid token handling using standardized approach
-func testInvalidToken(t *testing.T, mcpServerURL string) {
-	t.Helper()
-
-	// Create client with invalid token
-	invalidToken := "invalid.jwt.token"
-
-	// Create HTTP headers with invalid Bearer Token
-	headers := make(http.Header)
-	headers.Set("Authorization", "Bearer "+invalidToken)
-
-	// Use standardized client creation
-	client := CreateTestClient(t, mcpServerURL, func(c *mcp.Client) {
-		// Apply OAuth headers
-		mcp.WithHTTPHeaders(headers)(c)
-	})
-	defer CleanupClient(t, client)
-
-	// Try to initialize client, should fail
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
-	defer cancel()
-
-	_, err := client.Initialize(ctx, &mcp.InitializeRequest{
-		Params: mcp.InitializeParams{
-			ProtocolVersion: mcp.ProtocolVersion_2025_03_26,
-			ClientInfo: mcp.Implementation{
-				Name:    "Invalid-Token-Client",
-				Version: "1.0.0",
-			},
-		},
-	})
-
-	// Should return authentication error
-	assert.Error(t, err)
-	// Check if it contains authentication-related error message
-	errorMsg := err.Error()
-	assert.True(t,
-		strings.Contains(errorMsg, "unauthorized") ||
-			strings.Contains(errorMsg, "401") ||
-			strings.Contains(errorMsg, "authentication") ||
-			strings.Contains(errorMsg, "auth"),
-		"Expected authentication error, got: %s", errorMsg)
+	server := httptest.NewServer(mux)
+	t.Logf("Callback server started at: %s", server.URL)
+	return server
 }
 
 // testSimpleAuthorizationCodeFlow tests the simplified authorization code flow
 func testSimpleAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL string) {
-	t.Helper()
-
 	// Test authorization endpoint functionality
 	t.Run("AuthorizationEndpoint", func(t *testing.T) {
 		// Start a simple callback server
@@ -454,10 +399,117 @@ func testSimpleAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL 
 	})
 }
 
+// testAuthorizationCodeFlow tests the complete authorization code flow
+func testAuthorizationCodeFlow(t *testing.T, oauthServerURL, mcpServerURL string) {
+	// Start callback server
+	callbackServer := startCallbackServer(t)
+	defer callbackServer.Close()
+
+	// Create client with OAuth authentication
+	authFlow := mcp.AuthFlowConfig{
+		ServerURL: oauthServerURL,
+		ClientMetadata: auth.OAuthClientMetadata{
+			ClientName:              stringPtr("test-client"),
+			GrantTypes:              []string{"authorization_code", "refresh_token"},
+			TokenEndpointAuthMethod: "client_secret_post",
+			RedirectURIs:            []string{callbackServer.URL + "/callback"},
+			Scope:                   stringPtr(testScope),
+		},
+		ResourceMetadataURL: stringPtr(mcpServerURL + "/.well-known/oauth-protected-resource"),
+		RedirectURL:         callbackServer.URL + "/callback",
+		Scope:               stringPtr(testScope),
+		OnRedirect: func(u *url.URL) error {
+			t.Logf("Authorization redirect: %s", u.String())
+			// Simulate user clicking authorization link by directly accessing the authorization URL
+			resp, err := http.Get(u.String())
+			if err != nil {
+				return fmt.Errorf("failed to access authorization URL: %w", err)
+			}
+			resp.Body.Close()
+			return nil
+		},
+	}
+
+	client, err := mcp.NewClient(
+		mcpServerURL,
+		mcp.Implementation{Name: "OAuth-Test-Client", Version: "1.0.0"},
+		mcp.WithAuthFlow(authFlow),
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	// Initialize client (this triggers OAuth flow)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	initResult, err := client.Initialize(ctx, &mcp.InitializeRequest{
+		Params: mcp.InitializeParams{
+			ProtocolVersion: mcp.ProtocolVersion_2025_03_26,
+			ClientInfo: mcp.Implementation{
+				Name:    "OAuth-Test-Client",
+				Version: "1.0.0",
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, mcp.ProtocolVersion_2025_03_26, initResult.ProtocolVersion)
+
+	// Test calling authenticated tools
+	content := ExecuteTestTool(t, client, "basic-greet", map[string]interface{}{
+		"name": "oauth-test",
+	})
+
+	require.Len(t, content, 1)
+	textContent, ok := content[0].(mcp.TextContent)
+	assert.True(t, ok)
+	assert.Contains(t, textContent.Text, "Hello, oauth-test")
+}
+
+// testBearerTokenAuth tests Bearer Token authentication
+func testBearerTokenAuth(t *testing.T, oauthServerURL, mcpServerURL string) {
+	// Create client directly with a valid JWT Token
+	validToken := createTestJWT(t, "access_token")
+
+	// Create HTTP headers with Bearer Token
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+validToken)
+
+	client, err := mcp.NewClient(
+		mcpServerURL,
+		mcp.Implementation{Name: "Bearer-Test-Client", Version: "1.0.0"},
+		mcp.WithHTTPHeaders(headers), // Use WithHTTPHeaders to set Authorization header
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	// Initialize client
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = client.Initialize(ctx, &mcp.InitializeRequest{
+		Params: mcp.InitializeParams{
+			ProtocolVersion: mcp.ProtocolVersion_2025_03_26,
+			ClientInfo: mcp.Implementation{
+				Name:    "Bearer-Test-Client",
+				Version: "1.0.0",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Test tool invocation
+	content := ExecuteTestTool(t, client, "basic-greet", map[string]interface{}{
+		"name": "bearer-test",
+	})
+
+	require.Len(t, content, 1)
+	textContent, ok := content[0].(mcp.TextContent)
+	assert.True(t, ok)
+	assert.Contains(t, textContent.Text, "Hello, bearer-test")
+}
+
 // testTokenRefresh tests token refresh functionality
 func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
-	t.Helper()
-
 	// Create a client with a refresh token
 	refreshToken := "test-refresh-token-" + fmt.Sprintf("%d", time.Now().Unix())
 
@@ -526,19 +578,34 @@ func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
 		newAccessToken, ok := tokenResp["access_token"].(string)
 		require.True(t, ok)
 
-		// Create client with new access token using standardized approach
+		// Create client with new access token
 		headers := make(http.Header)
 		headers.Set("Authorization", "Bearer "+newAccessToken)
 
-		client := CreateTestClient(t, mcpServerURL, func(c *mcp.Client) {
-			mcp.WithHTTPHeaders(headers)(c)
+		client, err := mcp.NewClient(
+			mcpServerURL,
+			mcp.Implementation{Name: "Refresh-Test-Client", Version: "1.0.0"},
+			mcp.WithHTTPHeaders(headers),
+		)
+		require.NoError(t, err)
+		defer client.Close()
+
+		// Test using new token for tool calls
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err = client.Initialize(ctx, &mcp.InitializeRequest{
+			Params: mcp.InitializeParams{
+				ProtocolVersion: mcp.ProtocolVersion_2025_03_26,
+				ClientInfo: mcp.Implementation{
+					Name:    "Refresh-Test-Client",
+					Version: "1.0.0",
+				},
+			},
 		})
-		defer CleanupClient(t, client)
+		require.NoError(t, err)
 
-		// Initialize client using standardized approach
-		InitializeClient(t, client)
-
-		// Test tool invocation using standardized approach
+		// Test tool invocation
 		content := ExecuteTestTool(t, client, "basic-greet", map[string]interface{}{
 			"name": "refresh-test",
 		})
@@ -569,10 +636,51 @@ func testTokenRefresh(t *testing.T, oauthServerURL, mcpServerURL string) {
 	})
 }
 
+// testInvalidToken tests invalid token handling
+func testInvalidToken(t *testing.T, mcpServerURL string) {
+	// Create client with invalid token
+	invalidToken := "invalid.jwt.token"
+
+	// Create HTTP headers with invalid Bearer Token
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+invalidToken)
+
+	client, err := mcp.NewClient(
+		mcpServerURL,
+		mcp.Implementation{Name: "Invalid-Token-Client", Version: "1.0.0"},
+		mcp.WithHTTPHeaders(headers), // Use WithHTTPHeaders to set Authorization header
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	// Try to initialize client, should fail
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = client.Initialize(ctx, &mcp.InitializeRequest{
+		Params: mcp.InitializeParams{
+			ProtocolVersion: mcp.ProtocolVersion_2025_03_26,
+			ClientInfo: mcp.Implementation{
+				Name:    "Invalid-Token-Client",
+				Version: "1.0.0",
+			},
+		},
+	})
+
+	// Should return authentication error
+	assert.Error(t, err)
+	// Check if it contains authentication-related error message
+	errorMsg := err.Error()
+	assert.True(t,
+		strings.Contains(errorMsg, "unauthorized") ||
+			strings.Contains(errorMsg, "401") ||
+			strings.Contains(errorMsg, "authentication") ||
+			strings.Contains(errorMsg, "auth"),
+		"Expected authentication error, got: %s", errorMsg)
+}
+
 // createTokenResponse creates a test token response with JWT access token
 func createTokenResponse(t *testing.T, accessToken, refreshToken string) map[string]interface{} {
-	t.Helper()
-
 	return map[string]interface{}{
 		"access_token":  createTestJWT(t, accessToken),
 		"refresh_token": refreshToken,
@@ -584,8 +692,6 @@ func createTokenResponse(t *testing.T, accessToken, refreshToken string) map[str
 
 // createTestJWT creates a test JWT token with specified token type
 func createTestJWT(t *testing.T, tokenType string) string {
-	t.Helper()
-
 	claims := jwt.MapClaims{
 		"iss":        "http://localhost:3030",
 		"aud":        []string{"http://localhost:3000"},

@@ -9,7 +9,6 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
-
 	"trpc.group/trpc-go/trpc-mcp-go/internal/auth/server/middleware"
 )
 
