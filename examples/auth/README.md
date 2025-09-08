@@ -26,6 +26,7 @@ This example demonstrates how to use **trpc-mcp-go** to implement an OAuth 2.1 a
 cd server
 go run main.go
 ```
+
 - Runs a mock OAuth 2.1 server on `http://localhost:3030`
 - Starts an MCP server with OAuth-protected endpoints on `http://localhost:3000/mcp`
 
