@@ -131,7 +131,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(tokenResponse)
+		_ = json.NewEncoder(w).Encode(tokenResponse)
 	})
 
 	// Client registration endpoint
@@ -150,7 +150,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(clientInfo)
+		_ = json.NewEncoder(w).Encode(clientInfo)
 	})
 
 	// OAuth authorization server metadata endpoint
@@ -175,7 +175,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(metadata)
+		_ = json.NewEncoder(w).Encode(metadata)
 	})
 
 	// OpenID Connect configuration endpoint (for compatibility)
@@ -201,7 +201,7 @@ func startMockOAuthServer(t *testing.T) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(metadata)
+		_ = json.NewEncoder(w).Encode(metadata)
 	})
 
 	server := httptest.NewServer(mux)
