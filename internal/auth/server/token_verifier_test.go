@@ -151,7 +151,7 @@ func TestNewLocalTokenVerifier_WithJWKSString(t *testing.T) {
 		JWKS: jwksJSON,
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	assert.NoError(t, err)
 	assert.NotNil(t, verifier)
 	assert.NotNil(t, verifier.localKeySet)
@@ -176,7 +176,7 @@ func TestNewLocalTokenVerifier_WithFile(t *testing.T) {
 		File: tmpFile.Name(),
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	assert.NoError(t, err)
 	assert.NotNil(t, verifier)
 	assert.Equal(t, 1, verifier.localKeySet.Len())
@@ -208,7 +208,7 @@ func TestNewLocalTokenVerifier_WithBothJWKSAndFile(t *testing.T) {
 		File: tmpFile.Name(),
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	assert.NoError(t, err)
 	assert.NotNil(t, verifier)
 	assert.Equal(t, 2, verifier.localKeySet.Len()) // Should have both keys
@@ -218,7 +218,7 @@ func TestNewLocalTokenVerifier_EmptyConfig(t *testing.T) {
 	ctx := context.Background()
 	cfg := LocalJWKSConfig{}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	assert.Error(t, err)
 	assert.Nil(t, verifier)
 	assert.Contains(t, err.Error(), "must provide JWKS or File")
@@ -230,7 +230,7 @@ func TestNewLocalTokenVerifier_InvalidJWKS(t *testing.T) {
 		JWKS: "invalid-json",
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	assert.Error(t, err)
 	assert.Nil(t, verifier)
 	assert.Contains(t, err.Error(), "failed to parse local JWKS")
@@ -257,7 +257,7 @@ func TestNewRemoteTokenVerifier_Success(t *testing.T) {
 		RefreshInterval: time.Minute,
 	}
 
-	verifier, err := NewRemoteTokenVerifier(ctx, cfg)
+	verifier, err := newRemoteTokenVerifier(ctx, cfg)
 	assert.NoError(t, err)
 	assert.NotNil(t, verifier)
 	assert.True(t, verifier.isRemote)
@@ -269,7 +269,7 @@ func TestNewRemoteTokenVerifier_EmptyURLs(t *testing.T) {
 	ctx := context.Background()
 	cfg := RemoteJWKSConfig{}
 
-	verifier, err := NewRemoteTokenVerifier(ctx, cfg)
+	verifier, err := newRemoteTokenVerifier(ctx, cfg)
 	assert.Error(t, err)
 	assert.Nil(t, verifier)
 	assert.Contains(t, err.Error(), "must provide at least one RemoteURL")
@@ -290,7 +290,7 @@ func TestNewRemoteTokenVerifier_DefaultRefreshInterval(t *testing.T) {
 		// RefreshInterval is 0, should use default (60 minutes)
 	}
 
-	verifier, err := NewRemoteTokenVerifier(ctx, cfg)
+	verifier, err := newRemoteTokenVerifier(ctx, cfg)
 	assert.NoError(t, err)
 	assert.NotNil(t, verifier)
 }
@@ -374,7 +374,7 @@ func TestVerifyAccessToken_LocalSuccess(t *testing.T) {
 		JWKS: jwksJSON,
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	require.NoError(t, err)
 
 	// Create valid token
@@ -401,7 +401,7 @@ func TestVerifyAccessToken_InvalidToken(t *testing.T) {
 		JWKS: jwksJSON,
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	require.NoError(t, err)
 
 	authInfo, err := verifier.VerifyAccessToken(ctx, "invalid-token")
@@ -417,7 +417,7 @@ func TestVerifyAccessToken_ExpiredToken(t *testing.T) {
 		JWKS: jwksJSON,
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	require.NoError(t, err)
 
 	// Create expired token
@@ -456,7 +456,7 @@ func TestVerifyAccessToken_MissingRequiredClaims(t *testing.T) {
 		JWKS: jwksJSON,
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	require.NoError(t, err)
 
 	// Create token missing required claims
@@ -487,7 +487,7 @@ func TestVerifyAccessToken_NoMatchingKey(t *testing.T) {
 		JWKS: jwksJSON,
 	}
 
-	verifier, err := NewLocalTokenVerifier(ctx, cfg)
+	verifier, err := newLocalTokenVerifier(ctx, cfg)
 	require.NoError(t, err)
 
 	// Create token with different key ID
@@ -613,7 +613,7 @@ func TestVerifyAccessToken_RemoteJWKS(t *testing.T) {
 		},
 	}
 
-	verifier, err := NewRemoteTokenVerifier(ctx, cfg)
+	verifier, err := newRemoteTokenVerifier(ctx, cfg)
 	require.NoError(t, err)
 
 	// Create valid token
@@ -752,7 +752,7 @@ func TestVerifyAccessToken_RemoteJWKS_KeyRotation_RefreshOnKidMiss(t *testing.T)
 		RefreshInterval: time.Minute,
 	}
 
-	verifier, err := NewRemoteTokenVerifier(ctx, cfg)
+	verifier, err := newRemoteTokenVerifier(ctx, cfg)
 	require.NoError(t, err)
 
 	// Token signed by new key (kid=new-key). First cache lookup sees old JWKS
